@@ -113,6 +113,9 @@ private:
     // Whether to use rdma or not
     bool _use_rdma;
 
+    // Whether to use ub or not
+    bool _use_ub;
+
     // Acceptor belongs to this tag
     bthread_tag_t _bthread_tag;
 };

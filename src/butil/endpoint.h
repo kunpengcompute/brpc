@@ -140,7 +140,7 @@ int tcp_connect(const EndPoint& server, int* self_port, int connect_timeout_ms);
 // To enable SO_REUSEADDR for the whole program, enable gflag -reuse_addr
 // To enable SO_REUSEPORT for the whole program, enable gflag -reuse_port
 // Returns the socket descriptor, -1 otherwise and errno is set.
-int tcp_listen(EndPoint ip_and_port);
+int tcp_listen(EndPoint ip_and_port, bool use_ub=false);
 
 // Get the local end of a socket connection
 int get_local_side(int fd, EndPoint *out);

@@ -287,6 +287,7 @@ struct SocketOptions {
     // Tag of this socket
     bthread_tag_t bthread_tag{bthread_self_tag()};
     HealthCheckOption hc_option;
+    bool use_ub{false};
 };
 
 // Abstractions on reading from and writing into file descriptors.
@@ -980,6 +981,7 @@ private:
 
     HttpMethod _http_request_method;
     HealthCheckOption _hc_option;
+    bool _use_ub;
 };
 
 } // namespace brpc

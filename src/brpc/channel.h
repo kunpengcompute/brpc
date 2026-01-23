@@ -148,6 +148,10 @@ struct ChannelOptions {
     // Its priority is higher than FLAGS_health_check_path and FLAGS_health_check_timeout_ms.
     // When it is not set, FLAGS_health_check_path and FLAGS_health_check_timeout_ms will take effect.
     HealthCheckOption hc_option;
+
+    // Let this channel use ub rather than tcp.
+    // Default: false
+    bool use_ub;
 private:
     // SSLOptions is large and not often used, allocate it on heap to
     // prevent ChannelOptions from being bloated in most cases.

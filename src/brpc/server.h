@@ -292,6 +292,10 @@ struct ServerOptions {
     // [CUATION] You should not enabling this option if your rpc is heavy-loaded.
     bool ignore_eovercrowded;
 
+    // Whether the server uses ub or not
+    // Default: false
+    bool use_ub;
+
 private:
     // SSLOptions is large and not often used, allocate it on heap to
     // prevent ServerOptions from being bloated in most cases.

@@ -756,6 +756,7 @@ int Socket::OnCreated(const SocketOptions& options) {
     _ssl_state = (options.initial_ssl_ctx == NULL ? SSL_OFF : SSL_UNKNOWN);
     _ssl_session = NULL;
     _ssl_ctx = options.initial_ssl_ctx;
+    _use_ub = options.use_ub;
 #if BRPC_WITH_RDMA
     CHECK(_rdma_ep == NULL);
     if (options.use_rdma) {
@@ -1288,7 +1289,11 @@ int Socket::Connect(const timespec* abstime,
         PLOG(ERROR) << "Fail to get sockaddr";
         return -1;
     }
-    butil::fd_guard sockfd(socket(serv_addr.ss_family, SOCK_STREAM, 0));
+    int sa_family = serv_addr.ss_family;
+    if (_use_ub) {
+        sa_family = AF_SMC;
+    }
+    butil::fd_guard sockfd(socket(sa_family, SOCK_STREAM, 0));
     if (sockfd < 0) {
         PLOG(ERROR) << "Fail to create socket";
         return -1;

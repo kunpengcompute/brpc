@@ -65,6 +65,7 @@ ChannelOptions::ChannelOptions()
     , backup_request_policy(NULL)
     , retry_policy(NULL)
     , ns_filter(NULL)
+    , use_ub(false)
 {}
 
 ChannelSSLOptions* ChannelOptions::mutable_ssl_options() {
@@ -369,7 +370,7 @@ int Channel::InitSingle(const butil::EndPoint& server_addr_and_port,
         return -1;
     }
     if (SocketMapInsert(SocketMapKey(server_addr_and_port, sig),
-                        &_server_id, ssl_ctx, _options.use_rdma, _options.hc_option) != 0) {
+                        &_server_id, ssl_ctx, _options.use_rdma, _options.hc_option, _options.use_ub) != 0) {
         LOG(ERROR) << "Fail to insert into SocketMap";
         return -1;
     }
