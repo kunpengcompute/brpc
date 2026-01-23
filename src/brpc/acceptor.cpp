@@ -94,6 +94,7 @@ int Acceptor::StartAccept(int listened_fd, int idle_timeout_sec,
     options.user = this;
     options.bthread_tag = _bthread_tag;
     options.on_edge_triggered_events = OnNewConnections;
+    options.use_ub = _use_ub;
     if (Socket::Create(options, &_acception_id) != 0) {
         // Close-idle-socket thread will be stopped inside destructor
         LOG(FATAL) << "Fail to create _acception_id";

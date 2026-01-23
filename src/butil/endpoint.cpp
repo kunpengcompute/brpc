@@ -536,13 +536,17 @@ int tcp_connect(const EndPoint& server, int* self_port, int connect_timeout_ms) 
     return sockfd.release();
 }
 
-int tcp_listen(EndPoint point) {
+int tcp_listen(EndPoint point, bool use_ub) {
     struct sockaddr_storage serv_addr;
     socklen_t serv_addr_size = 0;
     if (endpoint2sockaddr(point, &serv_addr, &serv_addr_size) != 0) {
         return -1;
     }
-    fd_guard sockfd(socket(serv_addr.ss_family, SOCK_STREAM, 0));
+    int sa_family = serv_addr.ss_family;
+    if (use_ub) {
+        sa_family = AF_SMC;
+    }
+    fd_guard sockfd(socket(sa_family, SOCK_STREAM, 0));
     if (sockfd < 0) {
         return -1;
     }

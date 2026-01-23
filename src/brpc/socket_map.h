@@ -82,7 +82,8 @@ struct SocketMapKeyHasher {
 int SocketMapInsert(const SocketMapKey& key, SocketId* id,
                     const std::shared_ptr<SocketSSLContext>& ssl_ctx,
                     bool use_rdma,
-                    const HealthCheckOption& hc_option);
+                    const HealthCheckOption& hc_option,
+                    bool use_ub=false);
 
 inline int SocketMapInsert(const SocketMapKey& key, SocketId* id,
                     const std::shared_ptr<SocketSSLContext>& ssl_ctx) {
@@ -155,7 +156,8 @@ public:
     int Insert(const SocketMapKey& key, SocketId* id,
                const std::shared_ptr<SocketSSLContext>& ssl_ctx,
                bool use_rdma,
-               const HealthCheckOption& hc_option);
+               const HealthCheckOption& hc_option,
+               bool use_ub=false);
 
     int Insert(const SocketMapKey& key, SocketId* id,
                const std::shared_ptr<SocketSSLContext>& ssl_ctx) {

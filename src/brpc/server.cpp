@@ -153,7 +153,8 @@ ServerOptions::ServerOptions()
     , redis_service(NULL)
     , bthread_tag(BTHREAD_TAG_DEFAULT)
     , rpc_pb_message_factory(NULL)
-    , ignore_eovercrowded(false) {
+    , ignore_eovercrowded(false)
+    , use_ub(false) {
     if (s_ncore > 0) {
         num_threads = s_ncore + 1;
     }
@@ -1140,7 +1141,7 @@ int Server::StartInternal(const butil::EndPoint& endpoint,
     _listen_addr = endpoint;
     for (int port = port_range.min_port; port <= port_range.max_port; ++port) {
         _listen_addr.port = port;
-        butil::fd_guard sockfd(tcp_listen(_listen_addr));
+        butil::fd_guard sockfd(tcp_listen(_listen_addr, _options.use_ub));
         if (sockfd < 0) {
             if (port != port_range.max_port) { // not the last port, try next
                 continue;
@@ -1171,6 +1172,7 @@ int Server::StartInternal(const butil::EndPoint& endpoint,
             }
             _am->_use_rdma = _options.use_rdma;
             _am->_bthread_tag = _options.bthread_tag;
+            _am->_use_ub = _options.use_ub;
         }
         // Set `_status' to RUNNING before accepting connections
         // to prevent requests being rejected as ELOGOFF
