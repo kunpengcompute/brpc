@@ -101,6 +101,7 @@
 #endif
 #include "butil/fd_guard.h"
 #include "butil/files/file_watcher.h"
+#include "brpc_context.h"
 
 extern "C" {
 // defined in gperftools/malloc_extension_c.h
@@ -115,6 +116,25 @@ DEFINE_int32(free_memory_to_system_interval, 0,
              "Try to return free memory to system every so many seconds, "
              "values <= 0 disables this feature");
 BRPC_VALIDATE_GFLAG(free_memory_to_system_interval, PassValidate);
+
+DEFINE_string(ubsocket_trans_mode, "", "Transport mode for ubsocket (e.g., 'ub', 'ib')");
+DEFINE_string(ubsocket_dev_name, "", "Device name for ubsocket (e.g., 'udma2', 'bonding_dev_0')");
+DEFINE_string(ubsocket_dev_ip, "", "Device ip for ubsocket");
+DEFINE_string(ubsocket_eid_idx, "", "Normal device eid idx for ubsocket, necessary while using ub. Obtained by querying with the 'urma_admin show' command");
+DEFINE_string(ubsocket_src_eid, "", "Bonding device eid idx for ubsocket, necessary while using ub. Obtained by querying with the 'urma_admin show' command");
+DEFINE_string(ubsocket_log_level, "", "Log level for ubsocket (e.g., 'err', 'warn', 'notice', 'info', 'debug')");
+DEFINE_string(ubsocket_log_use_printf, "", "Whether to print the logs to the foreground for ubsocket (e.g., 'false', 'true')");
+DEFINE_string(ubsocket_tx_depth, "", "Send queue depth, the minimum value is 2. The upper limit of the setting is determined by the actual machine environment, based on the value of 'max_jfc_depth' in the command 'urma_admin show --whole'.");
+DEFINE_string(ubsocket_rx_depth, "", "Receive queue depth, the minimum value is 2. The upper limit of the setting is determined by the actual machine environment, based on the value of 'max_jfc_depth' in the command 'urma_admin show --whole'.");
+DEFINE_string(ubsocket_block_type, "", "Minimum fragment of the memory pool for ubsocket (e.g., 'default'(8k), 'small'(16k), 'medium'(32k), 'large'(64k))");
+DEFINE_string(ubsocket_pool_initial_size, "", "Total size of IO memory for ubsocket, in MB");
+DEFINE_string(ubsocket_ub_force, "", "Whether to force the use of the UB protocol to accelerate TCP (e.g., 'false', 'true')");
+DEFINE_string(ubsocket_schedule_policy, "", "Set the multi-plane load balancing policy (e.g., 'affinity', 'rr')");
+DEFINE_string(ubsocket_readv_unlimited, "", "Whether to enable the readv reporting limit for ubsocket (e.g., 'false', 'true')");
+DEFINE_string(ubsocket_use_polling, "", "Whether to enable message processing polling for ubsocket (e.g., 'false', 'true')");
+DEFINE_string(ubsocket_brpc_alloc_sym, "", "The global pointer symbol information of butil::iobuf::blockmem_allocate in the brpc component");
+DEFINE_string(ubsocket_brpc_dealloc_sym, "", "The global pointer symbol information of butil::iobuf::blockmem_deallocate in the brpc component");
+DEFINE_string(ubsocket_adpt_stats, "", "Count statistics for ubsocket (e.g., 'false', 'true')");
 
 namespace policy {
 // Defined in http_rpc_protocol.cpp
@@ -323,12 +343,77 @@ static void BaiduStreamingLogHandler(google::protobuf::LogLevel level,
 }
 #endif
 
+static void SetUbSocketEnv() {
+    if (getenv("LD_PRELOAD") != nullptr) {
+        return;
+    }
+
+    if (!FLAGS_ubsocket_trans_mode.empty()) {
+        ::setenv("RPC_ADPT_TRANS_MODE", FLAGS_ubsocket_trans_mode.c_str(), 1);
+    }
+    if (!FLAGS_ubsocket_dev_name.empty()) {
+        ::setenv("RPC_ADPT_DEV_NAME", FLAGS_ubsocket_dev_name.c_str(), 1);
+    }
+    if (!FLAGS_ubsocket_dev_ip.empty()) {
+        ::setenv("RPC_ADPT_DEV_IP", FLAGS_ubsocket_dev_ip.c_str(), 1);
+    }
+    if (!FLAGS_ubsocket_eid_idx.empty()) {
+        ::setenv("RPC_ADPT_EID_IDX", FLAGS_ubsocket_eid_idx.c_str(), 1);
+    }
+    if (!FLAGS_ubsocket_src_eid.empty()) {
+        ::setenv("RPC_ADPT_SRC_EID", FLAGS_ubsocket_src_eid.c_str(), 1);
+    }
+    if (!FLAGS_ubsocket_log_level.empty()) {
+        ::setenv("RPC_ADPT_LOG_LEVEL", FLAGS_ubsocket_log_level.c_str(), 1);
+    }
+    if (!FLAGS_ubsocket_log_use_printf.empty()) {
+        ::setenv("RPC_ADPT_LOG_USE_PRINTF", FLAGS_ubsocket_log_use_printf.c_str(), 1);
+    }
+    if (!FLAGS_ubsocket_tx_depth.empty()) {
+        ::setenv("RPC_ADPT_TX_DEPTH", FLAGS_ubsocket_tx_depth.c_str(), 1);
+    }
+    if (!FLAGS_ubsocket_rx_depth.empty()) {
+        ::setenv("RPC_ADPT_RX_DEPTH", FLAGS_ubsocket_rx_depth.c_str(), 1);
+    }
+    if (!FLAGS_ubsocket_block_type.empty()) {
+        ::setenv("RPC_ADPT_BLOCK_TYPE", FLAGS_ubsocket_block_type.c_str(), 1);
+    }
+    if (!FLAGS_ubsocket_pool_initial_size.empty()) {
+        ::setenv("RPC_ADPT_POOL_INITIAL_SIZE", FLAGS_ubsocket_pool_initial_size.c_str(), 1);
+    }
+    if (!FLAGS_ubsocket_ub_force.empty()) {
+        ::setenv("RPC_ADPT_UB_FORCE", FLAGS_ubsocket_ub_force.c_str(), 1);
+    }
+    if (!FLAGS_ubsocket_schedule_policy.empty()) {
+        ::setenv("RPC_SCHEDULE_POLICY", FLAGS_ubsocket_schedule_policy.c_str(), 1);
+    }
+    if (!FLAGS_ubsocket_readv_unlimited.empty()) {
+        ::setenv("RPC_ADPT_READV_UNLIMITED", FLAGS_ubsocket_readv_unlimited.c_str(), 1);
+    }
+    if (!FLAGS_ubsocket_use_polling.empty()) {
+        ::setenv("RPC_ADPT_USE_POLLING", FLAGS_ubsocket_use_polling.c_str(), 1);
+    }
+    if (!FLAGS_ubsocket_brpc_alloc_sym.empty()) {
+        ::setenv("RPC_ADPT_BRPC_ALLOC_SYM", FLAGS_ubsocket_brpc_alloc_sym.c_str(), 1);
+    }
+    if (!FLAGS_ubsocket_brpc_dealloc_sym.empty()) {
+        ::setenv("RPC_ADPT_BRPC_DEALLOC_SYM", FLAGS_ubsocket_brpc_dealloc_sym.c_str(), 1);
+    }
+    if (!FLAGS_ubsocket_adpt_stats.empty()) {
+        ::setenv("RPC_ADPT_STATS", FLAGS_ubsocket_adpt_stats.c_str(), 1);
+    }
+
+    (void)Brpc::Context::GetContext();
+}
+
 static void GlobalInitializeOrDieImpl() {
     //////////////////////////////////////////////////////////////////
     // Be careful about usages of gflags inside this function which //
     // may be called before main() only seeing gflags with default  //
     // values even if the gflags will be set after main().          //
     //////////////////////////////////////////////////////////////////
+
+    SetUbSocketEnv();
 
     // Ignore SIGPIPE.
     struct sigaction oldact;
