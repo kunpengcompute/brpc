@@ -19,7 +19,7 @@ workspace(name = "com_github_brpc_brpc")
 
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 load("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository")
-
+load("@bazel_tools//tools/build_defs/repo:local.bzl", "new_local_repository")
 #
 # Constants
 #
@@ -43,6 +43,13 @@ RULES_PROTO_SHA256 = "66bfdf8782796239d3875d37e7de19b1d94301e8972b3cbd2446b33242
 RULES_CC_COMMIT_ID = "0913abc3be0edff60af681c0473518f51fb9eeef"  # 2021-08-12T14:14:28Z
 
 RULES_CC_SHA256 = "04d22a8c6f0caab1466ff9ae8577dbd12a0c7d0bc468425b75de094ec68ab4f9"
+
+
+
+
+
+
+
 
 #
 # Starlark libraries
@@ -91,12 +98,24 @@ http_archive(
 
 http_archive(
     name = "rules_perl",  # 2021-09-23T03:21:58Z
-    sha256 = "55fbe071971772758ad669615fc9aac9b126db6ae45909f0f36de499f6201dd3",
-    strip_prefix = "rules_perl-2f4f36f454375e678e81e5ca465d4d497c5c02da",
+    sha256 = "4128dc22e438e81b7d9491841d7209d7169635294693a4ed8f760e5a720a88ad",
+    strip_prefix = "rules_perl-0.5.0",
     urls = [
-        "https://github.com/bazelbuild/rules_perl/archive/2f4f36f454375e678e81e5ca465d4d497c5c02da.tar.gz",
+        "https://github.com/bazel-contrib/rules_perl/archive/refs/tags/0.5.0.tar.gz",
     ],
 )
+
+http_archive(
+    name = "rules_pkg",  # 2021-09-23T03:21:58Z
+    urls = [
+        "https://mirror.bazel.build/github.com/bazelbuild/rules_pkg/releases/download/0.9.1/rules_pkg-0.9.1.tar.gz","https://github.com/bazelbuild/rules_pkg/releases/download/0.9.1/rules_pkg-0.9.1.tar.gz",
+    ],
+    sha256 = "8f9ee2dc10c1ae514ee599a8b42ed99fa262b757058f65ad3c384289ff70c4b8",
+)
+
+load("@rules_pkg//:deps.bzl","rules_pkg_dependencies")
+rules_pkg_dependencies()
+
 
 # Use rules_foreign_cc as fewer as possible.
 #
@@ -222,9 +241,9 @@ Set-Content BUILD.boost -Value $content -Encoding UTF8
 
 http_archive(
     name = "com_google_absl",  # 2021-09-27T18:06:52Z
-    sha256 = "2f0d9c7bc770f32bda06a9548f537b63602987d5a173791485151aba28a90099",
-    strip_prefix = "abseil-cpp-7143e49e74857a009e16c51f6076eb197b6ccb49",
-    urls = ["https://github.com/abseil/abseil-cpp/archive/7143e49e74857a009e16c51f6076eb197b6ccb49.zip"],
+    sha256 = "f50e5ac311a81382da7fa75b97310e4b9006474f9560ac46f54a9967f07d4ae3",
+    strip_prefix = "abseil-cpp-20240722.0",
+    urls = ["https://github.com/abseil/abseil-cpp/archive/refs/tags/20240722.0.tar.gz"],
 )
 
 http_archive(
@@ -234,24 +253,32 @@ http_archive(
     urls = ["https://github.com/google/googletest/archive/8d51ffdfab10b3fba636ae69bc03da4b54f8c235.zip"],
 )
 
+load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+http_archive(
+    name = "zlib",  # 这个名称必须与 protobuf 查找的名称匹配（通常是 "zlib"）
+    build_file = "@com_google_protobuf//:third_party/zlib.BUILD",  # 使用 protobuf 提供的 BUILD 文件
+    sha256 = "9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23",  # 请使用你下载版本的 SHA256
+    strip_prefix = "zlib-1.3.1",  # 解压后的目录名（根据实际压缩包调整）
+    urls = [
+        # 国内镜像源
+        "https://mirrors.tencent.com/zlib/zlib-1.3.1.tar.gz",
+        "https://mirrors.aliyun.com/zlib/zlib-1.3.1.tar.gz",
+        "https://mirrors.ustc.edu.cn/zlib/zlib-1.3.1.tar.gz",
+        # 备用官方源
+        "https://zlib.net/zlib-1.3.1.tar.gz",
+    ],
+)
+
+
 http_archive(
     name = "com_google_protobuf",  # 2021-10-29T00:04:02Z
-    build_file = "//bazel/third_party/protobuf:protobuf.BUILD",
-    patch_cmds = [
-        "sed -i protobuf.bzl -re '4,4d;417,508d'",
-    ],
-    patch_cmds_win = [
-        """$content = Get-Content 'protobuf.bzl' | Where-Object {
-    -not ($_.ReadCount -ne 4) -and
-    -not ($_.ReadCount -ge 418 -and $_.ReadCount -le 509)
-}
-Set-Content protobuf.bzl -Value $content -Encoding UTF8
-""",
-    ],
-    sha256 = "87407cd28e7a9c95d9f61a098a53cf031109d451a7763e7dd1253abf8b4df422",
-    strip_prefix = "protobuf-3.19.1",
-    urls = ["https://github.com/protocolbuffers/protobuf/archive/refs/tags/v3.19.1.tar.gz"],
+    sha256 = "f645e6e42745ce922ca5388b1883ca583bafe4366cc74cf35c3c9299005136e2",
+    strip_prefix = "protobuf-5.28.3",
+    urls = ["https://github.com/protocolbuffers/protobuf/archive/refs/tags/v5.28.3.zip"],
 )
+
+
 
 http_archive(
     name = "openssl",  # 2021-12-14T15:45:01Z
@@ -270,6 +297,26 @@ git_repository(
     commit = "0e6b86549db4c888666512295c3ebd4fa2a402f5", # fips-20210429
     remote = "https://github.com/google/boringssl",
 )
+
+new_local_repository(
+	name = "urma",
+	path = "/usr",
+	build_file = "//3rdparty/urma:BUILD.bazel",
+)
+
+git_repository(
+	name = "libboundscheck",
+	remote = "https://atomgit.com/openeuler/libboundscheck.git",
+	branch = "master",
+	build_file="//3rdparty/boundscheck:BUILD.bazel",
+)
+
+git_repository(
+	name = "ubsocket",
+	remote = "https://atomgit.com/openeuler/ubs-comm",
+	commit = "4be43781",
+)
+
 
 http_archive(
     name = "org_apache_thrift",  # 2021-09-11T11:54:01Z
