@@ -1,0 +1,17 @@
+# third_party/libboundscheck.BUILD
+cc_library(
+    name = "boundscheck",
+    srcs = glob([
+        "src/**/*.c",
+        "src/**/*.cpp",
+    ]),
+    hdrs = glob([
+        "include/**/*.h",
+        "src/**/*.h",
+        "**/*.inl",
+    ]),
+    includes = ["include"],  # 如果头文件在include目录下
+    linkstatic = True,  # 关键参数：指示生成静态库
+    alwayslink = 1,     # 关键参数：强制包含所有符号
+    visibility = ["//visibility:public"],
+)
