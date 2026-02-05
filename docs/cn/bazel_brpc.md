@@ -22,13 +22,15 @@ ubsocket_auto_fallback_tcp|	协议不匹配时是否自动降级为TCP|0：协�
 ## 2：bazel编译
 - 安装基础软件
 执行以下命令安装各步骤所需要的基础软件。
-```$ yum install gcc-toolset-14-* zip vim tar unzip cmake make -y
+```
+$ yum install gcc-toolset-14-* zip vim tar unzip cmake make -y
 $ yum install patchelf perl hdf5-devel -y
 $ yum install python python3-pip python3-devel wget git -y
 $ yum install automake libtool -y
 ```
 安装完成后，需配置gcc相关的环境变量，并确认gcc是否正确安装
-```$ export PATH=/opt/openEuler/gcc-toolset-14/root/usr/bin/:$PATH
+```
+$ export PATH=/opt/openEuler/gcc-toolset-14/root/usr/bin/:$PATH
 $ export LD_LIBRARY_PATH=/opt/openEuler/gcc-toolset-14/root/usr/lib64/:$LD_LIBRARY_PATH
 $ # 通过gcc -v确认gcc是否正确安装，预期显示"gcc version 14.x.x"
 $ gcc -v
