@@ -314,7 +314,7 @@ git_repository(
 git_repository(
 	name = "ubsocket",
 	remote = "https://atomgit.com/openeuler/ubs-comm",
-	commit = "4be43781",
+	commit = "e777df86",
 )
 
 
