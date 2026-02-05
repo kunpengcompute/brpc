@@ -76,7 +76,6 @@ cc_binary(
     deps = [
         ":cc_echo_c++_proto",
         "//:brpc",
-	"@ubsocket//src:ubsocket",
     ],
 )
 
