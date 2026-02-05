@@ -135,6 +135,7 @@ DEFINE_string(ubsocket_use_polling, "", "Whether to enable message processing po
 DEFINE_string(ubsocket_brpc_alloc_sym, "", "The global pointer symbol information of butil::iobuf::blockmem_allocate in the brpc component");
 DEFINE_string(ubsocket_brpc_dealloc_sym, "", "The global pointer symbol information of butil::iobuf::blockmem_deallocate in the brpc component");
 DEFINE_string(ubsocket_adpt_stats, "", "Count statistics for ubsocket (e.g., 'false', 'true')");
+DEFINE_string(ubsocket_auto_fallback_tcp, "", "Whether to automatically downgrade TCP when the protocols do not match (e.g., 'false', 'true')");
 
 namespace policy {
 // Defined in http_rpc_protocol.cpp
@@ -401,6 +402,10 @@ static void SetUbSocketEnv() {
     }
     if (!FLAGS_ubsocket_adpt_stats.empty()) {
         ::setenv("RPC_ADPT_STATS", FLAGS_ubsocket_adpt_stats.c_str(), 1);
+    }
+
+    if (!FLAGS_ubsocket_auto_fallback_tcp.empty()) {
+        ::setenv("RPC_AUTO_FALLBACK_TCP", FLAGS_ubsocket_auto_fallback_tcp.c_str(), 1);
     }
 
     (void)Brpc::Context::GetContext();

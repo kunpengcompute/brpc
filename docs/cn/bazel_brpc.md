@@ -4,18 +4,20 @@
 
 | 名称 | 含义 | 取值范围 | 默认值 | 必填 |
 |--|--|--|--|--|
-| ubsocket_trans_mode | 通信协议 |ub，ib  | ub | 是 |
-ubsocket_dev_name|设备名称|根据实际场景填写设备名称；例如，udma2或者bonding_dev_0|NA|普通设备—是，bonding设备—否
-ubsocket_eid_idx|使用普通设备的eid编号|ub协议下，通过urma_admin show命令查询获得|0|普通设备—是，bonding设备—否
+| ubsocket_trans_mode | 通信协议 |ub，ib  | ub | 否 |
+ubsocket_dev_name|设备名称|根据实际场景填写设备名称；例如，udma2或者bonding_dev_0|主动获得当前环境bonding设备名称，如bonding_dev_xx|否
+ubsocket_eid_idx|使用普通设备的eid编号|ub协议下，通过urma_admin show命令查询获得|0|否
+ubsocket_src_eid|使用bonding设备的eid|ub协议下，通过urma_admin show命令查询获得|主动获得当前环境bonding设备的eid|否
 ubsocket_log_level|日志级别|emerg，alert，crit，err，warn，notice，info，debug|info|否
 ubsocket_log_use_printf|是否将日志打印到前台|0，1|0|否
 ubsocket_tx_depth|发送队列深度|最小值是2，设置上限由实际机器环境决定（根据命令urma_admin show --whole中max_jfc_depth与max_jfs_depth两者的最小值）|1024|否
 ubsocket_rx_depth|接受队列深度|最小值是2，设置上限由实际机器环境决定（根据命令urma_admin show --whole中max_jfc_depth与max_jfr_depth两者的最小值）|1024|否
 ubsocket_readv_unlimited|是否打开readv上报限制|false，true|true|否
-ubsocket_block_type|内存池的最小分片|default，small，medium，large|default|否
+ubsocket_block_type|内存池的最小分片|default，large|default|否
 ubsocket_pool_initial_size|IO内存的总大小，单位MB|应用按需配置|1024|否
 ubsocket_ub_force|是否强制使用UB协议加速TCP|0：不强制用UB加速TCP 1：强制用UB加速TCP|0|否
 ubsocket_schedule_policy|设置多平面负载分担策略|affinity，rr|affinity|否
+ubsocket_auto_fallback_tcp|	协议不匹配时是否自动降级为TCP|0：协议不匹配时不降级为TCP 1：协议不匹配时自动降级为TCP|1|否
 
 ## 2：bazel编译
 - 安装基础软件
