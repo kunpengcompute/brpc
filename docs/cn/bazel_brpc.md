@@ -50,6 +50,12 @@ $ git checkout br_noncom_ub_20251215
 ```
 - 执行编译
 bazel支持自动检测依赖变化，能够实现高效的增量编译，建议直接编译可执行文件。如可通过如下命令，编译brpc示例中的echo_c++。
+>说明：如果配置代理，需要配置https协议对应的证书。  
+>例：在根目录下vim  .bazelrc,在最下面加上如下配置  
+>startup --host_jvm_args=-Djavax.net.ssl.trustStore=/etc/ssl/certs/java/   (证书路径)   
+>startup --host_jvm_args=-Djavax.net.ssl.trustStorePassword=changeit  
+>startup --host_jvm_args=-DBAZEL_TRACK_SOURCE_DIRECTORIES=1
+
 ```
 $ cd  brpc  #在根目录下执行编译命令
 $ bazel build //example:echo_c++_server  # 编译服务端，编译产物在 brpc/bazel-bin/example
