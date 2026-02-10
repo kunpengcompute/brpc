@@ -48,7 +48,20 @@ $ cp bazel-7.4.1-linux-arm64 /usr/local/bin/bazel
 $ git clone https://gitcode.com/fanzhaonan/brpc.git
 $ git checkout br_noncom_ub_20251215
 ```
-- 执行编译
+
+### 如何修改版本tag
+在brpc根目录的WORKSPACE中找到ubsocket依赖，如下：
+```
+ git_repository(
+ 	 	name = "ubsocket",
+ 	 	remote = "https://atomgit.com/openeuler/ubs-comm",
+ 	 	commit = "c8076b68d5b27cd5f0ef5a98ede765e06130d6e4",
+ 	 )
+     
+```
+>说明：修改commit值（切换版本后，提交记录左边有最新commit值，显示简版8位字符串，详细40位，想要对应版本，修改对应提交的commit值即可）
+
+### 执行编译   
 bazel支持自动检测依赖变化，能够实现高效的增量编译，建议直接编译可执行文件。如可通过如下命令，编译brpc示例中的echo_c++。
 >说明：如果配置代理，需要配置https协议对应的证书。  
 >例：在根目录下vim  .bazelrc,在最下面加上如下配置  
@@ -61,6 +74,9 @@ $ cd  brpc  #在根目录下执行编译命令
 $ bazel build //example:echo_c++_server  # 编译服务端，编译产物在 brpc/bazel-bin/example
 $ bazel build //example:echo_c++_client  # 编译客户端，编译产物在 brpc/bazel-bin/example
 ```
+>说明：  
+>在bazel编译的时候 后面添加--compilation_mode=opt（或简写-c opt），可以自动设置高级别的编译器优化选项（如-O2），能够提高性能，适合发布版本场景
+
 当然，也可以根据需要仅编译出libbrpc.a，后续在用该静态库编译可执行文件。
 ```
 $ cd  brpc  #在根目录下执行编译命令
@@ -83,15 +99,3 @@ $ ./echo_c++_client --server=141.61.85.60:8000  --ubsocket_log_use_printf=1 --ub
 >说明：参数根据具体服务器配置进行调整，参数详情参考上面gflags参数。
 >
 >启动命令不添加ubsocket_ub_force 参数，需要在client.cpp和server.cpp源码main方法中，添加“options.use_ub = FLAGS_use_ub;"
-
-# 如何修改版本tag
-在brpc根目录的WORKSPACE中找到ubsocket依赖，如下：
-```
- git_repository(
- 	 	name = "ubsocket",
- 	 	remote = "https://atomgit.com/openeuler/ubs-comm",
- 	 	commit = "c8076b68d5b27cd5f0ef5a98ede765e06130d6e4",
- 	 )
-     
-```
-修改commit值（切换版本后，提交记录左边有最新commit值，显示简版8位字符串，想要对应版本，修改对应提交的commit值即可）
