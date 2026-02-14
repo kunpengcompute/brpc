@@ -350,62 +350,62 @@ static void SetUbSocketEnv() {
     }
 
     if (!FLAGS_ubsocket_trans_mode.empty()) {
-        ::setenv("RPC_ADPT_TRANS_MODE", FLAGS_ubsocket_trans_mode.c_str(), 1);
+        ::setenv("UBSOCKET_TRANS_MODE", FLAGS_ubsocket_trans_mode.c_str(), 1);
     }
     if (!FLAGS_ubsocket_dev_name.empty()) {
-        ::setenv("RPC_ADPT_DEV_NAME", FLAGS_ubsocket_dev_name.c_str(), 1);
+        ::setenv("UBSOCKET_DEV_NAME", FLAGS_ubsocket_dev_name.c_str(), 1);
     }
     if (!FLAGS_ubsocket_dev_ip.empty()) {
-        ::setenv("RPC_ADPT_DEV_IP", FLAGS_ubsocket_dev_ip.c_str(), 1);
+        ::setenv("UBSOCKET_DEV_IP", FLAGS_ubsocket_dev_ip.c_str(), 1);
     }
     if (!FLAGS_ubsocket_eid_idx.empty()) {
-        ::setenv("RPC_ADPT_EID_IDX", FLAGS_ubsocket_eid_idx.c_str(), 1);
+        ::setenv("UBSOCKET_EID_IDX", FLAGS_ubsocket_eid_idx.c_str(), 1);
     }
     if (!FLAGS_ubsocket_src_eid.empty()) {
-        ::setenv("RPC_ADPT_SRC_EID", FLAGS_ubsocket_src_eid.c_str(), 1);
+        ::setenv("UBSOCKET_SRC_EID", FLAGS_ubsocket_src_eid.c_str(), 1);
     }
     if (!FLAGS_ubsocket_log_level.empty()) {
-        ::setenv("RPC_ADPT_LOG_LEVEL", FLAGS_ubsocket_log_level.c_str(), 1);
+        ::setenv("UBSOCKET_LOG_LEVEL", FLAGS_ubsocket_log_level.c_str(), 1);
     }
     if (!FLAGS_ubsocket_log_use_printf.empty()) {
-        ::setenv("RPC_ADPT_LOG_USE_PRINTF", FLAGS_ubsocket_log_use_printf.c_str(), 1);
+        ::setenv("UBSOCKET_LOG_USE_PRINTF", FLAGS_ubsocket_log_use_printf.c_str(), 1);
     }
     if (!FLAGS_ubsocket_tx_depth.empty()) {
-        ::setenv("RPC_ADPT_TX_DEPTH", FLAGS_ubsocket_tx_depth.c_str(), 1);
+        ::setenv("UBSOCKET_TX_DEPTH", FLAGS_ubsocket_tx_depth.c_str(), 1);
     }
     if (!FLAGS_ubsocket_rx_depth.empty()) {
-        ::setenv("RPC_ADPT_RX_DEPTH", FLAGS_ubsocket_rx_depth.c_str(), 1);
+        ::setenv("UBSOCKET_RX_DEPTH", FLAGS_ubsocket_rx_depth.c_str(), 1);
     }
     if (!FLAGS_ubsocket_block_type.empty()) {
-        ::setenv("RPC_ADPT_BLOCK_TYPE", FLAGS_ubsocket_block_type.c_str(), 1);
+        ::setenv("UBSOCKET_BLOCK_TYPE", FLAGS_ubsocket_block_type.c_str(), 1);
     }
     if (!FLAGS_ubsocket_pool_initial_size.empty()) {
-        ::setenv("RPC_ADPT_POOL_INITIAL_SIZE", FLAGS_ubsocket_pool_initial_size.c_str(), 1);
+        ::setenv("UBSOCKET_POOL_INITIAL_SIZE", FLAGS_ubsocket_pool_initial_size.c_str(), 1);
     }
     if (!FLAGS_ubsocket_ub_force.empty()) {
-        ::setenv("RPC_ADPT_UB_FORCE", FLAGS_ubsocket_ub_force.c_str(), 1);
+        ::setenv("UBSOCKET_USE_UB_FORCE", FLAGS_ubsocket_ub_force.c_str(), 1);
     }
     if (!FLAGS_ubsocket_schedule_policy.empty()) {
-        ::setenv("RPC_SCHEDULE_POLICY", FLAGS_ubsocket_schedule_policy.c_str(), 1);
+        ::setenv("UBSOCKET_SCHEDULE_POLICY", FLAGS_ubsocket_schedule_policy.c_str(), 1);
     }
     if (!FLAGS_ubsocket_readv_unlimited.empty()) {
-        ::setenv("RPC_ADPT_READV_UNLIMITED", FLAGS_ubsocket_readv_unlimited.c_str(), 1);
+        ::setenv("UBSOCKET_READV_UNLIMITED", FLAGS_ubsocket_readv_unlimited.c_str(), 1);
     }
     if (!FLAGS_ubsocket_use_polling.empty()) {
-        ::setenv("RPC_ADPT_USE_POLLING", FLAGS_ubsocket_use_polling.c_str(), 1);
+        ::setenv("UBSOCKET_USE_POLLING", FLAGS_ubsocket_use_polling.c_str(), 1);
     }
     if (!FLAGS_ubsocket_brpc_alloc_sym.empty()) {
-        ::setenv("RPC_ADPT_BRPC_ALLOC_SYM", FLAGS_ubsocket_brpc_alloc_sym.c_str(), 1);
+        ::setenv("UBSOCKET_BRPC_ALLOC_SYM", FLAGS_ubsocket_brpc_alloc_sym.c_str(), 1);
     }
     if (!FLAGS_ubsocket_brpc_dealloc_sym.empty()) {
-        ::setenv("RPC_ADPT_BRPC_DEALLOC_SYM", FLAGS_ubsocket_brpc_dealloc_sym.c_str(), 1);
+        ::setenv("UBSOCKET_BRPC_DEALLOC_SYM", FLAGS_ubsocket_brpc_dealloc_sym.c_str(), 1);
     }
     if (!FLAGS_ubsocket_adpt_stats.empty()) {
-        ::setenv("RPC_ADPT_STATS", FLAGS_ubsocket_adpt_stats.c_str(), 1);
+        ::setenv("UBSOCKET_STATS_CLI", FLAGS_ubsocket_adpt_stats.c_str(), 1);
     }
 
     if (!FLAGS_ubsocket_auto_fallback_tcp.empty()) {
-        ::setenv("RPC_AUTO_FALLBACK_TCP", FLAGS_ubsocket_auto_fallback_tcp.c_str(), 1);
+        ::setenv("UBSOCKET_AUTO_FALLBACK_TCP", FLAGS_ubsocket_auto_fallback_tcp.c_str(), 1);
     }
 
     (void)Brpc::Context::GetContext();
