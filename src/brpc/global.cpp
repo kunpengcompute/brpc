@@ -136,6 +136,8 @@ DEFINE_string(ubsocket_brpc_alloc_sym, "", "The global pointer symbol informatio
 DEFINE_string(ubsocket_brpc_dealloc_sym, "", "The global pointer symbol information of butil::iobuf::blockmem_deallocate in the brpc component");
 DEFINE_string(ubsocket_adpt_stats, "", "Count statistics for ubsocket (e.g., 'false', 'true')");
 DEFINE_string(ubsocket_auto_fallback_tcp, "", "Whether to automatically downgrade TCP when the protocols do not match (e.g., 'false', 'true')");
+DEFINE_string(ubsocket_enable_share_jfr, "", "Whether to enable share jfr (e.g., 'false', 'true')");
+DEFINE_string(ubsocket_share_jfr_rx_queue_depth, "", "Share jfr receive queue depth, the minimum value is 64. The upper limit of the setting is determined by the actual machine environment.");
 
 namespace policy {
 // Defined in http_rpc_protocol.cpp
@@ -406,6 +408,14 @@ static void SetUbSocketEnv() {
 
     if (!FLAGS_ubsocket_auto_fallback_tcp.empty()) {
         ::setenv("UBSOCKET_AUTO_FALLBACK_TCP", FLAGS_ubsocket_auto_fallback_tcp.c_str(), 1);
+    }
+
+    if (!FLAGS_ubsocket_enable_share_jfr.empty()) {
+        ::setenv("UBSOCKET_ENABLE_SHARE_JFR", FLAGS_ubsocket_enable_share_jfr.c_str(), 1);
+    }
+
+    if (!FLAGS_ubsocket_share_jfr_rx_queue_depth.empty()) {
+        ::setenv("UBSOCKET_SHARE_JFR_RX_QUEUE_DEPTH", FLAGS_ubsocket_share_jfr_rx_queue_depth.c_str(), 1);
     }
 
     (void)Brpc::Context::GetContext();
