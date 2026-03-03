@@ -265,7 +265,9 @@ http_archive(
         "https://mirrors.tencent.com/zlib/zlib-1.3.1.tar.gz",
         "https://mirrors.aliyun.com/zlib/zlib-1.3.1.tar.gz",
         "https://mirrors.ustc.edu.cn/zlib/zlib-1.3.1.tar.gz",
-        # 备用官方源
+        "https://zlib.net/fossils/zlib-1.3.1.tar.gz",
+        "https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz",
+       # 备用官方源
         "https://zlib.net/zlib-1.3.1.tar.gz",
     ],
 )
