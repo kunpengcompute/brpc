@@ -117,31 +117,31 @@ DEFINE_int32(free_memory_to_system_interval, 0,
              "values <= 0 disables this feature");
 BRPC_VALIDATE_GFLAG(free_memory_to_system_interval, PassValidate);
 
-DEFINE_string(ubsocket_trans_mode, "", "Transport mode for ubsocket (e.g., 'ub', 'ib')");
+DEFINE_string(ubsocket_trans_mode, "ub", "Transport mode for ubsocket (e.g., 'ub', 'ib')");
 DEFINE_string(ubsocket_dev_name, "", "Device name for ubsocket (e.g., 'udma2', 'bonding_dev_0')");
 DEFINE_string(ubsocket_dev_ip, "", "Device ip for ubsocket");
 DEFINE_string(ubsocket_eid_idx, "", "Normal device eid idx for ubsocket, necessary while using ub. Obtained by querying with the 'urma_admin show' command");
 DEFINE_string(ubsocket_src_eid, "", "Bonding device eid idx for ubsocket, necessary while using ub. Obtained by querying with the 'urma_admin show' command");
-DEFINE_string(ubsocket_log_level, "", "Log level for ubsocket (e.g., 'err', 'warn', 'notice', 'info', 'debug')");
-DEFINE_string(ubsocket_log_use_printf, "", "Whether to print the logs to the foreground for ubsocket (e.g., 'false', 'true')");
-DEFINE_string(ubsocket_tx_depth, "", "Send queue depth, the minimum value is 2. The upper limit of the setting is determined by the actual machine environment, based on the value of 'max_jfc_depth' in the command 'urma_admin show --whole'.");
-DEFINE_string(ubsocket_rx_depth, "", "Receive queue depth, the minimum value is 2. The upper limit of the setting is determined by the actual machine environment, based on the value of 'max_jfc_depth' in the command 'urma_admin show --whole'.");
-DEFINE_string(ubsocket_block_type, "", "Minimum fragment of the memory pool for ubsocket (e.g., 'default'(8k), 'small'(16k), 'medium'(32k), 'large'(64k))");
-DEFINE_string(ubsocket_pool_initial_size, "", "Total size of IO memory for ubsocket, in MB");
-DEFINE_string(ubsocket_ub_force, "", "Whether to force the use of the UB protocol to accelerate TCP (e.g., 'false', 'true')");
-DEFINE_string(ubsocket_schedule_policy, "", "Set the multi-plane load balancing policy (e.g., 'affinity', 'rr')");
-DEFINE_string(ubsocket_readv_unlimited, "", "Whether to enable the readv reporting limit for ubsocket (e.g., 'false', 'true')");
-DEFINE_string(ubsocket_use_polling, "", "Whether to enable message processing polling for ubsocket (e.g., 'false', 'true')");
+DEFINE_string(ubsocket_log_level, "info", "Log level for ubsocket (e.g., 'err', 'warn', 'notice', 'info', 'debug')");
+DEFINE_string(ubsocket_log_use_printf, "false", "Whether to print the logs to the foreground for ubsocket (e.g., 'false', 'true')");
+DEFINE_string(ubsocket_tx_depth, "1024", "Send queue depth, the minimum value is 2. The upper limit of the setting is determined by the actual machine environment, based on the value of 'max_jfc_depth' in the command 'urma_admin show --whole'.");
+DEFINE_string(ubsocket_rx_depth, "1024", "Receive queue depth, the minimum value is 2. The upper limit of the setting is determined by the actual machine environment, based on the value of 'max_jfc_depth' in the command 'urma_admin show --whole'.");
+DEFINE_string(ubsocket_block_type, "default", "Minimum fragment of the memory pool for ubsocket (e.g., 'default'(8k), 'small'(16k), 'medium'(32k), 'large'(64k))");
+DEFINE_string(ubsocket_pool_initial_size, "1024", "Total size of IO memory for ubsocket, in MB");
+DEFINE_string(ubsocket_ub_force, "false", "Whether to force the use of the UB protocol to accelerate TCP (e.g., 'false', 'true')");
+DEFINE_string(ubsocket_schedule_policy, "affinity", "Set the multi-plane load balancing policy (e.g., 'affinity', 'rr')");
+DEFINE_string(ubsocket_readv_unlimited, "true", "Whether to enable the readv reporting limit for ubsocket (e.g., 'false', 'true')");
+DEFINE_string(ubsocket_use_polling, "false", "Whether to enable message processing polling for ubsocket (e.g., 'false', 'true')");
 DEFINE_string(ubsocket_brpc_alloc_sym, "", "The global pointer symbol information of butil::iobuf::blockmem_allocate in the brpc component");
 DEFINE_string(ubsocket_brpc_dealloc_sym, "", "The global pointer symbol information of butil::iobuf::blockmem_deallocate in the brpc component");
-DEFINE_string(ubsocket_adpt_stats, "", "Count statistics for ubsocket (e.g., 'false', 'true')");
-DEFINE_string(ubsocket_auto_fallback_tcp, "", "Whether to automatically downgrade TCP when the protocols do not match (e.g., 'false', 'true')");
-DEFINE_string(ubsocket_enable_share_jfr, "", "Whether to enable share jfr (e.g., 'false', 'true')");
-DEFINE_string(ubsocket_share_jfr_rx_queue_depth, "", "Share jfr receive queue depth, the minimum value is 64. The upper limit of the setting is determined by the actual machine environment.");
-DEFINE_string(ubsocket_trace_enable, "", "Enable ubsocket trace statistics (e.g., 'false', 'true')");
-DEFINE_string(ubsocket_trace_time, "", "Set monitoring ubsocket data output interval, the minimum value is 1, the maximum value is 300");
-DEFINE_string(ubsocket_trace_file_path, "", "Set monitoring ubsocket data output path (e.g., '/tmp/ubsocket/log')");
-DEFINE_string(ubsocket_trace_file_size, "", "Set monitoring ubsocket data file size, the minimum value is 1, the maximum value is 300");
+DEFINE_string(ubsocket_adpt_stats, "false", "Count statistics for ubsocket (e.g., 'false', 'true')");
+DEFINE_string(ubsocket_auto_fallback_tcp, "true", "Whether to automatically downgrade TCP when the protocols do not match (e.g., 'false', 'true')");
+DEFINE_string(ubsocket_enable_share_jfr, "false", "Whether to enable share jfr (e.g., 'false', 'true')");
+DEFINE_string(ubsocket_share_jfr_rx_queue_depth, "1024", "Share jfr receive queue depth, the minimum value is 64. The upper limit of the setting is determined by the actual machine environment.");
+DEFINE_string(ubsocket_trace_enable, "false", "Enable ubsocket trace statistics (e.g., 'false', 'true')");
+DEFINE_string(ubsocket_trace_time, "10", "Set monitoring ubsocket data output interval, the minimum value is 1, the maximum value is 300");
+DEFINE_string(ubsocket_trace_file_path, "/tmp/ubsocket/log", "Set monitoring ubsocket data output path (e.g., '/tmp/ubsocket/log')");
+DEFINE_string(ubsocket_trace_file_size, "10", "Set monitoring ubsocket data file size, the minimum value is 1, the maximum value is 300");
 
 namespace policy {
 // Defined in http_rpc_protocol.cpp
