@@ -126,7 +126,7 @@ void NsheadPbServiceAdaptor::ProcessNsheadRequest(
         google::protobuf::Service* svc = sp->service;
         const google::protobuf::MethodDescriptor* method = sp->method;
         ControllerPrivateAccessor(controller).set_method(method);
-        done->SetMethodName(method->full_name());
+        done->SetMethodName(method->full_name().data());
         pbdone->pbreq.reset(svc->GetRequestPrototype(method).New());
         pbdone->pbres.reset(svc->GetResponsePrototype(method).New());
 

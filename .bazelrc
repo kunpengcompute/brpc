@@ -16,7 +16,6 @@
 #
 # Default build options. These are applied first and unconditionally.
 #
-common --enable_bzlmod=false
 common --registry=https://bcr.bazel.build
 common --registry=https://baidu.github.io/babylon/registry
 

@@ -87,7 +87,7 @@ $ git checkout -b develop origin/develop
 本地新增develop分支表示创建成功，其他分支类似
 
 ### 如何修改版本tag
-在brpc根目录的WORKSPACE中找到ubsocket依赖，如下：
+在brpc根目录的local_deps_ext.bzl中找到ubsocket依赖，如下：
 ```
  git_repository(
 		name = "ubsocket",

@@ -49,7 +49,7 @@ void NsheadMcpackAdaptor::ParseNsheadMeta(
     const google::protobuf::ServiceDescriptor* sd = service->GetDescriptor();
     if (sd->method_count() == 0) {
         cntl->SetFailed(ENOMETHOD, "No method in service=%s",
-                        sd->full_name().c_str());
+                        sd->full_name().data());
         return;
     }
     const google::protobuf::MethodDescriptor* method = sd->method(0);
@@ -59,7 +59,7 @@ void NsheadMcpackAdaptor::ParseNsheadMeta(
 void NsheadMcpackAdaptor::ParseRequestFromIOBuf(
     const NsheadMeta&, const NsheadMessage& raw_req,
     Controller* cntl, google::protobuf::Message* pb_req) const {
-    const std::string& msg_name = pb_req->GetDescriptor()->full_name();
+    const std::string& msg_name = pb_req->GetDescriptor()->full_name().data();
     mcpack2pb::MessageHandler handler = mcpack2pb::find_message_handler(msg_name);
     if (!handler.parse_from_iobuf(pb_req, raw_req.body)) {
         cntl->SetFailed(EREQUEST, "Fail to parse request message, "
@@ -86,7 +86,7 @@ void NsheadMcpackAdaptor::SerializeResponseToIOBuf(
         return;
     }
 
-    const std::string& msg_name = pb_res->GetDescriptor()->full_name();
+    const std::string& msg_name = pb_res->GetDescriptor()->full_name().data();
     mcpack2pb::MessageHandler handler = mcpack2pb::find_message_handler(msg_name);
     if (!handler.serialize_to_iobuf(*pb_res, &raw_res->body,
                                    ::mcpack2pb::FORMAT_MCPACK_V2)) {
@@ -124,7 +124,7 @@ void ProcessNsheadMcpackResponse(InputMessageBase* msg_base) {
         // silently ignore response.
         return;
     }
-    const std::string& msg_name = res->GetDescriptor()->full_name();
+    const std::string& msg_name = res->GetDescriptor()->full_name().data();
     mcpack2pb::MessageHandler handler = mcpack2pb::find_message_handler(msg_name);
     if (!handler.parse_from_iobuf(res, msg->payload)) {
         return cntl->CloseConnection("Fail to parse response message");
@@ -143,7 +143,7 @@ void SerializeNsheadMcpackRequest(butil::IOBuf* buf, Controller* cntl,
                         "nshead_mcpack protocol doesn't support compression");
         return;
     }
-    const std::string& msg_name = pb_req->GetDescriptor()->full_name();
+    const std::string& msg_name = pb_req->GetDescriptor()->full_name().data();
     mcpack2pb::MessageHandler handler = mcpack2pb::find_message_handler(msg_name);
     if (!handler.serialize_to_iobuf(*pb_req, buf, ::mcpack2pb::FORMAT_MCPACK_V2)) {
         cntl->SetFailed(EREQUEST, "Fail to serialize %s", msg_name.c_str());

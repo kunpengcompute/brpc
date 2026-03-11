@@ -473,7 +473,7 @@ void ProcessHuluRequest(InputMessageBase* msg_base) {
             int rejected_cc = 0;
             if (!method_status->OnRequested(&rejected_cc)) {
                 cntl->SetFailed(ELIMIT, "Rejected by %s's ConcurrencyLimiter, concurrency=%d",
-                                sp->method->full_name().c_str(), rejected_cc);
+                                sp->method->full_name().data(), rejected_cc);
                 break;
             }
         }
@@ -487,7 +487,7 @@ void ProcessHuluRequest(InputMessageBase* msg_base) {
         }
 
         if (span) {
-            span->ResetServerSpanName(method->full_name());
+            span->ResetServerSpanName(method->full_name().data());
         }
         const int reqsize = msg->payload.length();
         butil::IOBuf req_buf;
