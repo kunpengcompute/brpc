@@ -67,6 +67,6 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "@com_github_google_crc32c//:crc32c",
-        "@com_github_google_snappy//:snappy",
+        "@snappy//:snappy",
     ],
 )

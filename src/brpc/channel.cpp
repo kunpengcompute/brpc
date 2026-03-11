@@ -497,7 +497,8 @@ void Channel::CallMethod(const google::protobuf::MethodDescriptor* method,
         if (_get_method_name) {
             method_name = &_get_method_name(method, cntl);
         } else if (method) {
-            method_name = &method->full_name();
+            std::string method_full_name = method->full_name().data();
+            method_name = &method_full_name;
         } else {
             const static std::string NULL_METHOD_STR = "null-method";
             method_name = &NULL_METHOD_STR;

@@ -7,8 +7,7 @@ module(
 # --registry=https://bcr.bazel.build
 bazel_dep(name = 'abseil-cpp', version = '20210324.2', repo_name = 'com_google_absl')
 bazel_dep(name = 'bazel_skylib', version = '1.0.3')
-bazel_dep(name = 'boringssl', version = '0.0.0-20211025-d4f1ab9')
-bazel_dep(name = 'protobuf', version = '27.3', repo_name = 'com_google_protobuf')
+bazel_dep(name = 'protobuf', version = '33.0', repo_name = 'com_google_protobuf')
 bazel_dep(name = 'gflags', version = '2.2.2', repo_name = 'com_github_gflags_gflags')
 bazel_dep(name = 'glog', version = '0.5.0', repo_name = 'com_github_google_glog')
 bazel_dep(name = 'platforms', version = '0.0.4')
@@ -39,4 +38,13 @@ git_override(
     module_name = 'hedron_compile_commands',
     remote = 'https://github.com/hedronvision/bazel-compile-commands-extractor.git',
     commit = '1e08f8e0507b6b6b1f4416a9a22cf5c28beaba93', # Jun 28, 2024
+)
+
+local_deps = use_extension("//:local_deps_ext.bzl", "local_deps")
+use_repo(
+    local_deps,
+    "urma",
+    "libboundscheck",
+    "ubsocket",
+    "boringssl",
 )

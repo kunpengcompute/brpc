@@ -32,7 +32,7 @@ namespace json2pb {
 
 inline std::string GetTypeUrl(const google::protobuf::Message& message) {
     return butil::string_printf(PROTOBUF_TYPE_URL_PREFIX"/%s",
-                                message.GetDescriptor()->full_name().c_str());
+                                message.GetDescriptor()->full_name().data());
 }
 
 // unique_ptr deleter for TypeResolver only deletes the object

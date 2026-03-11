@@ -249,7 +249,7 @@ void ProcessMongoRequest(InputMessageBase* msg_base) {
             if (!method_status->OnRequested(&rejected_cc)) {
                 mongo_done->cntl.SetFailed(
                     ELIMIT, "Rejected by %s's ConcurrencyLimiter, concurrency=%d",
-                    mp->method->full_name().c_str(), rejected_cc);
+                    mp->method->full_name().data(), rejected_cc);
                 break;
             }
         }

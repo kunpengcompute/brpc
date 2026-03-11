@@ -413,13 +413,13 @@ void* Server::UpdateDerivedVars(void* arg) {
 }
 
 const std::string& Server::ServiceProperty::service_name() const {
+    static std::string service_name = "";
     if (service) {
-        return service->GetDescriptor()->full_name();
+        service_name = service->GetDescriptor()->full_name().data();
     } else if (restful_map) {
         return restful_map->service_name();
     }
-    const static std::string s_unknown_name = "";
-    return s_unknown_name;
+    return service_name;
 }
 
 Server::Server(ProfilerLinker)
@@ -1440,7 +1440,8 @@ int Server::AddServiceInternal(google::protobuf::Service* service,
         mp.service = service;
         mp.method = md;
         mp.status = new MethodStatus;
-        _method_map[md->full_name()] = mp;
+        std::string md_name = md->full_name().data();
+        _method_map[md_name] = mp;
         if (is_idl_support && sd->name() != sd->full_name()/*has ns*/) {
             MethodProperty mp2 = mp;
             mp2.own_method_status = false;
@@ -1463,8 +1464,9 @@ int Server::AddServiceInternal(google::protobuf::Service* service,
 
     const ServiceProperty ss = {
         is_builtin_service, svc_opt.ownership, service, NULL };
-    _fullname_service_map[sd->full_name()] = ss;
-    _service_map[sd->name()] = ss;
+    std::string sd_name = sd->full_name().data();
+    _fullname_service_map[sd_name] = ss;
+    _service_map[std::string(sd->name())] = ss;
     if (is_builtin_service) {
         ++_builtin_service_count;
     } else {
@@ -1506,7 +1508,7 @@ int Server::AddServiceInternal(google::protobuf::Service* service,
         // handling is not affected.
         for (size_t i = 0; i < mappings.size(); ++i) {
             const std::string full_method_name =
-                sd->full_name() + "." + mappings[i].method_name;
+                std::string(sd->full_name().data()) + "." + mappings[i].method_name;
             MethodProperty* mp = _method_map.seek(full_method_name);
             if (mp == NULL) {
                 LOG(ERROR) << "Unknown method=`" << full_method_name << '\'';
@@ -1733,7 +1735,7 @@ int Server::RemoveService(google::protobuf::Service* service) {
     const google::protobuf::ServiceDescriptor* sd = service->GetDescriptor();
     ServiceProperty* ss = _fullname_service_map.seek(sd->full_name());
     if (ss == NULL) {
-        RPC_VLOG << "Fail to find service=" << sd->full_name().c_str();
+        RPC_VLOG << "Fail to find service=" << sd->full_name().data();
         return -1;
     }
     RemoveMethodsOf(service);

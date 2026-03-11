@@ -169,7 +169,7 @@ void UbrpcAdaptor::ParseNsheadMeta(
 void UbrpcAdaptor::ParseRequestFromIOBuf(
     const NsheadMeta&, const NsheadMessage& raw_req,
     Controller* cntl, google::protobuf::Message* pb_req) const {
-    const std::string& msg_name = pb_req->GetDescriptor()->full_name();
+    const std::string msg_name = pb_req->GetDescriptor()->full_name().data();
     mcpack2pb::MessageHandler handler = mcpack2pb::find_message_handler(msg_name);
     if (handler.parse_body == NULL) {
         return cntl->SetFailed(EREQUEST, "Fail to find parser of %s",
@@ -227,7 +227,7 @@ void UbrpcAdaptor::SerializeResponseToIOBuf(
     //     return AppendError(meta, cntl, raw_res->body);
     // }
 
-    const std::string& msg_name = pb_res->GetDescriptor()->full_name();
+    const std::string msg_name = pb_res->GetDescriptor()->full_name().data();
     mcpack2pb::MessageHandler handler = mcpack2pb::find_message_handler(msg_name);
     if (handler.serialize_body == NULL) {
         cntl->SetFailed(ERESPONSE, "Fail to find serializer of %s",
@@ -279,7 +279,7 @@ static void ParseResponse(Controller* cntl, butil::IOBuf& buf,
         // silently ignore response.
         return;
     }
-    const std::string& msg_name = res->GetDescriptor()->full_name();
+    const std::string msg_name = res->GetDescriptor()->full_name().data();
     mcpack2pb::MessageHandler handler = mcpack2pb::find_message_handler(msg_name);
     if (handler.parse_body == NULL) {
         return cntl->SetFailed(ERESPONSE, "Fail to find parser of %s",
@@ -480,7 +480,7 @@ static void SerializeUbrpcRequest(butil::IOBuf* buf, Controller* cntl,
     if (cntl->method() == NULL) {
         return cntl->SetFailed(ENOMETHOD, "method is NULL");
     }
-    const std::string& msg_name = request->GetDescriptor()->full_name();
+    const std::string msg_name = request->GetDescriptor()->full_name().data();
     mcpack2pb::MessageHandler handler = mcpack2pb::find_message_handler(msg_name);
     if (handler.serialize_body == NULL) {
         return cntl->SetFailed(EREQUEST, "Fail to find serializer of %s",
@@ -500,9 +500,9 @@ static void SerializeUbrpcRequest(butil::IOBuf* buf, Controller* cntl,
         sr.begin_mcpack_array("content", mcpack2pb::FIELD_OBJECT);
         sr.begin_object();
         {
-            sr.add_string("service_name", cntl->method()->service()->name());
+            sr.add_string("service_name", cntl->method()->service()->name().data());
             sr.add_int64("id", cntl->call_id().value);
-            sr.add_string("method", cntl->method()->name());
+            sr.add_string("method", cntl->method()->name().data());
             sr.begin_object("params");
             const char* const request_name = cntl->idl_names().request_name;
             if (request_name != NULL && *request_name) {

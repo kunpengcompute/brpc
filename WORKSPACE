@@ -44,13 +44,6 @@ RULES_CC_COMMIT_ID = "0913abc3be0edff60af681c0473518f51fb9eeef"  # 2021-08-12T14
 
 RULES_CC_SHA256 = "04d22a8c6f0caab1466ff9ae8577dbd12a0c7d0bc468425b75de094ec68ab4f9"
 
-
-
-
-
-
-
-
 #
 # Starlark libraries
 #
@@ -70,7 +63,6 @@ http_archive(
         "https://mirror.bazel.build/github.com/bazelbuild/bazel-skylib/releases/download/{version}/bazel-skylib-{version}.tar.gz".format(version = BAZEL_SKYLIB_VERSION),
     ],
 )
-
 http_archive(
     name = "platforms",
     sha256 = BAZEL_PLATFORMS_SHA256,
@@ -275,9 +267,21 @@ http_archive(
 
 http_archive(
     name = "com_google_protobuf",  # 2021-10-29T00:04:02Z
-    sha256 = "f645e6e42745ce922ca5388b1883ca583bafe4366cc74cf35c3c9299005136e2",
-    strip_prefix = "protobuf-5.28.3",
-    urls = ["https://github.com/protocolbuffers/protobuf/archive/refs/tags/v5.28.3.zip"],
+    build_file = "//bazel/third_party/protobuf:protobuf.BUILD",
+    patch_cmds = [
+        "sed -i protobuf.bzl -re '4,4d;417,508d'",
+    ],
+    patch_cmds_win = [
+        """$content = Get-Content 'protobuf.bzl' | Where-Object {
+    -not ($_.ReadCount -ne 4) -and
+    -not ($_.ReadCount -ge 418 -and $_.ReadCount -le 509)
+}
+Set-Content protobuf.bzl -Value $content -Encoding UTF8
+""",
+    ],
+    sha256 = "87407cd28e7a9c95d9f61a098a53cf031109d451a7763e7dd1253abf8b4df422",
+    strip_prefix = "protobuf-3.19.1",
+    urls = ["https://github.com/protocolbuffers/protobuf/archive/refs/tags/v3.19.1.tar.gz"],
 )
 
 
@@ -292,33 +296,6 @@ http_archive(
         "https://github.com/openssl/openssl/archive/OpenSSL_1_1_1m.tar.gz",
     ],
 )
-
-# https://github.com/google/boringssl/blob/master/INCORPORATING.md
-git_repository(
-    name = "boringssl", # 2021-05-01T12:26:01Z
-    commit = "0e6b86549db4c888666512295c3ebd4fa2a402f5", # fips-20210429
-    remote = "https://github.com/google/boringssl",
-)
-
-new_local_repository(
-	name = "urma",
-	path = "/usr",
-	build_file = "//3rdparty/urma:BUILD.bazel",
-)
-
-git_repository(
-	name = "libboundscheck",
-	remote = "https://atomgit.com/openeuler/libboundscheck.git",
-	branch = "master",
-	build_file="//3rdparty/boundscheck:BUILD.bazel",
-)
-
-git_repository(
-	name = "ubsocket",
-	remote = "https://atomgit.com/openeuler/ubs-comm",
-	commit = "afbe41f5",
-)
-
 
 http_archive(
     name = "org_apache_thrift",  # 2021-09-11T11:54:01Z
