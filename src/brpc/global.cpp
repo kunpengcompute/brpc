@@ -138,10 +138,10 @@ DEFINE_string(ubsocket_adpt_stats, "", "Count statistics for ubsocket (e.g., 'fa
 DEFINE_string(ubsocket_auto_fallback_tcp, "", "Whether to automatically downgrade TCP when the protocols do not match (e.g., 'false', 'true')");
 DEFINE_string(ubsocket_enable_share_jfr, "", "Whether to enable share jfr (e.g., 'false', 'true')");
 DEFINE_string(ubsocket_share_jfr_rx_queue_depth, "", "Share jfr receive queue depth, the minimum value is 64. The upper limit of the setting is determined by the actual machine environment.");
-DEFINE_string(ubsocket_trace_enable, "false", "Enable ubsocket trace statistics (e.g., 'false', 'true')");
-DEFINE_string(ubsocket_trace_time, "10", "Set monitoring ubsocket data output interval, the minimum value is 1, the maximum value is 300");
-DEFINE_string(ubsocket_trace_file_path, "/tmp/ubsocket/log", "Set monitoring ubsocket data output path (e.g., '/tmp/ubsocket/log')");
-DEFINE_string(ubsocket_trace_file_size, "10", "Set monitoring ubsocket data file size, the minimum value is 1, the maximum value is 300");
+DEFINE_string(ubsocket_trace_enable, "", "Enable ubsocket trace statistics (e.g., 'false', 'true')");
+DEFINE_string(ubsocket_trace_time, "", "Set monitoring ubsocket data output interval, the minimum value is 1, the maximum value is 300");
+DEFINE_string(ubsocket_trace_file_path, "", "Set monitoring ubsocket data output path (e.g., '/tmp/ubsocket/log')");
+DEFINE_string(ubsocket_trace_file_size, "", "Set monitoring ubsocket data file size, the minimum value is 1, the maximum value is 300");
 
 namespace policy {
 // Defined in http_rpc_protocol.cpp
