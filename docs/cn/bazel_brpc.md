@@ -1,5 +1,16 @@
-# Bazel编译brpc获取可执行用例server、client
-## 1. 软件版本配套说明：
+# bazel编译带UB能力的bRPC
+
+## 1 概述
+
+### 1.1 简介
+
+基于[社区bPRC](https://github.com/apache/brpc/)进行修改，支持UB通信，提升RPC性能。
+
+### 1.2 工作原理
+
+[openEuler/ubs-comm](https://atomgit.com/openeuler/ubs-comm)中的ubsocket组件，支持拦截TCP应用中的POSIX Socket API，将TCP通信转换为UB高性能通信。bRPC通过对接ubsocket实现UB通信。
+
+## 2 配套说明
 
 | 软件名称       | 软件版本                                      |
 | :------------- | -------------------------------------------- |
@@ -15,7 +26,9 @@
 | zlib           | 1.3.1                                        |
 | boringssl      | c00d7ca810e3780bd0c8ee4eea28f4f2ea4bcdc      |
 
-## 2. 支持gflags参数说明：
+## 3 API说明
+
+ubsocket通过环境变量进行配置，在bRPC与ubsocket集成的过程中，为了保持bRPC的使用习惯，将ubsocket的环境变量配置项全部转换成了bRPC的gflags配置项。gflags配置项见下表。
 
 | 名称 | 含义 | 取值范围 | 默认值 | 必填 |
 |--|--|--|--|--|
@@ -38,8 +51,13 @@ ubsocket_trace_time | 控制维测数据输出间隔（单位s）| [1, 300] | 10
 ubsocket_trace_file_path | 控制维测数据输出路径| [1, 512] | /tmp/ubsocket/log |否
 ubsocket_trace_file_size | 控制维测数据文件大小（MB）| [1, 300] | 10 |否
 
-## 3：bazel编译
-- 安装基础软件
+> 注意：
+>
+> 为最大程度的兼容bPRC及gflags的使用习惯。新增的这些gflags配置项，均在bRPC的源码中指定了默认值。bRPC集成ubsocket的场景中，ubsocket自身的环境变量不再生效，以gflags的默认值或用户指定的gflags值为准。
+
+## 4 bazel编译
+
+### 4.1 安装基础软件
 
 执行以下命令安装各步骤所需要的基础软件。
 ```
@@ -50,23 +68,21 @@ $ yum install automake libtool -y
 ```
 安装完成后，需配置gcc相关的环境变量，并确认gcc是否正确安装
 ```
-$ export PATH=/opt/openEuler/gcc-toolset-14/root/usr/bin/:$PATH
-$ export LD_LIBRARY_PATH=/opt/openEuler/gcc-toolset-14/root/usr/lib64/:$LD_LIBRARY_PATH
+$ # 使用gcc14自带的脚本，完成PATH和LD_LIBRARY_PATH等环境变量配置
+$ source /opt/openEuler/gcc-toolset-14/enable
 $ # 通过gcc -v确认gcc是否正确安装
 $ gcc -v
 ```
 ![image](../images/gcc.png)
 如图显示"gcc version 14.x.x"，表明安装成功
 
-- bazel下载与编译
-
-推荐直接下载bazel 7.4.1可执行文件。
+接下来继续安装bazel，推荐直接下载bazel 7.4.1可执行文件。
 ```
 $ wget https://github.com/bazelbuild/bazel/releases/download/7.4.1/bazel-7.4.1-linux-arm64 --no-check-certificate
 $ chmod +x bazel-7.4.1-linux-arm64
 $ cp bazel-7.4.1-linux-arm64 /usr/local/bin/bazel
 ```
-- 下载bRPC源码
+### 4.2 下载bRPC源码
 
 通过git clone方式下载bRPC源码，并确保切换到目标分支或tag。
 ```
@@ -86,8 +102,8 @@ $ git checkout -b develop origin/develop
 
 本地新增develop分支表示创建成功，其他分支类似
 
-### 如何修改版本tag
-在brpc根目录的local_deps_ext.bzl中找到ubsocket依赖，如下：
+### 4.3 修改使用的ubs-comm版本
+通过修改ubs-comm的commit-id，可以指定ubs-comm版本。在brpc根目录的local_deps_ext.bzl中找到ubsocket依赖，修改commit-id值即可（使用简版8位字符串或详细40位字符串的commit-id均可）。
 ```
  git_repository(
 		name = "ubsocket",
@@ -98,10 +114,11 @@ $ git checkout -b develop origin/develop
 ```
 ![image](../images/repos_ubsocket.png)
 >说明：
->修改commit值（切换版本后，提交记录左边有最新commit值，显示简版8位字符串，详细40位，想要对应版本，修改对应提交的commit值即可）；
->remote字段值一般不作修改，表示ubsocket仓库链接
+>
+>- remote字段值一般不作修改，表示ubsocket仓库链接。
 
-### 执行编译
+### 4.4 编译
+
 bazel支持自动检测依赖变化，能够实现高效的增量编译，建议直接编译可执行文件。如可通过如下命令，编译brpc示例中的echo_c++。
 >说明：如果配置代理，需要配置https协议对应的证书。
 >例：在代码根目录下`vim .bazelrc`，在最下面加上如下配置
@@ -111,8 +128,8 @@ bazel支持自动检测依赖变化，能够实现高效的增量编译，建议
 
 ```
 $ cd brpc  #在代码根目录下执行编译命令
-$ bazel build //example:echo_c++_server  # 编译服务端，编译产物在 brpc/bazel-bin/example
-$ bazel build //example:echo_c++_client  # 编译客户端，编译产物在 brpc/bazel-bin/example
+$ bazel build -c opt //example:echo_c++_server  # 编译服务端，编译产物在 brpc/bazel-bin/example
+$ bazel build -c opt //example:echo_c++_client  # 编译客户端，编译产物在 brpc/bazel-bin/example
 ```
 ![image](../images/bazel_bin_example.png)
 >说明：
@@ -126,21 +143,23 @@ $ bazel build --noenable_bzlmod --distdir=/root/proxy :brpc # 编译产物在 br
 ![image](../images/bazel_bin.png)
 > 说明：
 >编译参数“--noenable_bzlmod ”表示不使用bzlmod特性，主要依赖在WORKSPACE中已添加；
->编译参数“--distdir=/root/proxy ”指定下载路径，WORKSPACE中的相关三方依赖，例:protobuf 5.28.3、gflags 2.2.2、leveldb 1.23、openssl 1.1.1m等会自动下载到该路径，可以根据需要配置。
+>编译参数“--distdir=/root/proxy ”指定下载路径，WORKSPACE中的相关三方依赖，例:protobuf、gflags、leveldb等会自动下载到该路径，可以根据需要配置。
 
-- 编译用例执行示例
+### 4.5 执行用例
 
 上述完成后可以获得echo_c++_server和echo_c++_client两个可执行文件，分别放到放到两台服务器上
 ```
 $ # 启动echo_c++_server
-$ ./echo_c++_server --ubsocket_log_use_printf=1 --ubsocket_ub_force=1
+$ ./echo_c++_server --ubsocket_log_use_printf=true --ubsocket_ub_force=true --num_threads=4
 
 $ # 在另一个节点启动echo_c++_client
-$ ./echo_c++_client --server=141.61.85.60:8000  --ubsocket_log_use_printf=1 --ubsocket_ub_force=1
+$ ./echo_c++_client --server=141.61.85.60:8000  --ubsocket_log_use_printf=true --ubsocket_ub_force=true --num_threads=4
 ```
 ![image](../images/echo_server.png)
 ![image](../images/echo_client.png)
 echo_c++用例执行成功，server与client互发“hello_world”
 >说明：
->参数根据具体服务器配置进行调整，参数详情参考上面gflags参数；
->启动命令不添加ubsocket_ub_force 参数，需要在client.cpp和server.cpp源码main方法中，添加`options.use_ub = FLAGS_use_ub`。
+>
+>- 根据服务器实际情况，调整gflags参数，详见本文gflags介绍。
+>- 启动命令不添加ubsocket_ub_force 参数，需要在client.cpp和server.cpp源码main方法中，添加`options.use_ub = FLAGS_use_ub`。
+>- `--num_threads`是bRPC原有的gflags参数，用于控制bRPC启动的线程数。ubsocket为每个线程做了`thread local cache`提升性能（每个线程需额外占用内存），另外超过可用CPU核数的线程不会实际并发起来，故建议根据实际需要配置bRPC线程数。
