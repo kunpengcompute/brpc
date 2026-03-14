@@ -152,10 +152,10 @@ $ bazel build --noenable_bzlmod --distdir=/root/proxy :brpc # 编译产物在 br
 上述完成后可以获得echo_c++_server和echo_c++_client两个可执行文件，分别放到放到两台服务器上
 ```
 $ # 启动echo_c++_server
-$ ./echo_c++_server --ubsocket_log_use_printf=true --ubsocket_ub_force=true --num_threads=4
+$ ./echo_c++_server --ubsocket_log_use_printf=true --ubsocket_ub_force=true
 
 $ # 在另一个节点启动echo_c++_client
-$ ./echo_c++_client --server=141.61.85.60:8000  --ubsocket_log_use_printf=true --ubsocket_ub_force=true --num_threads=4
+$ ./echo_c++_client --server=141.61.85.60:8000  --ubsocket_log_use_printf=true --ubsocket_ub_force=true
 ```
 ![image](../images/echo_server.png)
 ![image](../images/echo_client.png)
@@ -164,4 +164,4 @@ echo_c++用例执行成功，server与client互发“hello_world”
 >
 >- 根据服务器实际情况，调整gflags参数，详见本文gflags介绍。
 >- 启动命令不添加ubsocket_ub_force 参数，需要在client.cpp和server.cpp源码main方法中，添加`options.use_ub = FLAGS_use_ub`。
->- `--num_threads`是bRPC原有的gflags参数，用于控制bRPC启动的线程数。ubsocket为每个线程做了`thread local cache`提升性能（每个线程需额外占用内存），另外超过可用CPU核数的线程不会实际并发起来，故建议根据实际需要配置bRPC线程数。
+>- ubsocket为每个线程做了`thread local cache`提升性能（每个线程需额外占用内存），另外超过可用CPU核数的线程不会实际并发起来，故建议根据实际需要配置bRPC线程数以合理使用资源。参考[worker线程数](server.md#worker线程数)进行配置即可。
