@@ -122,7 +122,7 @@ DEFINE_string(ubsocket_dev_name, "", "Device name for ubsocket (e.g., 'udma2', '
 DEFINE_string(ubsocket_dev_ip, "", "Device ip for ubsocket");
 DEFINE_string(ubsocket_eid_idx, "", "Normal device eid idx for ubsocket, necessary while using ub. Obtained by querying with the 'urma_admin show' command");
 DEFINE_string(ubsocket_src_eid, "", "Bonding device eid idx for ubsocket, necessary while using ub. Obtained by querying with the 'urma_admin show' command");
-DEFINE_string(ubsocket_log_level, "info", "Log level for ubsocket (e.g., 'err', 'warn', 'notice', 'info', 'debug')");
+DEFINE_string(ubsocket_log_level, "info", "Log level for ubsocket (e.g., 'error', 'warn', 'notice', 'info', 'debug')");
 DEFINE_string(ubsocket_log_use_printf, "false", "Whether to print the logs to the foreground for ubsocket (e.g., 'false', 'true')");
 DEFINE_string(ubsocket_tx_depth, "1024", "Send queue depth, the minimum value is 2. The upper limit of the setting is determined by the actual machine environment, based on the value of 'max_jfc_depth' in the command 'urma_admin show --whole'.");
 DEFINE_string(ubsocket_rx_depth, "1024", "Receive queue depth, the minimum value is 2. The upper limit of the setting is determined by the actual machine environment, based on the value of 'max_jfc_depth' in the command 'urma_admin show --whole'.");

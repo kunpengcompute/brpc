@@ -36,7 +36,7 @@ ubsocket通过环境变量进行配置，在bRPC与ubsocket集成的过程中，
 |ubsocket_dev_name|设备名称|根据实际场景填写设备名称；例如，udma2或者bonding_dev_0|主动获得当前环境bonding设备名称，如bonding_dev_xx|否|
 |ubsocket_eid_idx|使用普通设备的eid编号|ub协议下，通过urma_admin show命令查询获得|0|否|
 |ubsocket_src_eid|使用bonding设备的eid|ub协议下，通过urma_admin show命令查询获得|主动获得当前环境bonding设备的eid|否|
-|ubsocket_log_level|日志级别|err，warn，notice，info，debug|info|否|
+|ubsocket_log_level|日志级别|error，warn，notice，info，debug|info|否|
 |ubsocket_log_use_printf|是否将日志打印到前台|false，true|false|否|
 |ubsocket_tx_depth|发送队列深度|最小值是64，设置上限由实际机器环境决定（根据命令urma_admin show --whole中max_jfc_depth与max_jfs_depth两者的最小值）|1024|否|
 |ubsocket_rx_depth|接受队列深度|最小值是64，设置上限由实际机器环境决定（根据命令urma_admin show --whole中max_jfc_depth与max_jfr_depth两者的最小值）|1024|否|
