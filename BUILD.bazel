@@ -56,6 +56,9 @@ COPTS = [
 }) + select({
     "//bazel/config:brpc_with_no_pthread_mutex_hook": ["-DNO_PTHREAD_MUTEX_HOOK"],
     "//conditions:default": [""],
+}) + select({
+    "//bazel/config:brpc_with_urma": ["-DBRPC_WITH_URMA"],
+    "//conditions:default": [""],
 })
 
 LINKOPTS = [
@@ -560,10 +563,14 @@ cc_library(
         ":json2pb",
         ":mcpack2pb",
         "@com_github_google_leveldb//:leveldb",
-	"@ubsocket//src:ubsocket",
     ] + select({
         "//bazel/config:brpc_with_thrift": [
             "@org_apache_thrift//:thrift",
+        ],
+        "//conditions:default": [],
+    }) + select({
+        "//bazel/config:brpc_with_urma": [
+            "@ubsocket//src:ubsocket",
         ],
         "//conditions:default": [],
     }),

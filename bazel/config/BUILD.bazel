@@ -143,3 +143,9 @@ config_setting(
     define_values = {"BRPC_WITH_NO_PTHREAD_MUTEX_HOOK": "true"},
     visibility = ["//visibility:public"],
 )
+
+config_setting(
+    name = "brpc_with_urma",
+    define_values = {"brpc_with_urma": "true"},
+    visibility = ["//visibility:public"],
+)

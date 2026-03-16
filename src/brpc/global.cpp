@@ -101,7 +101,9 @@
 #endif
 #include "butil/fd_guard.h"
 #include "butil/files/file_watcher.h"
+#if BRPC_WITH_URMA
 #include "brpc_context.h"
+#endif
 
 extern "C" {
 // defined in gperftools/malloc_extension_c.h
@@ -350,6 +352,7 @@ static void BaiduStreamingLogHandler(google::protobuf::LogLevel level,
 }
 #endif
 
+#if BRPC_WITH_URMA
 static void SetUbSocketEnv() {
     if (getenv("LD_PRELOAD") != nullptr) {
         return;
@@ -436,6 +439,7 @@ static void SetUbSocketEnv() {
 
     (void)Brpc::Context::GetContext();
 }
+#endif
 
 static void GlobalInitializeOrDieImpl() {
     //////////////////////////////////////////////////////////////////
@@ -444,7 +448,9 @@ static void GlobalInitializeOrDieImpl() {
     // values even if the gflags will be set after main().          //
     //////////////////////////////////////////////////////////////////
 
+#if BRPC_WITH_URMA
     SetUbSocketEnv();
+#endif
 
     // Ignore SIGPIPE.
     struct sigaction oldact;

@@ -130,12 +130,13 @@ bazel支持自动检测依赖变化，能够实现高效的增量编译，建议
 
 ```
 $ cd brpc  #在代码根目录下执行编译命令
-$ bazel build -c opt //example:echo_c++_server  # 编译服务端，编译产物在 brpc/bazel-bin/example
-$ bazel build -c opt //example:echo_c++_client  # 编译客户端，编译产物在 brpc/bazel-bin/example
+$ bazel build -c opt //example:echo_c++_server --define brpc_with_urma=true  # 编译服务端，编译产物在 brpc/bazel-bin/example
+$ bazel build -c opt //example:echo_c++_client --define brpc_with_urma=true  # 编译客户端，编译产物在 brpc/bazel-bin/example
 ```
 ![image](../images/bazel_bin_example.png)
 >说明：
->在bazel编译的时候 后面添加`--compilation_mode=opt`（或简写`-c opt`），可以自动设置高级别的编译器优化选项（如-O2），能够提高性能，适合发布版本场景
+>1.在bazel编译的时候 后面添加`--define brpc_with_urma=true` 使能ubsocket，默认不使能；
+>2.在bazel编译的时候 后面添加`--compilation_mode=opt`（或简写`-c opt`），可以自动设置高级别的编译器优化选项（如-O2），能够提高性能，适合发布版本场景
 
 当然，也可以根据需要仅编译出libbrpc.a，后续再用该静态库编译可执行文件。
 ```
