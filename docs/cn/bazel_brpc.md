@@ -50,6 +50,7 @@ ubsocket通过环境变量进行配置，在bRPC与ubsocket集成的过程中，
 |ubsocket_trace_time | 控制维测数据输出间隔（单位s）| [1, 300] | 10 |否|
 |ubsocket_trace_file_path | 控制维测数据输出路径| [1, 512] | /tmp/ubsocket/log |否|
 |ubsocket_trace_file_size | 控制维测数据文件大小（MB）| [1, 300] | 10 |否|
+|ubsocket_stats_cli | 是否打开cli服务|false, true | true |否|
 |ubsocket_enable_share_jfr|	设置是否开启共享JFR|false：不开启共享jfr<br>true：开启共享jfr|false|否|
 |ubsocket_share_jfr_rx_queue_depth|设置开启共享JFR后，每个Socket链接接收缓存队列深度|最小值是64，设置上限由实际机器环境决定|1024|否|
 
