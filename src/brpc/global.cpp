@@ -139,7 +139,7 @@ DEFINE_string(ubsocket_brpc_alloc_sym, "", "The global pointer symbol informatio
 DEFINE_string(ubsocket_brpc_dealloc_sym, "", "The global pointer symbol information of butil::iobuf::blockmem_deallocate in the brpc component");
 DEFINE_string(ubsocket_adpt_stats, "false", "Count statistics for ubsocket (e.g., 'false', 'true')");
 DEFINE_string(ubsocket_auto_fallback_tcp, "true", "Whether to automatically downgrade TCP when the protocols do not match (e.g., 'false', 'true')");
-DEFINE_string(ubsocket_enable_share_jfr, "false", "Whether to enable share jfr (e.g., 'false', 'true')");
+DEFINE_string(ubsocket_enable_share_jfr, "true", "Whether to enable share jfr (e.g., 'false', 'true')");
 DEFINE_string(ubsocket_share_jfr_rx_queue_depth, "1024", "Share jfr receive queue depth, the minimum value is 64. The upper limit of the setting is determined by the actual machine environment.");
 DEFINE_string(ubsocket_trace_enable, "true", "Enable ubsocket trace statistics (e.g., 'false', 'true')");
 DEFINE_string(ubsocket_trace_time, "10", "Set monitoring ubsocket data output interval, the minimum value is 1, the maximum value is 300");
