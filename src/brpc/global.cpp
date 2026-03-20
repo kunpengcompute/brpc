@@ -103,6 +103,7 @@
 #include "butil/files/file_watcher.h"
 #if BRPC_WITH_URMA
 #include "brpc_context.h"
+#include "ub_lock_manager.h"
 #endif
 
 extern "C" {
@@ -354,6 +355,29 @@ static void BaiduStreamingLogHandler(google::protobuf::LogLevel level,
 #endif
 
 #if BRPC_WITH_URMA
+class BrpcUbRwLock : public UbRWLock {
+public:
+    BrpcUbRwLock() {
+    }
+    void rdlock() override {
+        mutex_.rdlock();
+    }
+    void wrlock() override {
+        mutex_.wrlock();
+    }
+    void unlock() override {
+        mutex_.unlock();
+    }
+    bool try_rdlock() override {
+        return mutex_.try_rdlock();
+    }
+    bool try_wrlock() override {
+        return mutex_.try_wrlock();
+    }
+private:
+    bthread::RWLock mutex_;
+};
+
 static void SetUbSocketEnv() {
     if (getenv("LD_PRELOAD") != nullptr) {
         return;
@@ -440,8 +464,11 @@ static void SetUbSocketEnv() {
     if (!FLAGS_ubsocket_stats_cli.empty()) {
         ::setenv("UBSOCKET_STATS_CLI", FLAGS_ubsocket_stats_cli.c_str(), 1);
     }
-
+    UbLockManager::instance().registerRWLock([]() {
+        return std::make_unique<BrpcUbRwLock>();
+    });
     (void)Brpc::Context::GetContext();
+    Brpc::Context::SetUbEnable();
 }
 #endif
 
