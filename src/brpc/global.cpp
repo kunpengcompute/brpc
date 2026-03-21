@@ -106,6 +106,8 @@
 #include "ub_lock_manager.h"
 #endif
 
+#include "bthread/rwlock.h"
+
 extern "C" {
 // defined in gperftools/malloc_extension_c.h
 void BAIDU_WEAK MallocExtension_ReleaseFreeMemory(void);
