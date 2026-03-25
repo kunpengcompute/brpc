@@ -107,6 +107,7 @@
 #endif
 
 #include "bthread/rwlock.h"
+#include "bthread/bthread.h"
 
 extern "C" {
 // defined in gperftools/malloc_extension_c.h
@@ -380,6 +381,32 @@ private:
     bthread::RWLock mutex_;
 };
 
+class BrpcUbSem : public UbSem {
+public:
+    BrpcUbSem() {}
+    int init(int pshared, unsigned int value)
+    {
+        return bthread_sem_init(&sem_, value);
+    }
+
+    int destory()
+    {
+        return bthread_sem_destroy(&sem_);
+    }
+
+    int wait()
+    {
+        return bthread_sem_wait(&sem_);
+    }
+
+    int post()
+    {
+        return bthread_sem_post(&sem_);
+    }
+private:
+    bthread_sem_t sem_;
+};
+
 static void SetUbSocketEnv() {
     if (getenv("LD_PRELOAD") != nullptr) {
         return;
@@ -468,6 +495,9 @@ static void SetUbSocketEnv() {
     }
     UbLockManager::instance().registerRWLock([]() {
         return std::make_unique<BrpcUbRwLock>();
+    });
+    UbLockManager::instance().registerSem([]() {
+        return std::make_unique<BrpcUbSem>();
     });
     (void)Brpc::Context::GetContext();
     Brpc::Context::SetUbEnable();
