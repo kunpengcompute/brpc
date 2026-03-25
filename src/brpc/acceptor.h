@@ -83,6 +83,7 @@ private:
     // Accept connections.
     static void OnNewConnectionsUntilEAGAIN(Socket* m);
     static void OnNewConnections(Socket* m);
+    static void* OnNewConnectionsInner(void* m);
 
     static void* CloseIdleConnections(void* arg);
     
