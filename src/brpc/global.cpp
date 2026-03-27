@@ -149,6 +149,7 @@ DEFINE_string(ubsocket_trace_time, "10", "Set monitoring ubsocket data output in
 DEFINE_string(ubsocket_trace_file_path, "/tmp/ubsocket/log", "Set monitoring ubsocket data output path (e.g., '/tmp/ubsocket/log')");
 DEFINE_string(ubsocket_trace_file_size, "10", "Set monitoring ubsocket data file size, the minimum value is 1, the maximum value is 300");
 DEFINE_string(ubsocket_stats_cli, "true", "Enable ubsocket cli service (e.g., 'false', 'true')");
+DEFINE_string(ubsocket_min_reserved_credit, "64", "Minimum reserved credit, if the held credit <= min_reserved_credit, the credit will not be returned.");
 
 namespace policy {
 // Defined in http_rpc_protocol.cpp
@@ -492,6 +493,9 @@ static void SetUbSocketEnv() {
     }
     if (!FLAGS_ubsocket_stats_cli.empty()) {
         ::setenv("UBSOCKET_STATS_CLI", FLAGS_ubsocket_stats_cli.c_str(), 1);
+    }
+    if (!FLAGS_ubsocket_min_reserved_credit.empty()) {
+        ::setenv("UBSOCKET_MIN_RESERVED_CREDIT", FLAGS_ubsocket_min_reserved_credit.c_str(), 1);
     }
     UbLockManager::instance().registerRWLock([]() {
         return std::make_unique<BrpcUbRwLock>();
