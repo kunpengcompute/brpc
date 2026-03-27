@@ -41,6 +41,7 @@
 #include "butil/strings/string_piece.h"
 #include "butil/fd_utility.h"
 #include "butil/memory/scope_guard.h"
+#include "butil/ubsocket_wrapper.h"
 
 //supported since Linux 3.9.
 DEFINE_bool(reuse_port, false, "Enable SO_REUSEPORT for all listened sockets");
@@ -48,6 +49,8 @@ DEFINE_bool(reuse_port, false, "Enable SO_REUSEPORT for all listened sockets");
 DEFINE_bool(reuse_addr, true, "Enable SO_REUSEADDR for all listened sockets");
 
 DEFINE_bool(reuse_uds_path, false, "remove unix domain socket file before listen to it");
+
+DECLARE_bool(ubsocket_enable_wrapper);
 
 __BEGIN_DECLS
 int BAIDU_WEAK bthread_connect(
@@ -545,8 +548,11 @@ int tcp_listen(EndPoint point, bool use_ub) {
     int sa_family = serv_addr.ss_family;
     if (use_ub) {
         sa_family = AF_SMC;
+        if (!FLAGS_ubsocket_enable_wrapper) {
+            LOG(ERROR) << "use_ub=true does not work if ubsocket_enable_wrapper=false";
+        }
     }
-    fd_guard sockfd(socket(sa_family, SOCK_STREAM, 0));
+    fd_guard sockfd(::ubsocket_wrapper_socket(sa_family, SOCK_STREAM, 0));
     if (sockfd < 0) {
         return -1;
     }

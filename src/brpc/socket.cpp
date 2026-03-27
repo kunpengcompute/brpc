@@ -855,7 +855,7 @@ void Socket::BeforeRecycled() {
         if (_on_edge_triggered_events != NULL) {
             _io_event.RemoveConsumer(prev_fd);
         }
-        close(prev_fd);
+        ::ubsocket_wrapper_close(prev_fd);
         if (create_by_connect) {
             g_vars->channel_conn << -1;
         }
@@ -1016,7 +1016,7 @@ int Socket::WaitAndReset(int32_t expected_nref) {
         if (_on_edge_triggered_events != NULL) {
             _io_event.RemoveConsumer(prev_fd);
         }
-        close(prev_fd);
+        ::ubsocket_wrapper_close(prev_fd);
         if (CreatedByConnect()) {
             g_vars->channel_conn << -1;
         }
@@ -1293,7 +1293,7 @@ int Socket::Connect(const timespec* abstime,
     if (_use_ub) {
         sa_family = AF_SMC;
     }
-    butil::fd_guard sockfd(socket(sa_family, SOCK_STREAM, 0));
+    butil::fd_guard sockfd(::ubsocket_wrapper_socket(sa_family, SOCK_STREAM, 0));
     if (sockfd < 0) {
         PLOG(ERROR) << "Fail to create socket";
         return -1;
@@ -1302,7 +1302,7 @@ int Socket::Connect(const timespec* abstime,
     // We need to do async connect (to manage the timeout by ourselves).
     CHECK_EQ(0, butil::make_non_blocking(sockfd));
     
-    const int rc = ::connect(
+    const int rc = ::ubsocket_wrapper_connect(
         sockfd, (struct sockaddr*)&serv_addr, addr_size);
     if (rc != 0 && errno != EINPROGRESS) {
         PLOG(WARNING) << "Fail to connect to " << remote_side();
@@ -2681,7 +2681,7 @@ inline SocketPool::~SocketPool() {
 inline int SocketPool::GetSocket(SocketUniquePtr* ptr) {
     const int connection_pool_size = FLAGS_max_connection_pool_size;
 
-    // In prev rev, SocketPool could be sharded into multiple SubSocketPools to
+    // In prev rev, SocketPool could be sharded into multiple Subsocket_wrapperPools to
     // reduce thread contentions. The sharding key is mixed from pthread-id so
     // that data locality are better kept.
     // However sharding also makes the socket more frequently to be created

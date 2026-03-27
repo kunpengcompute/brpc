@@ -22,6 +22,8 @@
 
 #include <unistd.h>                                  // close()
 
+#include "ubsocket_wrapper.h"
+
 namespace butil {
 
 // RAII file descriptor.
@@ -43,7 +45,7 @@ public:
     
     ~fd_guard() {
         if (_fd >= 0) {
-            ::close(_fd);
+            ::ubsocket_wrapper_close(_fd);
             _fd = -1;
         }
     }
@@ -51,7 +53,7 @@ public:
     // Close current fd and replace with another fd
     void reset(int fd) {
         if (_fd >= 0) {
-            ::close(_fd);
+            ::ubsocket_wrapper_close(_fd);
             _fd = -1;
         }
         _fd = fd;
