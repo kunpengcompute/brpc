@@ -32,10 +32,10 @@
 
 #define DELEGATE(f)                                         \
     ({                                                      \
-        FLAGS_ubsocket_enable_wrapper ? UB_API_WRAP(f) : f; \
+        FLAGS_ubsocket_enable ? UB_API_WRAP(f) : f; \
     })
 
-DEFINE_bool(ubsocket_enable_wrapper, true, "Enable the ubsocket interposition layer. If true, socket calls are routed through ubsocket; otherwise, the original socket api is used.");
+DEFINE_bool(ubsocket_enable, true, "Enable the ubsocket interposition layer. If true, socket calls are routed through ubsocket; otherwise, the original socket api is used.");
 
 extern "C" {
 int ubsocket_wrapper_socket(int domain, int type, int protocol) {
