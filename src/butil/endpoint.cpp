@@ -50,7 +50,7 @@ DEFINE_bool(reuse_addr, true, "Enable SO_REUSEADDR for all listened sockets");
 
 DEFINE_bool(reuse_uds_path, false, "remove unix domain socket file before listen to it");
 
-DECLARE_bool(ubsocket_enable_wrapper);
+DECLARE_bool(ubsocket_enable);
 
 __BEGIN_DECLS
 int BAIDU_WEAK bthread_connect(
@@ -548,8 +548,8 @@ int tcp_listen(EndPoint point, bool use_ub) {
     int sa_family = serv_addr.ss_family;
     if (use_ub) {
         sa_family = AF_SMC;
-        if (!FLAGS_ubsocket_enable_wrapper) {
-            LOG(ERROR) << "use_ub=true does not work if ubsocket_enable_wrapper=false";
+        if (!FLAGS_ubsocket_enable) {
+            LOG(ERROR) << "use_ub=true does not work as ubsocket_enable=false";
         }
     }
     fd_guard sockfd(::ubsocket_wrapper_socket(sa_family, SOCK_STREAM, 0));
