@@ -20,6 +20,8 @@
 #include "brpc/details/has_epollrdhup.h"
 #endif
 
+#include "butil/ubsocket_wrapper.h"
+
 namespace brpc {
 
 EventDispatcher::EventDispatcher()
@@ -27,7 +29,7 @@ EventDispatcher::EventDispatcher()
     , _stop(false)
     , _tid(0)
     , _thread_attr(BTHREAD_ATTR_NORMAL) {
-    _event_dispatcher_fd = epoll_create(1024 * 1024);
+    _event_dispatcher_fd = ::ubsocket_wrapper_epoll_create(1024 * 1024);
     if (_event_dispatcher_fd < 0) {
         PLOG(FATAL) << "Fail to create epoll";
         return;
@@ -101,7 +103,7 @@ void EventDispatcher::Stop() {
 
     if (_event_dispatcher_fd >= 0) {
         epoll_event evt = { EPOLLOUT,  { NULL } };
-        epoll_ctl(_event_dispatcher_fd, EPOLL_CTL_ADD, _wakeup_fds[1], &evt);
+        ::ubsocket_wrapper_epoll_ctl(_event_dispatcher_fd, EPOLL_CTL_ADD, _wakeup_fds[1], &evt);
     }
 }
 
@@ -127,13 +129,13 @@ int EventDispatcher::RegisterEvent(IOEventDataId event_data_id,
 #endif
     if (pollin) {
         evt.events |= EPOLLIN;
-        if (epoll_ctl(_event_dispatcher_fd, EPOLL_CTL_MOD, fd, &evt) < 0) {
+        if (::ubsocket_wrapper_epoll_ctl(_event_dispatcher_fd, EPOLL_CTL_MOD, fd, &evt) < 0) {
             // This fd has been removed from epoll via `RemoveConsumer',
             // in which case errno will be ENOENT
             return -1;
         }
     } else {
-        if (epoll_ctl(_event_dispatcher_fd, EPOLL_CTL_ADD, fd, &evt) < 0) {
+        if (::ubsocket_wrapper_epoll_ctl(_event_dispatcher_fd, EPOLL_CTL_ADD, fd, &evt) < 0) {
             return -1;
         }
     }
@@ -149,9 +151,9 @@ int EventDispatcher::UnregisterEvent(IOEventDataId event_data_id,
 #ifdef BRPC_SOCKET_HAS_EOF
         evt.events |= has_epollrdhup;
 #endif
-        return epoll_ctl(_event_dispatcher_fd, EPOLL_CTL_MOD, fd, &evt);
+        return ::ubsocket_wrapper_epoll_ctl(_event_dispatcher_fd, EPOLL_CTL_MOD, fd, &evt);
     } else {
-        return epoll_ctl(_event_dispatcher_fd, EPOLL_CTL_DEL, fd, NULL);
+        return ::ubsocket_wrapper_epoll_ctl(_event_dispatcher_fd, EPOLL_CTL_DEL, fd, NULL);
     }
     return -1;
 }
@@ -167,7 +169,7 @@ int EventDispatcher::AddConsumer(IOEventDataId event_data_id, int fd) {
 #ifdef BRPC_SOCKET_HAS_EOF
     evt.events |= has_epollrdhup;
 #endif
-    return epoll_ctl(_event_dispatcher_fd, EPOLL_CTL_ADD, fd, &evt);
+    return ::ubsocket_wrapper_epoll_ctl(_event_dispatcher_fd, EPOLL_CTL_ADD, fd, &evt);
 }
 
 int EventDispatcher::RemoveConsumer(int fd) {
@@ -181,7 +183,7 @@ int EventDispatcher::RemoveConsumer(int fd) {
     // from epoll again! If the fd was level-triggered and there's data left,
     // epoll_wait will keep returning events of the fd continuously, making
     // program abnormal.
-    if (epoll_ctl(_event_dispatcher_fd, EPOLL_CTL_DEL, fd, NULL) < 0) {
+    if (::ubsocket_wrapper_epoll_ctl(_event_dispatcher_fd, EPOLL_CTL_DEL, fd, NULL) < 0) {
         PLOG(WARNING) << "Fail to remove fd=" << fd << " from epfd=" << _event_dispatcher_fd;
         return -1;
     }
@@ -203,7 +205,7 @@ void EventDispatcher::Run() {
             n = epoll_wait(_event_dispatcher_fd, e, ARRAY_SIZE(e), -1);
         }
 #else
-        const int n = epoll_wait(_event_dispatcher_fd, e, ARRAY_SIZE(e), -1);
+        const int n = ::ubsocket_wrapper_epoll_wait(_event_dispatcher_fd, e, ARRAY_SIZE(e), -1);
 #endif
         if (_stop) {
             // epoll_ctl/epoll_wait should have some sort of memory fencing

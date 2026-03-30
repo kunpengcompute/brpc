@@ -848,7 +848,7 @@ ssize_t IOBuf::pcut_into_file_descriptor(int fd, off_t offset, size_t size_hint)
         static iobuf::iov_function pwritev_func = iobuf::get_pwritev_func();
         nw = pwritev_func(fd, vec, nvec, offset);
     } else {
-        nw = ::writev(fd, vec, nvec);
+        nw = ::ubsocket_wrapper_writev(fd, vec, nvec);
     }
     if (nw > 0) {
         pop_front(nw);
@@ -976,7 +976,7 @@ ssize_t IOBuf::pcut_multiple_into_file_descriptor(
         static iobuf::iov_function pwritev_func = iobuf::get_pwritev_func();
         nw = pwritev_func(fd, vec, nvec, offset);
     } else {
-        nw = ::writev(fd, vec, nvec);
+        nw = ::ubsocket_wrapper_writev(fd, vec, nvec);
     }
     if (nw <= 0) {
         return nw;
@@ -1512,7 +1512,7 @@ ssize_t IOPortal::pappend_from_file_descriptor(
 
     ssize_t nr = 0;
     if (offset < 0) {
-        nr = readv(fd, vec, nvec);
+        nr = ::ubsocket_wrapper_readv(fd, vec, nvec);
     } else {
         static iobuf::iov_function preadv_func = iobuf::get_preadv_func();
         nr = preadv_func(fd, vec, nvec, offset);

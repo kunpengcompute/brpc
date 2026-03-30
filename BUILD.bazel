@@ -237,6 +237,7 @@ BUTIL_SRCS = [
     "src/butil/binary_printer.cpp",
     "src/butil/recordio.cc",
     "src/butil/popen.cpp",
+    "src/butil/ubsocket_wrapper.cpp",
 ] + select({
     "@bazel_tools//src/conditions:darwin": [
         "src/butil/time/time_mac.cc",
@@ -358,6 +359,11 @@ cc_library(
     }) + select({
         "//bazel/config:brpc_with_boringssl": ["@boringssl//:ssl", "@boringssl//:crypto"],
         "//conditions:default": ["@openssl//:ssl", "@openssl//:crypto"],
+    }) + select({
+        "//bazel/config:brpc_with_urma": [
+            "@ubsocket//src:ubsocket",
+        ],
+        "//conditions:default": [],
     }),
 )
 

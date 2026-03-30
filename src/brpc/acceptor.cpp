@@ -253,7 +253,7 @@ void Acceptor::OnNewConnectionsUntilEAGAIN(Socket* acception) {
         struct sockaddr_storage in_addr;
         bzero(&in_addr, sizeof(in_addr));
         socklen_t in_len = sizeof(in_addr);
-        butil::fd_guard in_fd(accept(acception->fd(), (sockaddr*)&in_addr, &in_len));
+        butil::fd_guard in_fd(::ubsocket_wrapper_accept(acception->fd(), (sockaddr*)&in_addr, &in_len));
         if (in_fd < 0) {
             // no EINTR because listened fd is non-blocking.
             if (errno == EAGAIN) {
