@@ -103,7 +103,7 @@
 #include "butil/files/file_watcher.h"
 #if BRPC_WITH_URMA
 #include "brpc_context.h"
-#include "ub_lock_manager.h"
+#include "ub_lock_ops.h"
 #endif
 
 #include "bthread/rwlock.h"
@@ -361,53 +361,202 @@ static void BaiduStreamingLogHandler(google::protobuf::LogLevel level,
 #endif
 
 #if BRPC_WITH_URMA
-class BrpcUbRwLock : public UbRWLock {
-public:
-    BrpcUbRwLock() {
+static u_external_mutex_t* brpc_external_lock_create(u_external_mutex_type type)
+{
+    if (type == LT_RECURSIVE) {
+        LOG(ERROR) << "Error to execute external_lock_create for LT_RECURSIVE is not supported in brpc";
+        return nullptr;
     }
-    void rdlock() override {
-        mutex_.rdlock();
+    auto* mutex = new(std::nothrow) bthread::Mutex();
+    if (mutex == nullptr) {
+        LOG(ERROR) << "Error when create mutex";
+        return nullptr;
     }
-    void wrlock() override {
-        mutex_.wrlock();
+    return reinterpret_cast<u_external_mutex_t*>(mutex);
+}
+
+static int brpc_external_lock_destroy(u_external_mutex_t *m)
+{
+    if (m == nullptr) {
+        LOG(ERROR) << "Error to execute external_lock_destroy for the pointer is nullptr";
+        return -1;
     }
-    void unlock() override {
-        mutex_.unlock();
+    delete reinterpret_cast<bthread::Mutex*>(m);
+    return 0;
+}
+
+static int brpc_external_lock_lock(u_external_mutex_t *m)
+{
+    if (m == nullptr) {
+        LOG(ERROR) << "Error to execute external_lock_lock for the pointer is nullptr";
+        return -1;
     }
-    bool try_rdlock() override {
-        return mutex_.try_rdlock();
+    (reinterpret_cast<bthread::Mutex*>(m))->lock();
+    return 0;
+}
+
+static int brpc_external_lock_unlock(u_external_mutex_t *m)
+{
+    if (m == nullptr) {
+        LOG(ERROR) << "Error to execute external_lock_unlock for the pointer is nullptr";
+        return -1;
     }
-    bool try_wrlock() override {
-        return mutex_.try_wrlock();
+    (reinterpret_cast<bthread::Mutex*>(m))->unlock();
+    return 0;
+}
+
+static int brpc_external_lock_try_lock(u_external_mutex_t *m)
+{
+    if (m == nullptr) {
+        LOG(ERROR) << "Error to execute external_lock_try_lock for the pointer is nullptr";
+        return -1;
     }
-private:
-    bthread::RWLock mutex_;
+    return (reinterpret_cast<bthread::Mutex*>(m))->try_lock() ? 0 : -1;
+}
+
+static u_rw_lock_t* brpc_rw_lock_create()
+{
+    auto* rwlock = new(std::nothrow) bthread::RWLock();
+    if (rwlock == nullptr) {
+        LOG(ERROR) << "Error when create rwlock";
+        return nullptr;
+    }
+    return reinterpret_cast<u_rw_lock_t*>(rwlock);
+}
+
+static int brpc_rw_lock_destroy(u_rw_lock_t *m)
+{
+    if (m == nullptr) {
+        LOG(ERROR) << "Error to execute rw_lock_destroy for the pointer is nullptr";
+        return -1;
+    }
+    delete reinterpret_cast<bthread::RWLock*>(m);
+    return 0;
+}
+
+static int brpc_rw_lock_lock_read(u_rw_lock_t *m)
+{
+    if (m == nullptr) {
+        LOG(ERROR) << "Error to execute rw_lock_lock_read for the pointer is nullptr";
+        return -1;
+    }
+    (reinterpret_cast<bthread::RWLock*>(m))->rdlock();
+    return 0;
+}
+
+static int brpc_rw_lock_lock_write(u_rw_lock_t *m)
+{
+    if (m == nullptr) {
+        LOG(ERROR) << "Error to execute rw_lock_lock_write for the pointer is nullptr";
+        return -1;
+    }
+    (reinterpret_cast<bthread::RWLock*>(m))->wrlock();
+    return 0;
+}
+
+static int brpc_rw_lock_unlock_rw(u_rw_lock_t *m)
+{
+    if (m == nullptr) {
+        LOG(ERROR) << "Error to execute rw_lock_unlock_rw for the pointer is nullptr";
+        return -1;
+    }
+    (reinterpret_cast<bthread::RWLock*>(m))->unlock();
+    return 0;
+}
+
+static int brpc_rw_lock_try_lock_read(u_rw_lock_t *m)
+{
+    if (m == nullptr) {
+        LOG(ERROR) << "Error to execute rw_lock_try_lock_read for the pointer is nullptr";
+        return -1;
+    }
+    return (reinterpret_cast<bthread::RWLock*>(m))->try_rdlock() ? 0 : -1;
+}
+
+static int brpc_rw_lock_try_lock_write(u_rw_lock_t *m)
+{
+    if (m == nullptr) {
+        LOG(ERROR) << "Error to execute rw_lock_try_lock_write for the pointer is nullptr";
+        return -1;
+    }
+    return (reinterpret_cast<bthread::RWLock*>(m))->try_wrlock() ? 0 : -1;
+}
+
+static u_semaphore_t* brpc_semaphore_create()
+{
+    auto* sem = new(std::nothrow) bthread_sem_t();
+    if (sem == nullptr) {
+        LOG(ERROR) << "Error when create sem";
+        return nullptr;
+    }
+    return reinterpret_cast<u_semaphore_t*>(sem);
+}
+
+static int brpc_semaphore_destroy(u_semaphore_t *s)
+{
+    if (s == nullptr) {
+        LOG(ERROR) << "Error to execute semaphore_destroy for the pointer is nullptr";
+        return -1;
+    }
+    if (int ret = bthread_sem_destroy(reinterpret_cast<bthread_sem_t*>(s)) != 0) {
+        LOG(ERROR) << "Error to execute bthread_sem_destroy, ret: " << ret;
+        return ret;
+    }
+    delete reinterpret_cast<bthread_sem_t*>(s);
+    return 0;
+}
+
+static int brpc_semaphore_init(u_semaphore_t *s, int shared, unsigned int value)
+{
+    if (s == nullptr) {
+        LOG(ERROR) << "Error to execute semaphore_init for the pointer is nullptr";
+        return -1;
+    }
+    return bthread_sem_init(reinterpret_cast<bthread_sem_t*>(s), value);
+}
+
+static int brpc_semaphore_wait(u_semaphore_t *s)
+{
+    if (s == nullptr) {
+        LOG(ERROR) << "Error to execute semaphore_wait for the pointer is nullptr";
+        return -1;
+    }
+    return bthread_sem_wait(reinterpret_cast<bthread_sem_t*>(s));
+}
+
+static int brpc_semaphore_post(u_semaphore_t *s)
+{
+    if (s == nullptr) {
+        LOG(ERROR) << "Error to execute semaphore_post for the pointer is nullptr";
+        return -1;
+    }
+    return bthread_sem_post(reinterpret_cast<bthread_sem_t*>(s));
+}
+
+u_external_lock_ops_t brpc_external_lock_ops = {
+    .create = brpc_external_lock_create,
+    .destroy = brpc_external_lock_destroy,
+    .lock = brpc_external_lock_lock,
+    .unlock = brpc_external_lock_unlock,
+    .try_lock = brpc_external_lock_try_lock
 };
 
-class BrpcUbSem : public UbSem {
-public:
-    BrpcUbSem() {}
-    int init(int pshared, unsigned int value)
-    {
-        return bthread_sem_init(&sem_, value);
-    }
+u_rw_lock_ops_t brpc_rw_lock_ops = {
+    .create = brpc_rw_lock_create,
+    .destroy = brpc_rw_lock_destroy,
+    .lock_read = brpc_rw_lock_lock_read,
+    .lock_write = brpc_rw_lock_lock_write,
+    .unlock_rw = brpc_rw_lock_unlock_rw,
+    .try_lock_read = brpc_rw_lock_try_lock_read,
+    .try_lock_write = brpc_rw_lock_try_lock_write
+};
 
-    int destory()
-    {
-        return bthread_sem_destroy(&sem_);
-    }
-
-    int wait()
-    {
-        return bthread_sem_wait(&sem_);
-    }
-
-    int post()
-    {
-        return bthread_sem_post(&sem_);
-    }
-private:
-    bthread_sem_t sem_;
+u_semaphore_ops_t brpc_semaphore_ops = {
+    .create = brpc_semaphore_create,
+    .destroy = brpc_semaphore_destroy,
+    .init = brpc_semaphore_init,
+    .wait = brpc_semaphore_wait,
+    .post = brpc_semaphore_post
 };
 
 static void SetUbSocketEnv() {
@@ -505,14 +654,12 @@ static void SetUbSocketEnv() {
     if (!FLAGS_ubsocket_link_priority.empty()) {
         ::setenv("UBSOCKET_LINK_PRIORITY", FLAGS_ubsocket_link_priority.c_str(), 1);
     }
-    UbLockManager::instance().registerRWLock([]() {
-        return std::make_unique<BrpcUbRwLock>();
-    });
-    UbLockManager::instance().registerSem([]() {
-        return std::make_unique<BrpcUbSem>();
-    });
-    (void)Brpc::Context::GetContext();
-    Brpc::Context::SetUbEnable();
+    u_register_external_lock_ops(&brpc_external_lock_ops);
+    u_register_rw_lock_ops(&brpc_rw_lock_ops);
+    u_register_semaphore_ops(&brpc_semaphore_ops);
+    if (Brpc::Context::GetContext() != nullptr) {
+        Brpc::Context::SetUbEnable();
+    }
 }
 #endif
 
