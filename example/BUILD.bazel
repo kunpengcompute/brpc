@@ -50,6 +50,13 @@ proto_library(
     ],
 )
 
+proto_library(
+    name = "ub_performance_proto",
+    srcs = [
+        "ub_performance/test.proto",
+    ],
+)
+
 cc_proto_library(
     name = "cc_echo_c++_proto",
     deps = [
@@ -61,6 +68,13 @@ cc_proto_library(
     name = "cc_rdma_performance_proto",
     deps = [
         ":rdma_performance_proto",
+    ],
+)
+
+cc_proto_library(
+    name = "cc_ub_performance_proto",
+    deps = [
+        ":ub_performance_proto",
     ],
 )
 
@@ -131,6 +145,36 @@ cc_binary(
     ],
     copts = COPTS,
     deps = [
+        "//:brpc",
+    ],
+)
+
+cc_binary(
+    name = "ub_performance_client",
+    srcs = [
+        "ub_performance/client.cpp",
+    ],
+    includes = [
+        "ub_performance",
+    ],
+    copts = COPTS + ["-DBRPC_WITH_RDMA=1"],
+    deps = [
+        ":cc_ub_performance_proto",
+        "//:brpc",
+    ],
+)
+
+cc_binary(
+    name = "ub_performance_server",
+    srcs = [
+        "ub_performance/server.cpp",
+    ],
+    includes = [
+        "ub_performance",
+    ],
+    copts = COPTS + ["-DBRPC_WITH_RDMA=1"],
+    deps = [
+        ":cc_ub_performance_proto",
         "//:brpc",
     ],
 )
