@@ -281,9 +281,6 @@ void Test(int thread_num, int attachment_size) {
         std::cout << " Throughput: " << throughput << "MB/s" << std::endl;
     }
     g_stop = true;
-    for (int i = 0; i < FLAGS_thread_num; ++i) {
-        bthread_join(tid[i], NULL);
-    }
 }
 
 int main(int argc, char* argv[]) {
