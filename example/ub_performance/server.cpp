@@ -25,7 +25,8 @@
 #include "test.pb.h"
 
 DEFINE_int32(port, 8002, "TCP Port of this server");
-DEFINE_bool(use_rdma, true, "Use RDMA or not");
+DEFINE_bool(use_rdma, false, "Use RDMA or not");
+DEFINE_bool(use_ub, false, "Use UB or not");
 
 DEFINE_bool(server_ignore_oc, false, "Server ignore eovercrowded, false by default");
 DEFINE_int32(num_threads, 5, "The max number of threads are used");
@@ -107,6 +108,7 @@ int main(int argc, char* argv[]) {
 
     brpc::ServerOptions options;
     options.use_rdma = FLAGS_use_rdma;
+    options.use_ub = FLAGS_use_ub;
     options.max_concurrency = FLAGS_max_concurrency;
     options.num_threads = FLAGS_num_threads;
     options.ignore_eovercrowded = FLAGS_server_ignore_oc;

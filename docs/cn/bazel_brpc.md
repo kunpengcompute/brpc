@@ -152,6 +152,14 @@ $ bazel build --noenable_bzlmod --distdir=/root/proxy :brpc # 编译产物在 br
 >编译参数“--noenable_bzlmod ”表示不使用bzlmod特性，主要依赖在WORKSPACE中已添加；
 >编译参数“--distdir=/root/proxy ”指定下载路径，WORKSPACE中的相关三方依赖，例:protobuf、gflags、leveldb等会自动下载到该路径，可以根据需要配置。
 
+编译ub_performance测试工具
+
+```
+$ cd brpc  #在根目录下执行编译命令
+$ bazel build -c opt //example:ub_performance_server --define brpc_with_urma=true
+$ bazel build -c opt //example:ub_performance_client --define brpc_with_urma=true
+```
+
 ### 4.5 执行用例
 
 上述完成后可以获得echo_c++_server和echo_c++_client两个可执行文件，分别放到放到两台服务器上
@@ -170,3 +178,13 @@ echo_c++用例执行成功，server与client互发“hello_world”
 >- 根据服务器实际情况，调整gflags参数，详见本文gflags介绍。
 >- 启动命令不添加ubsocket_ub_force 参数，需要在client.cpp和server.cpp源码main方法中，添加`options.use_ub = FLAGS_use_ub`。
 >- ubsocket为每个线程做了`thread local cache`提升性能（每个线程需额外占用内存），另外超过可用CPU核数的线程不会实际并发起来，故建议根据实际需要配置bRPC线程数以合理使用资源。参考[worker线程数](server.md#worker线程数)进行配置即可。
+
+ub_performance测试工具执行方法
+
+```
+$ # 启动ub_performance_server
+$ ./ub_performance_server --use_ub=true
+
+$ # 在另一个节点启动ub_performance_client
+$ ./ub_performance_client --server=141.61.85.60:8002  --use_ub=true
+```
