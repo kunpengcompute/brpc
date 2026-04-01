@@ -135,7 +135,7 @@ DEFINE_string(ubsocket_rx_depth, "1024", "Receive queue depth, the minimum value
 DEFINE_string(ubsocket_block_type, "default", "Minimum fragment of the memory pool for ubsocket (e.g., 'default'(8k), 'small'(16k), 'medium'(32k), 'large'(64k))");
 DEFINE_string(ubsocket_pool_initial_size, "1024", "Total size of IO memory for ubsocket, in MB");
 DEFINE_string(ubsocket_ub_force, "false", "Whether to force the use of the UB protocol to accelerate TCP (e.g., 'false', 'true')");
-DEFINE_string(ubsocket_schedule_policy, "affinity", "Set the multi-plane load balancing policy (e.g., 'affinity', 'rr')");
+DEFINE_string(ubsocket_schedule_policy, "affinity_priority", "Set the multi-plane load balancing policy (e.g., 'affinity_priority', 'affinity', 'rr')");
 DEFINE_string(ubsocket_readv_unlimited, "true", "Whether to enable the readv reporting limit for ubsocket (e.g., 'false', 'true')");
 DEFINE_string(ubsocket_use_polling, "false", "Whether to enable message processing polling for ubsocket (e.g., 'false', 'true')");
 DEFINE_string(ubsocket_brpc_alloc_sym, "", "The global pointer symbol information of butil::iobuf::blockmem_allocate in the brpc component");
