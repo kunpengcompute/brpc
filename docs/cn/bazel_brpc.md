@@ -183,8 +183,8 @@ ub_performance测试工具执行方法
 
 ```
 $ # 启动ub_performance_server
-$ ./ub_performance_server --use_ub=true
+$ ./ub_performance_server --use_ub=true --ubsocket_enable=true
 
 $ # 在另一个节点启动ub_performance_client
-$ ./ub_performance_client --server=141.61.85.60:8002  --use_ub=true
+$ ./ub_performance_client --server=141.61.85.60:8002  --use_ub=true --ubsocket_enable=true
 ```
