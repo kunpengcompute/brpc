@@ -335,12 +335,12 @@ void Acceptor::OnNewConnectionsUntilEAGAIN(Socket* acception) {
 }
 
 void Acceptor::OnNewConnections(Socket* acception) {
-    int progress = Socket::PROGRESS_INIT;	 
-    do {	 
-        OnNewConnectionsUntilEAGAIN(acception);	 
-        if (acception->Failed()) {	 
-            return;	 
-        }	 
+    int progress = Socket::PROGRESS_INIT;
+    do {
+        OnNewConnectionsUntilEAGAIN(acception);
+        if (acception->Failed()) {
+            return;
+        }
     } while (acception->MoreReadEvents(&progress));
 }
 
