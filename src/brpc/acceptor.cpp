@@ -334,22 +334,14 @@ void Acceptor::OnNewConnectionsUntilEAGAIN(Socket* acception) {
     }
 }
 
-void* Acceptor::OnNewConnectionsInner(void* arg) {
-    Socket* acception = (Socket*)arg;
+void Acceptor::OnNewConnections(Socket* acception) {
     int progress = Socket::PROGRESS_INIT;
     do {
         OnNewConnectionsUntilEAGAIN(acception);
         if (acception->Failed()) {
-            return NULL;
+            return;
         }
     } while (acception->MoreReadEvents(&progress));
-    return NULL;
-}
-
-
-void Acceptor::OnNewConnections(Socket* acception) {
-    bthread_t tid;
-    bthread_start_background(&tid, NULL, Acceptor::OnNewConnectionsInner, (void*)acception); 
 }
 
 void Acceptor::BeforeRecycle(Socket* sock) {
