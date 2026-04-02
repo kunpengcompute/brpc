@@ -165,10 +165,10 @@ $ bazel build -c opt //example:ub_performance_client --define brpc_with_urma=tru
 上述完成后可以获得echo_c++_server和echo_c++_client两个可执行文件，分别放到放到两台服务器上
 ```
 $ # 启动echo_c++_server
-$ ./echo_c++_server --ubsocket_log_use_printf=true --ubsocket_ub_force=true
+$ ./echo_c++_server --ubsocket_log_use_printf=true --ubsocket_ub_force=true --ubsocket_enable=true
 
 $ # 在另一个节点启动echo_c++_client
-$ ./echo_c++_client --server=141.61.85.60:8000  --ubsocket_log_use_printf=true --ubsocket_ub_force=true
+$ ./echo_c++_client --server=141.61.85.60:8000  --ubsocket_log_use_printf=true --ubsocket_ub_force=true --ubsocket_enable=true
 ```
 ![image](../images/echo_server.png)
 ![image](../images/echo_client.png)
@@ -183,8 +183,8 @@ ub_performance测试工具执行方法
 
 ```
 $ # 启动ub_performance_server
-$ ./ub_performance_server --use_ub=true
+$ ./ub_performance_server --use_ub=true --ubsocket_enable=true
 
 $ # 在另一个节点启动ub_performance_client
-$ ./ub_performance_client --server=141.61.85.60:8002  --use_ub=true
+$ ./ub_performance_client --server=141.61.85.60:8002  --use_ub=true --ubsocket_enable=true
 ```
