@@ -51,6 +51,7 @@ DEFINE_int32(dummy_port, 8001, "Dummy server port number");
 DEFINE_int32(connect_timeout_ms, 2000, "connect timeout");
 DEFINE_int64(req_size, 0, "request size");
 DEFINE_bool(client_ignore_oc, false, "Client ignore eovercrowded, false by default");
+DEFINE_int32(max_retry, 3, "max retry times (0-1000)");
 
 bvar::LatencyRecorder g_latency_recorder("client");
 bvar::LatencyRecorder g_server_cpu_recorder("server_cpu");
@@ -64,6 +65,13 @@ volatile bool g_stop = false;
 
 butil::atomic<int64_t> g_token(10000);
 std::string g_name;
+
+brpc::RpcRetryPolicyWithJitteredBackoff jitter_policy(
+    50,  // min_backoff
+    500, // max_backoff
+    40,  // no_backoff_remaining
+    false
+);
 
 static void* GenerateToken(void* arg) {
     int64_t start_time = butil::monotonic_time_ns();
@@ -107,13 +115,19 @@ public:
     inline bool IsStop() { return _stop; }
 
     int Init() {
+        if (FLAGS_max_retry < 0 || FLAGS_max_retry > 1000) {
+            LOG(WARNING) << "max_retry should be in [0, 1000], clamp to 3."
+            FLAGS_max_retry = 3;
+        }
+
         brpc::ChannelOptions options;
         options.use_rdma = FLAGS_use_rdma;
         options.use_ub = FLAGS_use_ub;
         options.protocol = FLAGS_protocol;
         options.connection_type = FLAGS_connection_type;
         options.timeout_ms = FLAGS_rpc_timeout_ms;
-        options.max_retry = 0;
+        options.max_retry = FLAGS_max_retry;
+        options.retry_policy = &jitter_policy;
         options.connect_timeout_ms = FLAGS_connect_timeout_ms;
         std::string server = g_servers[(rr_index++) % g_servers.size()];
         _channel = new brpc::Channel();
