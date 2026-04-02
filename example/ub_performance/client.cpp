@@ -116,7 +116,7 @@ public:
 
     int Init() {
         if (FLAGS_max_retry < 0 || FLAGS_max_retry > 1000) {
-            LOG(WARNING) << "max_retry should be in [0, 1000], clamp to 3."
+            LOG(WARNING) << "max_retry should be in [0, 1000], clamp to 3.";
             FLAGS_max_retry = 3;
         }
 
