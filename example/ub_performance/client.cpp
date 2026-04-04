@@ -130,8 +130,6 @@ public:
             LOG(ERROR) << "Fail to initialize channel";
             return -1;
         }
-        brpc::Controller cntl;
-        test::PerfTestResponse response;
         test::PerfTestRequest request;
         request.set_echo_attachment(_echo_attachment);
         request.set_name(g_name);
@@ -139,6 +137,8 @@ public:
 
         int connect_retry_times = 0;
         while (connect_retry_times < FLAGS_max_retry) {
+            brpc::Controller cntl;
+            test::PerfTestResponse response;
             stub.Test(&cntl, &request, &response, NULL);
             if (cntl.Failed()) {
                 LOG(WARNING) << connect_retry_times << "th, RPC call failed: " << cntl.ErrorText() << ", retrying";
@@ -148,7 +148,6 @@ public:
                 int random_ms = distrib(gen);
                 LOG(WARNING) << "waiting for " << random_ms << " ms";
                 std::this_thread::sleep_for(std::chrono::milliseconds(random_ms));
-                cntl.Reset();
             } else {
                 break;
             }
@@ -156,7 +155,7 @@ public:
         }
 
         if (connect_retry_times == FLAGS_max_retry) {
-            LOG(ERROR) << "RPC call failed: " << cntl.ErrorText() << ", exiting";
+            LOG(ERROR) << "RPC call failed, exiting...";
             return -1;
         }
         return 0;
