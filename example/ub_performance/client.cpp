@@ -19,6 +19,9 @@
 #include <unistd.h>
 #include <vector>
 #include <gflags/gflags.h>
+#include <random>
+#include <thread>
+#include <chrono>
 #include "butil/atomicops.h"
 #include "butil/fast_rand.h"
 #include "butil/logging.h"
@@ -65,13 +68,6 @@ volatile bool g_stop = false;
 
 butil::atomic<int64_t> g_token(10000);
 std::string g_name;
-
-brpc::RpcRetryPolicyWithJitteredBackoff jitter_policy(
-    50,  // min_backoff
-    500, // max_backoff
-    40,  // no_backoff_remaining
-    false
-);
 
 static void* GenerateToken(void* arg) {
     int64_t start_time = butil::monotonic_time_ns();
@@ -126,8 +122,6 @@ public:
         options.protocol = FLAGS_protocol;
         options.connection_type = FLAGS_connection_type;
         options.timeout_ms = FLAGS_rpc_timeout_ms;
-        options.max_retry = FLAGS_max_retry;
-        options.retry_policy = &jitter_policy;
         options.connect_timeout_ms = FLAGS_connect_timeout_ms;
         std::string server = g_servers[(rr_index++) % g_servers.size()];
         _channel = new brpc::Channel();
@@ -141,9 +135,27 @@ public:
         request.set_echo_attachment(_echo_attachment);
         request.set_name(g_name);
         test::PerfTestService_Stub stub(_channel);
-        stub.Test(&cntl, &request, &response, NULL);
-        if (cntl.Failed()) {
-            LOG(ERROR) << "RPC call failed: " << cntl.ErrorText();
+
+        int connect_retry_times = 0;
+        while (connect_retry_times < FLAGS_max_retry) {
+            stub.Test(&cntl, &request, &response, NULL);
+            if (cntl.Failed()) {
+                LOG(WARNING) << i << "th, RPC call failed: " << cntl.ErrorText() << ", retrying";
+                std::random_device rd;
+                std::mt19937 gen(rd());
+                std::uniform_int_distribution<> distrib(200, 500);
+                int random_ms = distrib(gen);
+                LOG(WARNING) << "waiting for " << random_ms << " ms";
+                std::this_thread::sleep_for(std::chrono::milliseconds(random_ms));
+                cntl.Reset();
+            } else {
+                break;
+            }
+            ++connect_retry_times;
+        }
+
+        if (connect_retry_times == FLAGS_max_retry) {
+            LOG(ERROR) << "RPC call failed: " << cntl.ErrorText() << ", exiting";
             return -1;
         }
         return 0;
