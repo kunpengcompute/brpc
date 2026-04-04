@@ -55,6 +55,7 @@ DEFINE_int32(connect_timeout_ms, 2000, "connect timeout");
 DEFINE_int64(req_size, 0, "request size");
 DEFINE_bool(client_ignore_oc, false, "Client ignore eovercrowded, false by default");
 DEFINE_int32(max_retry, 3, "max retry times (0-1000)");
+DEFINE_int32(connect_retry_interval, 200, "connect retry interval(ms)");
 
 bvar::LatencyRecorder g_latency_recorder("client");
 bvar::LatencyRecorder g_server_cpu_recorder("server_cpu");
@@ -140,10 +141,10 @@ public:
         while (connect_retry_times < FLAGS_max_retry) {
             stub.Test(&cntl, &request, &response, NULL);
             if (cntl.Failed()) {
-                LOG(WARNING) << i << "th, RPC call failed: " << cntl.ErrorText() << ", retrying";
+                LOG(WARNING) << connect_retry_times << "th, RPC call failed: " << cntl.ErrorText() << ", retrying";
                 std::random_device rd;
                 std::mt19937 gen(rd());
-                std::uniform_int_distribution<> distrib(200, 500);
+                std::uniform_int_distribution<> distrib(FLAGS_connect_retry_interval, 2 * FLAGS_connect_retry_interval);
                 int random_ms = distrib(gen);
                 LOG(WARNING) << "waiting for " << random_ms << " ms";
                 std::this_thread::sleep_for(std::chrono::milliseconds(random_ms));
