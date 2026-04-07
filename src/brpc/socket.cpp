@@ -56,6 +56,8 @@
 #include <sys/event.h>
 #endif
 
+DECLARE_bool(ubsocket_enable);
+
 namespace bthread {
 size_t BAIDU_WEAK get_sizes(const bthread_id_list_t* list, size_t* cnt, size_t n);
 }
@@ -1290,7 +1292,7 @@ int Socket::Connect(const timespec* abstime,
         return -1;
     }
     int sa_family = serv_addr.ss_family;
-    if (_use_ub) {
+    if (FLAGS_ubsocket_enable && _use_ub) {
         sa_family = AF_SMC;
     }
     butil::fd_guard sockfd(::ubsocket_wrapper_socket(sa_family, SOCK_STREAM, 0));

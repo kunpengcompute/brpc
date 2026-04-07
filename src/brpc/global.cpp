@@ -114,6 +114,8 @@ extern "C" {
 void BAIDU_WEAK MallocExtension_ReleaseFreeMemory(void);
 }
 
+DECLARE_bool(ubsocket_enable);
+
 namespace brpc {
 
 DECLARE_bool(usercode_in_pthread);
@@ -668,7 +670,9 @@ static void GlobalInitializeOrDieImpl() {
     //////////////////////////////////////////////////////////////////
 
 #if BRPC_WITH_URMA
-    SetUbSocketEnv();
+    if (FLAGS_ubsocket_enable) {
+        SetUbSocketEnv();
+    }
 #endif
 
     // Ignore SIGPIPE.

@@ -546,11 +546,8 @@ int tcp_listen(EndPoint point, bool use_ub) {
         return -1;
     }
     int sa_family = serv_addr.ss_family;
-    if (use_ub) {
+    if (FLAGS_ubsocket_enable && use_ub) {
         sa_family = AF_SMC;
-        if (!FLAGS_ubsocket_enable) {
-            LOG(ERROR) << "use_ub=true does not work as ubsocket_enable=false";
-        }
     }
     fd_guard sockfd(::ubsocket_wrapper_socket(sa_family, SOCK_STREAM, 0));
     if (sockfd < 0) {
