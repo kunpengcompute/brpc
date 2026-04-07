@@ -134,7 +134,6 @@ DEFINE_string(ubsocket_tx_depth, "1024", "Send queue depth, the minimum value is
 DEFINE_string(ubsocket_rx_depth, "1024", "Receive queue depth, the minimum value is 2. The upper limit of the setting is determined by the actual machine environment, based on the value of 'max_jfc_depth' in the command 'urma_admin show --whole'.");
 DEFINE_string(ubsocket_block_type, "default", "Minimum fragment of the memory pool for ubsocket (e.g., 'default'(8k), 'small'(16k), 'medium'(32k), 'large'(64k))");
 DEFINE_string(ubsocket_pool_initial_size, "1024", "Total size of IO memory for ubsocket, in MB");
-DEFINE_string(ubsocket_ub_force, "false", "Whether to force the use of the UB protocol to accelerate TCP (e.g., 'false', 'true')");
 DEFINE_string(ubsocket_schedule_policy, "affinity_priority", "Set the multi-plane load balancing policy (e.g., 'affinity_priority', 'affinity', 'rr')");
 DEFINE_string(ubsocket_readv_unlimited, "true", "Whether to enable the readv reporting limit for ubsocket (e.g., 'false', 'true')");
 DEFINE_string(ubsocket_use_polling, "false", "Whether to enable message processing polling for ubsocket (e.g., 'false', 'true')");
@@ -597,9 +596,6 @@ static void SetUbSocketEnv() {
     if (!FLAGS_ubsocket_pool_initial_size.empty()) {
         ::setenv("UBSOCKET_POOL_INITIAL_SIZE", FLAGS_ubsocket_pool_initial_size.c_str(), 1);
     }
-    if (!FLAGS_ubsocket_ub_force.empty()) {
-        ::setenv("UBSOCKET_USE_UB_FORCE", FLAGS_ubsocket_ub_force.c_str(), 1);
-    }
     if (!FLAGS_ubsocket_schedule_policy.empty()) {
         ::setenv("UBSOCKET_SCHEDULE_POLICY", FLAGS_ubsocket_schedule_policy.c_str(), 1);
     }
@@ -654,6 +650,7 @@ static void SetUbSocketEnv() {
     if (!FLAGS_ubsocket_link_priority.empty()) {
         ::setenv("UBSOCKET_LINK_PRIORITY", FLAGS_ubsocket_link_priority.c_str(), 1);
     }
+    ::setenv("UBSOCKET_USE_UB_FORCE", "false", 1);
     u_register_external_lock_ops(&brpc_external_lock_ops);
     u_register_rw_lock_ops(&brpc_rw_lock_ops);
     u_register_semaphore_ops(&brpc_semaphore_ops);
