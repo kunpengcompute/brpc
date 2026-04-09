@@ -153,6 +153,7 @@ DEFINE_string(ubsocket_stats_cli, "true", "Enable ubsocket cli service (e.g., 'f
 DEFINE_string(ubsocket_ub_trans_mode, "RC_TP", "Protocol mode for ubsocket (e.g., 'RC_TP', 'RM_TP', 'RM_CTP', 'RC_CTP')");
 DEFINE_string(ubsocket_min_reserved_credit, "64", "Minimum reserved credit, if the held credit <= min_reserved_credit, the credit will not be returned.");
 DEFINE_string(ubsocket_link_priority, "0", "Set urma flow service level priority, range from 0 to 15.");
+DEFINE_string(ubsocket_degrade, "true", "Allow degradation to TCP when UB fails; default: true");
 
 namespace policy {
 // Defined in http_rpc_protocol.cpp
@@ -651,6 +652,9 @@ static void SetUbSocketEnv() {
     }
     if (!FLAGS_ubsocket_link_priority.empty()) {
         ::setenv("UBSOCKET_LINK_PRIORITY", FLAGS_ubsocket_link_priority.c_str(), 1);
+    }
+    if (!FLAGS_ubsocket_degrade.empty()) {
+        ::setenv("UBSOCKET_DEGRADE", FLAGS_ubsocket_degrade.c_str(), 1);
     }
     ::setenv("UBSOCKET_USE_UB_FORCE", "false", 1);
     u_register_external_lock_ops(&brpc_external_lock_ops);
