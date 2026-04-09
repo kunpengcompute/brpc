@@ -28,6 +28,9 @@
 #include "brpc/nshead_service.h"
 #include "brpc/builtin/common.h"
 #include "brpc/builtin/connections_service.h"
+#ifdef BRPC_WITH_URMA
+#include "brpc_context.h"
+#endif
 
 
 namespace brpc {
@@ -135,6 +138,9 @@ void ConnectionsService::PrintConnections(
             "<th>OutBytes/m</th>"
             "<th>Out/m</th>"
             "<th>Rtt/Var(ms)</th>"
+#ifdef BRPC_WITH_URMA
+            "<th>UseUB</th>"
+#endif
             "<th>SocketId</th>"
             "</tr>\n";
     } else {
@@ -145,7 +151,11 @@ void ConnectionsService::PrintConnections(
         os << "SSL|Protocol    |fd   |"
             "InBytes/s|In/s  |InBytes/m |In/m    |"
             "OutBytes/s|Out/s |OutBytes/m|Out/m   |"
-            "Rtt/Var(ms)|SocketId\n";
+            "Rtt/Var(ms)|";
+#ifdef BRPC_WITH_URMA
+        os << "UseUB|";
+#endif
+        os << "SocketId\n";
     }
 
     const char* const bar = (use_html ? "</td><td>" : "|");
@@ -192,6 +202,9 @@ void ConnectionsService::PrintConnections(
                << min_width("-", 10) << bar
                << min_width("-", 8) << bar
                << min_width("-", 11) << bar;
+#ifdef BRPC_WITH_URMA
+            os << min_width("-", 5) << bar;
+#endif
         } else {
             {
                 SocketUniquePtr agent_sock;
@@ -309,6 +322,10 @@ void ConnectionsService::PrintConnections(
                << min_width(stat.out_size_m, 10) << bar
                << min_width(stat.out_num_messages_m, 8) << bar
                << min_width(rtt_display, 11) << bar;
+#ifdef BRPC_WITH_URMA
+            bool use_ub = Brpc::Context::IsProtocolByUb(ptr->fd());
+            os << min_width(use_ub, 5) << bar;
+#endif
         }
 
         if (use_html) {
