@@ -2818,6 +2818,7 @@ int Socket::GetPooledSocket(SocketUniquePtr* pooled_socket) {
         opt.keytable_pool = _keytable_pool;
         opt.app_connect = _app_connect;
         opt.use_rdma =  (_rdma_ep) ? true : false;
+        opt.use_ub = _use_ub;
         socket_pool = new SocketPool(opt);
         SocketPool* expected = NULL;
         if (!main_sp->socket_pool.compare_exchange_strong(
