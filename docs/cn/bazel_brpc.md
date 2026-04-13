@@ -160,6 +160,18 @@ $ bazel build -c opt //example:ub_performance_server --define brpc_with_urma=tru
 $ bazel build -c opt //example:ub_performance_client --define brpc_with_urma=true
 ```
 
+默认情况下编译的产物不会带有 debuginfo, 可能调试不便。可以使用如下几个命令编译带有 debuginfo 的二进制, 以编译 `echo_c++_client` 为例。
+
+```bash
+# 在同一宿主机编译、运行, 或者在同一容器内编译、运行
+bazel build //example:echo_c++_client --define brpc_with_urma=true -c opt --copt=-g --cxxopt=-g --strip=never
+
+# 在容器 A 内编译，但是产物会在容器 B 中执行. 使用此种模式编译速度会变慢
+bazel build //example:echo_c++_client --define brpc_with_urma=true -c opt --copt=-g --cxxopt=-g --strip=never --fission=no
+
+# 以上两种都使用了 -c opt, 隐含着 -O2. 如果在 gdb 时发现较多 variable optimized 时，可能需要把 -c opt 改成 -c dbg.
+```
+
 ### 4.5 执行用例
 
 上述完成后可以获得echo_c++_server和echo_c++_client两个可执行文件，分别放到放到两台服务器上
@@ -187,3 +199,25 @@ $ ./ub_performance_server --use_ub=true --ubsocket_enable=true
 $ # 在另一个节点启动ub_performance_client
 $ ./ub_performance_client --server=141.61.85.60:8002  --use_ub=true --ubsocket_enable=true
 ```
+
+### 容器内调试
+
+通常来说容器内的 `kernel.core_pattern` 跟随主机，而主机一般情况下都是由 `systemd-coredump` 来管理 coredump 的。
+但是容器是没有 systemd 服务的，所以为了能够在容器中产生 coredump 文件，需要将它直接转储至文件。
+
+```bash
+mkdir -p /home/share/corefiles
+# 常用格式 %p 表示进程 pid, 其他格式可以参考 https://man.archlinux.org/man/core.5
+sysctl -w kernel.core_pattern=/home/share/corefiles/core.%p
+```
+
+还是以 `echo_c++_client` 为例，如果发现 `objdump -dS ./bazel-bin/example/echo_c++_client` 中没有包含源码信息，可以先进入 `cd $(bazel info execution_root)` 目录，然后再使用
+
+```bash
+objdump -dS ./bazel-out/aarch64-dbg/bin/example/echo_c++_client
+```
+
+原因是 bazel 沙盒机制和构建封闭性 (Hermeticity) 共同导致的。bazel 不是在当前项目的根目录下执行编译的，而是在 execution root 隔离目录，在这个目录下有 external 等第三方依赖、项目源码的软链接。
+同时 bazel 为了保证远程缓存命中率和构建可重现性，bazel 的 c++ toolchain 会传递类似 `-fdebug-prefix-map=$PWD=/proc/self/cwd` 的参数给编译器，然后 gcc 编译时生成的 `DW_AT_comp_dir` 就为 `/proc/self/cwd` 了，而 `DW_AT_name` 则为 `example/echo_c++/client.cpp` (brpc 自己的源文件) 或者第三方依赖 `external/_main~local_deps~ubsocket/src/hcom/umq/util/util_vlog.c`. 
+所以通过 `DW_AT_comp_dir` 与 `DW_AT_name` 无法找到源文件，所以 `objdump -dS` 的输出中未包含源码信息。
+所以，通过进入 execution root 目录，直接运行 objdump 就可以直接找到对应源文件。
