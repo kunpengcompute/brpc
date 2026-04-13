@@ -43,6 +43,8 @@ ubsocket通过环境变量进行配置，在bRPC与ubsocket集成的过程中，
 |ubsocket_readv_unlimited|是否打开readv上报限制|false，true|true|否|
 |ubsocket_block_type|内存池的最小分片|default：8k，small：16k，medium：32k，large：64k|default|否|
 |ubsocket_pool_initial_size|IO内存的总大小，单位MB|应用按需配置|1024|否|
+|ubsocket_pool_max_size|单bRPC进程UB通信内存占用弹性扩容最大值，单位MB|[UBSOCKET_POOL_INITIAL_SIZE, 6144]|2048|否|
+|ubsocket_buf_pool_depth|单bRPC进程线程内存池深度|应用按需配置|12000|否|
 |ubsocket_schedule_policy|设置多平面负载分担策略|affinity_priority, affinity，rr|affinity_priority|否|
 |ubsocket_auto_fallback_tcp|	协议不匹配时是否自动降级为TCP|false：协议不匹配时不降级为TCP true：协议不匹配时自动降级为TCP|true|否|
 |ubsocket_trace_enable | 是否打开trace统计|false, true | true |否|
