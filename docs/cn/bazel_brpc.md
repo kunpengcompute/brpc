@@ -27,7 +27,7 @@
 | boringssl      | c00d7ca810e3780bd0c8ee4eea28f4f2ea4bcdc      |
 
 ## 3 API说明
-
+### 3.1 gflags参数
 ubsocket通过环境变量进行配置，在bRPC与ubsocket集成的过程中，为了保持bRPC的使用习惯，将ubsocket的环境变量配置项全部转换成了bRPC的gflags配置项。gflags配置项见下表。
 
 | 名称 | 含义 | 取值范围 | 默认值 | 必填 |
@@ -60,6 +60,21 @@ ubsocket通过环境变量进行配置，在bRPC与ubsocket集成的过程中，
 > 注意：
 >
 > 为最大程度的兼容bPRC及gflags的使用习惯。新增的这些gflags配置项，均在bRPC的源码中指定了默认值。bRPC集成ubsocket的场景中，ubsocket自身的环境变量不再生效，以gflags的默认值或用户指定的gflags值为准。
+### 3.2 配置项
+在bRPC与ubsocket集成过程中，会增加配置项保证相关资源在使用ubsocket时正确初始化，配置项一般需要client和server侧同时配置生效。
+
+#### 3.2.1 brpc::ChannelOptions
+client侧的配置，使用参考[echo_c++_client用例](../../example/echo_c++/client.cpp)。配置项说明见下表。
+
+|名称|含义|取值范围|默认值|必填|
+|--|--|--|--|--|
+|use_ub|client侧是否使用ub通信，单独设置预期建链失败|false, true|false|否|
+#### 3.2.2 brpc::ServerOptions
+client侧的配置，使用参考[echo_c++_server用例](../../example/echo_c++/server.cpp)。配置项说明见下表。
+
+|名称|含义|取值范围|默认值|必填|
+|--|--|--|--|--|
+|use_ub|server侧是否使用ub通信，单独设置预期建立TCP链路|false, true|false|否|
 
 ## 4 bazel编译
 
