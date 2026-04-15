@@ -72,7 +72,7 @@ client侧的配置，使用参考[echo_c++_client用例](../../example/echo_c++/
 |--|--|--|--|--|
 |use_ub|client侧是否使用ub通信，单独设置预期建链失败|false, true|false|否|
 #### 3.2.2 brpc::ServerOptions
-client侧的配置，使用参考[echo_c++_server用例](../../example/echo_c++/server.cpp)。配置项说明见下表。
+server侧的配置，使用参考[echo_c++_server用例](../../example/echo_c++/server.cpp)。配置项说明见下表。
 
 |名称|含义|取值范围|默认值|必填|
 |--|--|--|--|--|
