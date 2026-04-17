@@ -42,6 +42,10 @@ int ubsocket_wrapper_socket(int domain, int type, int protocol) {
     return DELEGATE(socket)(domain, type, protocol);
 }
 
+int ubsocket_wrapper_listen(int fd, int backlog) {
+    return DELEGATE(listen)(fd, backlog);
+}
+
 int ubsocket_wrapper_connect(int sockfd, const struct sockaddr* addr, socklen_t addrlen) {
     return DELEGATE(connect)(sockfd, addr, addrlen);
 }

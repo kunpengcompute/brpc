@@ -26,6 +26,8 @@
 extern "C" {
 int ubsocket_wrapper_socket(int domain, int type, int protocol);
 
+int ubsocket_wrapper_listen(int fd, int backlog);
+
 int ubsocket_wrapper_connect(int sockfd, const struct sockaddr* addr, socklen_t addrlen);
 
 int ubsocket_wrapper_close(int fd);
