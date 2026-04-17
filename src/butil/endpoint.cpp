@@ -587,7 +587,7 @@ int tcp_listen(EndPoint point, bool use_ub) {
     if (::bind(sockfd, (struct sockaddr*)& serv_addr, serv_addr_size) != 0) {
         return -1;
     }
-    if (listen(sockfd, 65535) != 0) {
+    if (::ubsocket_wrapper_listen(sockfd, 65535) != 0) {
         //             ^^^ kernel would silently truncate backlog to the value
         //             defined in /proc/sys/net/core/somaxconn if it is less
         //             than 65535
