@@ -154,7 +154,7 @@ DEFINE_string(ubsocket_trace_file_size, "10", "Set monitoring ubsocket data file
 DEFINE_string(ubsocket_stats_cli, "true", "Enable ubsocket cli service (e.g., 'false', 'true')");
 DEFINE_string(ubsocket_ub_trans_mode, "RC_TP", "Protocol mode for ubsocket (e.g., 'RC_TP', 'RM_TP', 'RM_CTP', 'RC_CTP')");
 DEFINE_string(ubsocket_min_reserved_credit, "64", "Minimum reserved credit, if the held credit <= min_reserved_credit, the credit will not be returned.");
-DEFINE_string(ubsocket_link_priority, "0", "Set urma flow service level priority, range from 0 to 15.");
+DEFINE_string(ubsocket_link_priority, "-1", "Set urma flow service level priority, range from 0 to 15.");
 DEFINE_string(ubsocket_degrade, "true", "Allow degradation to TCP when UB fails; default: true");
 
 namespace policy {
