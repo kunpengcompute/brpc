@@ -190,7 +190,52 @@ bazel build //example:echo_c++_client --define brpc_with_urma=true -c opt --copt
 ```
 
 ### 4.5 执行用例
+#### 4.5.1 TFO选项开启配置
+由于当前UB建链操作依赖TFO选项，需要在执行前，确认执行环境开启了TFO。
+确认TFO开启：
+```bash
+# 确保值为3
+cat /proc/sys/net/ipv4/tcp_fastopen
+```
 
+宿主机开启TFO：
+```bash
+echo "net.ipv4.tcp_fastopen = 3" | sudo tee -a /etc/sysctl.conf
+sudo sysctl -p
+```
+
+容器开启TFO：
+1. 创建具备CAP_SYS_ADMIN权限的容器
+
+```yaml
+# 在容器创建的yaml模板中，spec/containers/securityContext中，新增capabilities配置，参考如下：
+securityContext:
+  privileged: false
+  capabilities:
+    add: ["SYS_ADMIN"]
+```
+
+2. TFO选项开启命令
+* 方案一：在容器在容器创建的yaml模板中，command补充使能TFO命令，然后基于模板创建容器
+```yaml
+containers:
+- command:
+  - /bin/sh
+  - -c 
+  - |
+    mount -o remount,rw /proc/sys
+    echo 3 > /proc/sys/net/ipv4/tcp_fastopen
+    mount -o remount,ro /proc/sys
+    while true; do sleep 1000; done
+```
+* 方案二：使用步骤1中的模板创建容器后，进入容器手动执行如下命令：
+```bash
+mount -o remount,rw /proc/sys
+echo 3 > /proc/sys/net/ipv4/tcp_fastopen
+mount -o remount,ro /proc/sys
+```
+
+#### 4.5.2 执行验证
 上述完成后可以获得echo_c++_server和echo_c++_client两个可执行文件，分别放到放到两台服务器上
 ```
 $ # 启动echo_c++_server
