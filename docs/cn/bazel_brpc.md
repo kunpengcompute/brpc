@@ -58,6 +58,8 @@ ubsocket通过环境变量进行配置，在bRPC与ubsocket集成的过程中，
 |ubsocket_ub_trans_mode | ub协议模式 |RC_TP，RM_TP, RM_CTP, RC_CTP  | RC_TP | 否 |
 |`ubsocket_enable` | 是否启用 ubsocket 加速 | false, true | false | 否 |
 |`ubsocket_degrade` | 是否允许 ubsocket 在 UB 错误时降级成 TCP | false, true | true | 否 |
+|`ubsocket_async_accept` | 是否允许 ubsocket 在server做accept时做异步accept | false, true | false | 否 |
+|`ubsocket_thread_pool_size` | ubsocket后台线程池的线程数 | [1,64] | 1 | 否 |
 
 > 注意：
 >
