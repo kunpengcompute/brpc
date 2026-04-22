@@ -103,6 +103,7 @@
 #include "butil/files/file_watcher.h"
 #if BRPC_WITH_URMA
 #include "brpc_context.h"
+#include "brpc_thread_pool.h"
 #include "ub_lock_ops.h"
 #endif
 
@@ -156,6 +157,8 @@ DEFINE_string(ubsocket_ub_trans_mode, "RC_TP", "Protocol mode for ubsocket (e.g.
 DEFINE_string(ubsocket_min_reserved_credit, "64", "Minimum reserved credit, if the held credit <= min_reserved_credit, the credit will not be returned.");
 DEFINE_string(ubsocket_link_priority, "-1", "Set urma flow service level priority, range from 0 to 15.");
 DEFINE_string(ubsocket_degrade, "true", "Allow degradation to TCP when UB fails; default: true");
+DEFINE_string(ubsocket_async_accept, "false", "Allow do accept async; default: false");
+DEFINE_string(ubsocket_thread_pool_size, "1", "the number of threads in ubsocket thread pool; default: 0");
 
 namespace policy {
 // Defined in http_rpc_protocol.cpp
@@ -664,6 +667,12 @@ static void SetUbSocketEnv() {
     if (!FLAGS_ubsocket_degrade.empty()) {
         ::setenv("UBSOCKET_DEGRADE", FLAGS_ubsocket_degrade.c_str(), 1);
     }
+    if (!FLAGS_ubsocket_async_accept.empty()) {
+        ::setenv("UBSOCKET_ASYNC_ACCEPT", FLAGS_ubsocket_async_accept.c_str(), 1);
+    }
+    if (!FLAGS_ubsocket_thread_pool_size.empty()) {
+        ::setenv("UBSOCKET_THREAD_POOL_SIZE", FLAGS_ubsocket_thread_pool_size.c_str(), 1);
+    }
     ::setenv("UBSOCKET_USE_UB_FORCE", "false", 1);
     u_register_external_lock_ops(&brpc_external_lock_ops);
     u_register_rw_lock_ops(&brpc_rw_lock_ops);
@@ -671,6 +680,7 @@ static void SetUbSocketEnv() {
     if (Brpc::Context::GetContext() != nullptr) {
         Brpc::Context::SetUbEnable();
     }
+    Brpc::ExecutorService::GetExecutorService()->Start();
 }
 #endif
 
