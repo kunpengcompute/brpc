@@ -57,6 +57,48 @@ proto_library(
     ],
 )
 
+proto_library(
+    name = "http_c++_proto",
+    srcs = [
+        "http_c++/http.proto",
+    ],
+)
+
+proto_library(
+    name = "asynchronous_echo_c++_proto",
+    srcs = [
+        "asynchronous_echo_c++/echo.proto",
+    ],
+)
+
+proto_library(
+    name = "grpc_c++_proto",
+    srcs = [
+        "grpc_c++/helloworld.proto",
+    ],
+)
+
+cc_proto_library(
+    name = "cc_http_c++_proto",
+    deps = [
+        ":http_c++_proto",
+    ],
+)
+
+cc_proto_library(
+    name = "cc_asynchronous_echo_c++_proto",
+    deps = [
+        ":asynchronous_echo_c++_proto",
+    ],
+)
+
+cc_proto_library(
+    name = "cc_grpc_c++_proto",
+    deps = [
+        ":grpc_c++_proto",
+    ],
+)
+
 cc_proto_library(
     name = "cc_echo_c++_proto",
     deps = [
@@ -75,6 +117,111 @@ cc_proto_library(
     name = "cc_ub_performance_proto",
     deps = [
         ":ub_performance_proto",
+    ],
+)
+
+cc_binary(
+    name = "http_c++_benchmark",
+    srcs = [
+        "http_c++/benchmark_http.cpp",
+    ],
+    copts = COPTS,
+    includes = [
+        "http_c++",
+    ],
+    deps = [
+        ":cc_http_c++_proto",
+        "//:brpc",
+    ],
+)
+
+cc_binary(
+    name = "http_c++_client",
+    srcs = [
+        "http_c++/http_client.cpp",
+    ],
+    copts = COPTS,
+    includes = [
+        "http_c++",
+    ],
+    deps = [
+        ":cc_http_c++_proto",
+        "//:brpc",
+    ],
+)
+
+cc_binary(
+    name = "http_c++_server",
+    srcs = [
+        "http_c++/http_server.cpp",
+    ],
+    copts = COPTS,
+    includes = [
+        "http_c++",
+    ],
+    deps = [
+        ":cc_http_c++_proto",
+        "//:brpc",
+    ],
+)
+
+cc_binary(
+    name = "asynchronous_echo_c++_server",
+    srcs = [
+        "asynchronous_echo_c++/server.cpp",
+    ],
+    copts = COPTS,
+    includes = [
+        "asynchronous_echo_c++",
+    ],
+    deps = [
+        ":cc_asynchronous_echo_c++_proto",
+        "//:brpc",
+    ],
+)
+
+cc_binary(
+    name = "asynchronous_echo_c++_client",
+    srcs = [
+        "asynchronous_echo_c++/client.cpp",
+    ],
+    copts = COPTS,
+    includes = [
+        "asynchronous_echo_c++",
+    ],
+    deps = [
+        ":cc_asynchronous_echo_c++_proto",
+        "//:brpc",
+    ],
+)
+
+cc_binary(
+    name = "grpc_c++_server",
+    srcs = [
+        "grpc_c++/server.cpp",
+    ],
+    copts = COPTS,
+    includes = [
+        "grpc_c++",
+    ],
+    deps = [
+        ":cc_grpc_c++_proto",
+        "//:brpc",
+    ],
+)
+
+cc_binary(
+    name = "grpc_c++_client",
+    srcs = [
+        "grpc_c++/client.cpp",
+    ],
+    copts = COPTS,
+    includes = [
+        "grpc_c++",
+    ],
+    deps = [
+        ":cc_grpc_c++_proto",
+        "//:brpc",
     ],
 )
 
