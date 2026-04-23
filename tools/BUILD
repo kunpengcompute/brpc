@@ -46,3 +46,25 @@ cc_binary(
     copts = COPTS,
 )
 
+cc_binary(
+    name = "rpc_press",
+    srcs = [
+        "rpc_press/info_thread.h",
+        "rpc_press/json_loader.h",
+        "rpc_press/pb_util.h",
+        "rpc_press/rpc_press_impl.h",
+        "rpc_press/rpc_press_impl.cpp",
+        "rpc_press/pb_util.cpp",
+        "rpc_press/json_loader.cpp",
+        "rpc_press/rpc_press.cpp",
+        "rpc_press/info_thread.cpp",
+    ],
+    includes = [
+        "rpc_press",
+    ],
+    deps = [
+        "//:brpc",
+    ],
+    copts = COPTS,
+)
+
