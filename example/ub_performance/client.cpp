@@ -60,6 +60,8 @@ DEFINE_int32(connect_retry_interval, 200, "connect retry interval(ms)");
 bvar::LatencyRecorder g_latency_recorder("client");
 bvar::LatencyRecorder g_server_cpu_recorder("server_cpu");
 bvar::LatencyRecorder g_client_cpu_recorder("client_cpu");
+bvar::LatencyRecorder g_connect_recorder("client_connect");
+bvar::LatencyRecorder g_first_rpc_recorder("client_first_rpc");
 butil::atomic<uint64_t> g_last_time(0);
 butil::atomic<uint64_t> g_total_bytes;
 butil::atomic<uint64_t> g_total_cnt;
@@ -126,7 +128,11 @@ public:
         options.connect_timeout_ms = FLAGS_connect_timeout_ms;
         std::string server = g_servers[(rr_index++) % g_servers.size()];
         _channel = new brpc::Channel();
-        if (_channel->Init(server.c_str(), &options) != 0) {
+        int64_t start_ns = butil::cpuwide_time_ns();
+        int ret = _channel->Init(server.c_str(), &options);
+        int64_t end_ns = butil::cpuwide_time_ns();
+        g_connect_recorder << (end_ns - start_ns) / 1000;  // microseconds
+        if (ret != 0) {
             LOG(ERROR) << "Fail to initialize channel";
             return -1;
         }
@@ -139,7 +145,9 @@ public:
         while (connect_retry_times < FLAGS_max_retry) {
             brpc::Controller cntl;
             test::PerfTestResponse response;
+            int64_t rpc_start_ns = butil::cpuwide_time_ns();
             stub.Test(&cntl, &request, &response, NULL);
+            int64_t rpc_end_ns = butil::cpuwide_time_ns();
             if (cntl.Failed()) {
                 LOG(WARNING) << connect_retry_times << "th, RPC call failed: " << cntl.ErrorText() << ", retrying";
                 std::random_device rd;
@@ -149,6 +157,7 @@ public:
                 LOG(WARNING) << "waiting for " << random_ms << " ms";
                 std::this_thread::sleep_for(std::chrono::milliseconds(random_ms));
             } else {
+                g_first_rpc_recorder << (rpc_end_ns - rpc_start_ns) / 1000;
                 break;
             }
             ++connect_retry_times;
@@ -302,6 +311,10 @@ void Test(int thread_num, int attachment_size) {
             << ", QPS: " << (g_total_cnt.load(butil::memory_order_relaxed) * 1000 * 1000 / (end_time - start_time))
             << ", Server CPU-utilization: " << g_server_cpu_recorder.latency(10) << "\%"
             << ", Client CPU-utilization: " << g_client_cpu_recorder.latency(10) << "\%"
+            << ", Connect-Latency: " << g_connect_recorder.latency(10) << "us"
+            << ", 99th-Connect: " << g_connect_recorder.latency_percentile(0.99) << "us"
+            << ", First-RPC-Latency: " << g_first_rpc_recorder.latency(10) << "us"
+            << ", 99th-First-RPC: " << g_first_rpc_recorder.latency_percentile(0.99) << "us"
             << std::endl;
     } else {
         std::cout << " Throughput: " << throughput << "MB/s" << std::endl;
