@@ -2604,7 +2604,7 @@ int Socket::CheckHealth() {
         butil::milliseconds_from_now(_hc_option.health_check_timeout_ms);
     const int connected_fd = Connect(&duetime, NULL, NULL);
     if (connected_fd >= 0) {
-        ::close(connected_fd);
+        ::ubsocket_wrapper_close(connected_fd);
         return 0;
     }
     return errno;
