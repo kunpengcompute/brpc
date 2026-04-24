@@ -159,6 +159,9 @@ DEFINE_string(ubsocket_link_priority, "-1", "Set urma flow service level priorit
 DEFINE_string(ubsocket_degrade, "true", "Allow degradation to TCP when UB fails; default: true");
 DEFINE_string(ubsocket_async_accept, "false", "Allow do accept async; default: false");
 DEFINE_string(ubsocket_thread_pool_size, "1", "the number of threads in ubsocket thread pool; default: 0");
+DEFINE_string(ubsocket_probe_enable, "false", "Enable ubsocket probe (e.g., 'false', 'true')");
+DEFINE_string(ubsocket_probe_time_ms, "1000", "ubsocket probe interval time, the minimum value is 1, the maximum value is 360000");
+DEFINE_string(ubsocket_probe_batch, "10", "ubsocket number of sock to probe per batch, the minimum value is 1, the maximum value is 500");
 
 namespace policy {
 // Defined in http_rpc_protocol.cpp
@@ -672,6 +675,15 @@ static void SetUbSocketEnv() {
     }
     if (!FLAGS_ubsocket_thread_pool_size.empty()) {
         ::setenv("UBSOCKET_THREAD_POOL_SIZE", FLAGS_ubsocket_thread_pool_size.c_str(), 1);
+    }
+    if (!FLAGS_ubsocket_probe_enable.empty()) {
+        ::setenv("UBSOCKET_PROBE_ENABLE", FLAGS_ubsocket_probe_enable.c_str(), 1);
+    }
+    if (!FLAGS_ubsocket_probe_time_ms.empty()) {
+        ::setenv("UBSOCKET_PROBE_TIME_MS", FLAGS_ubsocket_probe_time_ms.c_str(), 1);
+    }
+    if (!FLAGS_ubsocket_probe_batch.empty()) {
+        ::setenv("UBSOCKET_PROBE_BATCH", FLAGS_ubsocket_probe_batch.c_str(), 1);
     }
     ::setenv("UBSOCKET_USE_UB_FORCE", "false", 1);
     u_register_external_lock_ops(&brpc_external_lock_ops);
