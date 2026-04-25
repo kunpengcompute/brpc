@@ -63,6 +63,7 @@ ubsocket通过环境变量进行配置，在bRPC与ubsocket集成的过程中，
 |`ubsocket_probe_enable` | ubsocket开启探测包功能  | false,true | false | 否 |
 |`ubsocket_probe_time_ms` | ubsocket 探测间隔时间（毫秒） | [1, 360000] | 1000 | 否 |
 |`ubsocket_probe_batch` | ubsocket 每批次探测的 Socket 数量 | [1, 500] | 10 | 否 |
+|`ubsocket_ub_epoll_enable` | ubsocket 设置是否使用UB Epoll实现处理 | false: 使用原生Epoll，true: 使用UB Epoll | false | 否 |
 
 > 注意：
 >
