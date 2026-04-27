@@ -60,6 +60,7 @@ ubsocket通过环境变量进行配置，在bRPC与ubsocket集成的过程中，
 |`ubsocket_degrade` | 是否允许 ubsocket 在 UB 错误时降级成 TCP | false, true | true | 否 |
 |`ubsocket_async_accept` | 是否允许 ubsocket 在server做accept时做异步accept | false, true | false | 否 |
 |`ubsocket_thread_pool_size` | ubsocket后台线程池的线程数 | [1,64] | 1 | 否 |
+|`ubsocket_async_epoll_wait` | 是否开启 ubsocket 在 epoll_wait时异步处理 | false, true | false | 否 |
 |`ubsocket_probe_enable` | ubsocket开启探测包功能  | false,true | false | 否 |
 |`ubsocket_probe_time_ms` | ubsocket 探测间隔时间（毫秒） | [1, 360000] | 1000 | 否 |
 |`ubsocket_probe_batch` | ubsocket 每批次探测的 Socket 数量 | [1, 500] | 10 | 否 |
