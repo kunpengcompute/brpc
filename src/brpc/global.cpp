@@ -165,6 +165,7 @@ DEFINE_string(ubsocket_probe_enable, "false", "Enable ubsocket probe (e.g., 'fal
 DEFINE_string(ubsocket_probe_time_ms, "1000", "ubsocket probe interval time, the minimum value is 1, the maximum value is 360000");
 DEFINE_string(ubsocket_probe_batch, "10", "ubsocket number of sock to probe per batch, the minimum value is 1, the maximum value is 500");
 DEFINE_string(ubsocket_ub_epoll_enable, "false", "Whether to enable ub epoll; default: false (optional: false, true)");
+DEFINE_string(ubsocket_use_brpc_zcopy, "true", "Whether to enable ub memory pool to support UB zero copy transportation; default: true (optional: false, true)");
 
 namespace policy {
 // Defined in http_rpc_protocol.cpp
@@ -693,6 +694,9 @@ static void SetUbSocketEnv() {
     }
 	if (!FLAGS_ubsocket_ub_epoll_enable.empty()) {
 		::setenv("UBSOCKET_UB_EPOLL_ENABLE", FLAGS_ubsocket_ub_epoll_enable.c_str(), 1);
+	}
+    if (!FLAGS_ubsocket_use_brpc_zcopy.empty()) {
+		::setenv("UBSOCKET_USE_BRPC_ZCOPY", FLAGS_ubsocket_use_brpc_zcopy.c_str(), 1);
 	}
     ::setenv("UBSOCKET_USE_UB_FORCE", "false", 1);
     u_register_external_lock_ops(&brpc_external_lock_ops);

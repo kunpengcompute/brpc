@@ -65,6 +65,7 @@ ubsocket通过环境变量进行配置，在bRPC与ubsocket集成的过程中，
 |`ubsocket_probe_time_ms` | ubsocket 探测间隔时间（毫秒） | [1, 360000] | 1000 | 否 |
 |`ubsocket_probe_batch` | ubsocket 每批次探测的 Socket 数量 | [1, 500] | 10 | 否 |
 |`ubsocket_ub_epoll_enable` | ubsocket 设置是否使用UB Epoll实现处理 | false: 使用原生Epoll，true: 使用UB Epoll | false | 否 |
+|`ubsocket_use_brpc_zcopy` | ubsocket 设置是否使用UB内存池使能免拷贝加速UB传输 | false: 关闭UB内存池加速（关闭后仅支持TCP传输），true: 使用UB内存池免拷贝加速UB传输 | true | 否 |
 
 > 注意：
 >
