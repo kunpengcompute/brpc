@@ -29,7 +29,7 @@
 #include "brpc/protocol.h"                 // ListProtocols
 #include "brpc/rdma/rdma_endpoint.h"
 #include "brpc/input_messenger.h"
-
+#include "brpc/transport_factory.h"
 
 namespace brpc {
 
@@ -112,8 +112,7 @@ ParseResult InputMessenger::CutInputMessage(
                     // The length of `data' must be PROTO_DUMMY_LEN + 1 to store extra ending char '\0'
                     char data[PROTO_DUMMY_LEN + 1];
                     m->_read_buf.copy_to_cstr(data, PROTO_DUMMY_LEN);
-                    if (strncmp(data, "RDMA", PROTO_DUMMY_LEN) == 0 &&
-                        m->_rdma_state == Socket::RDMA_OFF) {
+                    if (strncmp(data, "RDMA", PROTO_DUMMY_LEN) == 0) {
                         // To avoid timeout when client uses RDMA but server uses TCP
                         return MakeParseError(PARSE_ERROR_TRY_OTHERS);
                     }
@@ -132,7 +131,7 @@ ParseResult InputMessenger::CutInputMessage(
                 } else {
                     // The protocol is fixed at client-side, no need to try others.
                     LOG(ERROR) << "Fail to parse response from " << m->remote_side()
-                        << " by " << _handlers[preferred].name 
+                        << " by " << _handlers[preferred].name
                         << " at client-side";
                     return MakeParseError(PARSE_ERROR_ABSOLUTELY_WRONG);
                 }
@@ -191,45 +190,13 @@ struct RunLastMessage {
     }
 };
 
-static void QueueMessage(InputMessageBase* to_run_msg,
-                         int* num_bthread_created,
-                         bthread_keytable_pool_t* keytable_pool) {
-    if (!to_run_msg) {
-        return;
-    }
-    // Create bthread for last_msg. The bthread is not scheduled
-    // until bthread_flush() is called (in the worse case).
-                
-    // TODO(gejun): Join threads.
-    bthread_t th;
-    bthread_attr_t tmp = (FLAGS_usercode_in_pthread ?
-                          BTHREAD_ATTR_PTHREAD :
-                          BTHREAD_ATTR_NORMAL) | BTHREAD_NOSIGNAL;
-    tmp.keytable_pool = keytable_pool;
-    tmp.tag = bthread_self_tag();
-
-#if BRPC_WITH_RDMA
-    if (rdma::FLAGS_rdma_disable_bthread) {
-        ProcessInputMessage(to_run_msg);
-        return;
-    }
-#endif
-
-    if (!FLAGS_usercode_in_coroutine && bthread_start_background(
-            &th, &tmp, ProcessInputMessage, to_run_msg) == 0) {
-        ++*num_bthread_created;
-    } else {
-        ProcessInputMessage(to_run_msg);
-    }
-}
-
-InputMessenger::InputMessageClosure::~InputMessageClosure() noexcept(false) {
+InputMessageClosure::~InputMessageClosure() noexcept(false) {
     if (_msg) {
         ProcessInputMessage(_msg);
     }
 }
 
-void InputMessenger::InputMessageClosure::reset(InputMessageBase* m) {
+void InputMessageClosure::reset(InputMessageBase* m) {
     if (_msg) {
         ProcessInputMessage(_msg);
     }
@@ -244,7 +211,7 @@ int InputMessenger::ProcessNewMessage(
 
     // Avoid this socket to be closed due to idle_timeout_s
     m->_last_readtime_us.store(received_us, butil::memory_order_relaxed);
-    
+
     size_t last_size = m->_read_buf.length();
     int num_bthread_created = 0;
     while (1) {
@@ -292,17 +259,17 @@ int InputMessenger::ProcessNewMessage(
             m->_avg_msg_size = m->_last_msg_size;
         }
         m->_last_msg_size = 0;
-        
+
         if (pr.message() == NULL) { // the Process() step can be skipped.
             continue;
         }
         pr.message()->_received_us = received_us;
         pr.message()->_base_real_us = base_realtime;
-                    
+
         // This unique_ptr prevents msg to be lost before transfering
         // ownership to last_msg
         DestroyingPtr<InputMessageBase> msg(pr.message());
-        QueueMessage(last_msg.release(), &num_bthread_created, m->_keytable_pool);
+        m->_transport->QueueMessage(last_msg, &num_bthread_created, false);
         if (_handlers[index].process == NULL) {
             LOG(ERROR) << "process of index=" << index << " is NULL";
             continue;
@@ -311,7 +278,7 @@ int InputMessenger::ProcessNewMessage(
         m->PostponeEOF();
         msg->_process = _handlers[index].process;
         msg->_arg = _handlers[index].arg;
-        
+
         if (_handlers[index].verify != NULL) {
             int auth_error = 0;
             if (0 == m->FightAuthentication(&auth_error)) {
@@ -340,11 +307,18 @@ int InputMessenger::ProcessNewMessage(
             // Transfer ownership to last_msg
             last_msg.reset(msg.release());
         } else {
-            QueueMessage(msg.release(), &num_bthread_created,
-                                m->_keytable_pool);
+            last_msg.reset(msg.release());
+            m->_transport->QueueMessage(last_msg, &num_bthread_created, false);
             bthread_flush();
             num_bthread_created = 0;
         }
+    }
+    // In RDMA polling mode, all messages must be executed in a new bthread and
+    // not in the bthread where the polling bthread is located, because the
+    // method for processing messages may call synchronization primitives,
+    // causing the polling bthread to be scheduled out.
+    if (m->_socket_mode == SOCKET_MODE_RDMA) {
+        m->_transport->QueueMessage(last_msg, &num_bthread_created, true);
     }
     if (num_bthread_created) {
         bthread_flush();
@@ -391,7 +365,7 @@ void InputMessenger::OnNewMessages(Socket* m) {
                 // (implied by m->_read_buf.empty), which may produce a new
                 // `InputMessageBase' under some protocols such as HTTP
                 LOG_IF(WARNING, FLAGS_log_connection_close) << *m << " was closed by remote side";
-                read_eof = true;                
+                read_eof = true;
             } else if (errno != EAGAIN) {
                 if (errno == EINTR) {
                     continue;  // just retry
@@ -408,10 +382,10 @@ void InputMessenger::OnNewMessages(Socket* m) {
             }
         }
 
-        if (m->_rdma_state == Socket::RDMA_OFF && messenger->ProcessNewMessage(
-                    m, nr, read_eof, received_us, base_realtime, last_msg) < 0) {
+        if (messenger->ProcessNewMessage(m, nr, read_eof, received_us,
+                                         base_realtime, last_msg) < 0) {
             return;
-        } 
+        }
     }
 
     if (read_eof) {
@@ -428,13 +402,13 @@ InputMessenger::InputMessenger(size_t capacity)
 
 InputMessenger::~InputMessenger() {
     delete[] _handlers;
-    _handlers = NULL;        
+    _handlers = NULL;
     _max_index.store(-1, butil::memory_order_relaxed);
     _capacity = 0;
 }
 
 int InputMessenger::AddHandler(const InputMessageHandler& handler) {
-    if (handler.parse == NULL || handler.process == NULL 
+    if (handler.parse == NULL || handler.process == NULL
             || handler.name == NULL) {
         CHECK(false) << "Invalid argument";
         return -1;
@@ -466,7 +440,7 @@ int InputMessenger::AddHandler(const InputMessageHandler& handler) {
     if (_handlers[index].parse == NULL) {
         // The same protocol might be added more than twice
         _handlers[index] = handler;
-    } else if (_handlers[index].parse != handler.parse 
+    } else if (_handlers[index].parse != handler.parse
                || _handlers[index].process != handler.process) {
         CHECK(_handlers[index].parse == handler.parse);
         CHECK(_handlers[index].process == handler.process);
@@ -479,7 +453,7 @@ int InputMessenger::AddHandler(const InputMessageHandler& handler) {
 }
 
 int InputMessenger::AddNonProtocolHandler(const InputMessageHandler& handler) {
-    if (handler.parse == NULL || handler.process == NULL 
+    if (handler.parse == NULL || handler.process == NULL
             || handler.name == NULL) {
         CHECK(false) << "Invalid argument";
         return -1;
@@ -527,16 +501,7 @@ int InputMessenger::Create(const butil::EndPoint& remote_side,
 
 int InputMessenger::Create(SocketOptions options, SocketId* id) {
     options.user = this;
-#if BRPC_WITH_RDMA
-    if (options.use_rdma) {
-        options.on_edge_triggered_events = rdma::RdmaEndpoint::OnNewDataFromTcp;
-        options.app_connect = std::make_shared<rdma::RdmaConnect>();
-    } else {
-#else
-    {
-#endif
-        options.on_edge_triggered_events = OnNewMessages;
-    }
+    options.need_on_edge_trigger = true;
     // Enable keepalive by options or Gflag.
     // Priority: options > Gflag.
     if (options.keepalive_options || FLAGS_socket_keepalive) {
@@ -564,7 +529,7 @@ int InputMessenger::Create(SocketOptions options, SocketId* id) {
 
 int InputMessenger::FindProtocolIndex(const char* name) const {
     for (size_t i = 0; i < _capacity; ++i) {
-        if (_handlers[i].parse != NULL 
+        if (_handlers[i].parse != NULL
                 && strcmp(name, _handlers[i].name) == 0) {
             return i;
         }
@@ -593,11 +558,11 @@ static ProtocolType FindProtocolOfHandler(const InputMessageHandler& h) {
     ListProtocols(&vec);
     for (size_t i = 0; i < vec.size(); ++i) {
         if (vec[i].second.parse == h.parse &&
-                ((vec[i].second.process_request == h.process)  
+                ((vec[i].second.process_request == h.process)
                                         //      ^^ server side
                  || (vec[i].second.process_response == h.process))
                                                  // ^^ client side
-                && strcmp(vec[i].second.name, h.name) == 0) { 
+                && strcmp(vec[i].second.name, h.name) == 0) {
             return vec[i].first;
         }
     }
