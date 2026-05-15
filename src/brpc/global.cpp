@@ -111,6 +111,16 @@
 #include "bthread/rwlock.h"
 #include "bthread/bthread.h"
 
+#include "ubsocket.h"
+
+#if BRPC_WITH_GLOG
+    #define UBSOCKET_LOG(level, filename, line, msg) \
+        LOG_AT(level, filename, line) << (msg)
+#else
+    #define UBSOCKET_LOG(level, filename, line, msg) \
+        LOG_AT1(level, filename, line) << (msg)
+#endif
+
 extern "C" {
 // defined in gperftools/malloc_extension_c.h
 void BAIDU_WEAK MallocExtension_ReleaseFreeMemory(void);
@@ -573,7 +583,24 @@ u_semaphore_ops_t brpc_semaphore_ops = {
     .post = brpc_semaphore_post
 };
 
+void UbsocketLog(int level, const char *msg, const char *filename, int line)
+{
+    switch (level) {
+        case 4:
+            UBSOCKET_LOG(ERROR, filename, line, msg);
+            break;
+        case 3:
+            UBSOCKET_LOG(WARNING, filename, line, msg);
+            break;
+        default:
+            UBSOCKET_LOG(INFO, filename, line, msg);
+            break;
+    }
+}
+
 static void SetUbSocketEnv() {
+    ubsocket_set_logger(UbsocketLog);
+
     if (getenv("LD_PRELOAD") != nullptr) {
         return;
     }
