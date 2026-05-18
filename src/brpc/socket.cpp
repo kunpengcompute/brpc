@@ -28,12 +28,14 @@
 #include <netinet/tcp.h>                         // getsockopt
 #include <gflags/gflags.h>
 #include "bthread/unstable.h"                    // bthread_timer_del
+#include "bthread/rwlock.h"                      // bthread::RWLock
 #include "butil/fd_utility.h"                     // make_non_blocking
 #include "butil/fd_guard.h"                       // fd_guard
 #include "butil/time.h"                           // cpuwide_time_us
 #include "butil/object_pool.h"                    // get_object
 #include "butil/logging.h"                        // CHECK
 #include "butil/macros.h"
+#include "butil/fast_rand.h"
 #include "butil/class_name.h"                     // butil::class_name
 #include "butil/memory/scope_guard.h"
 #include "brpc/log.h"
@@ -93,6 +95,15 @@ DEFINE_int32(max_connection_pool_size, 100,
              "Max number of pooled connections to a single endpoint");
 BRPC_VALIDATE_GFLAG(max_connection_pool_size, PassValidate);
 
+DEFINE_bool(enable_adaptive_gap_threshold, false,
+             "Enable adaptive adjustment of gap threshold for multiple connections.");
+
+DEFINE_int32(gap_threshold_for_multiple_connections, 100,
+             "Max number of channel to a single connect");
+
+DEFINE_int32(max_connection_multiple_size, 10,
+             "Max number of connections to a single endpoint");
+
 DEFINE_int32(connect_timeout_as_unreachable, 3,
              "If the socket failed to connect due to ETIMEDOUT for so many "
              "times *continuously*, the error is changed to ENETUNREACH which "
@@ -135,6 +146,58 @@ private:
     butil::atomic<int> _numinflight; // #inflight sockets in all sub pools.
 };
 
+class BAIDU_CACHELINE_ALIGNMENT SocketMultiPool {
+friend class Socket;
+public:
+    explicit SocketMultiPool(const SocketOptions& opt);
+    ~SocketMultiPool();
+
+    // Get an address-able socket. If the pool is empty, create one.
+    // Returns 0 on success.
+    int GetSocket(SocketUniquePtr* ptr);
+
+    // Return a socket (which was returned by GetSocket) back to the pool,
+    // if the pool is full, setfail the socket directly.
+    void ReturnSocket(Socket* sock);
+
+    // Adaptive adjustment: called every second to identify bottleneck
+    // and adjust gap_threshold / target_connections dynamically.
+    void AdaptiveAdjust();
+
+private:
+    // Adjust parameters based on identified mode.
+    void AdjustParameters(int32_t mode, uint64_t rpc_count,
+        double avg_req_bytes, double buffer_pressure_ratio, double write_merge_ratio);
+
+    // options used to create this instance
+    SocketOptions _options;
+    bthread::RWLock _mutex;
+    std::vector<SocketId> _free_pool;
+    butil::EndPoint _remote_side;
+    butil::atomic<int> _numfree; // #free sockets in all sub pools.
+    butil::atomic<SocketId> _lightest_sid;
+    butil::atomic<size_t> _num_created;      // 创建的连接数
+    std::vector<SocketId> _multiple;
+    butil::atomic<uint64_t> _rpc_count;     // 总在途请求数（瞬时值）
+
+    // 全局在途请求写出字节数（所有子连接 _unwritten_bytes 之和）
+    butil::atomic<int64_t> _total_unwritten_bytes;
+    // 全局在途请求数
+    butil::atomic<int64_t> _total_unwritten_num;
+
+    // 全局 sys_write 调用次数（累计值）
+    butil::atomic<uint64_t> _write_syscall_count;
+
+    // 全局已发送请求总数（累计值，区别于 _rpc_count 瞬时在途数）
+    butil::atomic<uint64_t> _total_rpc_count;
+
+    // 上次自适应调整时间
+    butil::atomic<int64_t> _last_adjust_time_us;
+
+    // 动态 gap_threshold（自适应调节）
+    butil::atomic<int32_t> _dynamic_gap_threshold;
+};
+
 // NOTE: sizeof of this class is 1200 bytes. If we have 10K sockets, total
 // memory is 12MB, not lightweight, but acceptable.
 struct ExtendedSocketStat : public SocketStat {
@@ -173,6 +236,8 @@ public:
     // with each other.
     butil::atomic<SocketPool*> socket_pool;
 
+    butil::atomic<SocketMultiPool*> multi_socket_pool;
+
     // The socket newing this object.
     SocketId creator_socket_id;
 
@@ -202,6 +267,7 @@ public:
 
 Socket::SharedPart::SharedPart(SocketId creator_socket_id2)
     : socket_pool(NULL)
+    , multi_socket_pool(NULL)
     , creator_socket_id(creator_socket_id2)
     , num_continuous_connect_timeouts(0)
     , in_size(0)
@@ -400,6 +466,12 @@ void Socket::WriteRequest::Setup(Socket* s) {
         if (before_write + (int64_t)data.size() >= FLAGS_socket_max_unwritten_bytes) {
             s->_overcrowded = true;
         }
+        SharedPart* sp = s->GetOrNewSharedPart();
+        SocketMultiPool* pool = sp->multi_socket_pool.load(butil::memory_order_consume);
+        if (pool) {
+            pool->_total_unwritten_bytes.fetch_add((int64_t)data.size(), butil::memory_order_relaxed);
+            pool->_total_unwritten_num.fetch_add(1, butil::memory_order_relaxed);
+        }
     }
     const uint32_t pc = pipelined_count();
     if (pc) {
@@ -490,6 +562,7 @@ Socket::Socket(Forbidden f)
     , _total_streams_unconsumed_size(0)
     , _ninflight_app_health_check(0)
     , _tcp_user_timeout_ms(-1)
+    , _rpc_count(0)
     , _http_request_method(HTTP_METHOD_GET) {
     CreateVarsOnce();
     pthread_mutex_init(&_id_wait_list_mutex, NULL);
@@ -2688,6 +2761,348 @@ inline void SocketPool::ListSockets(std::vector<SocketId>* out, size_t max_count
     _mutex.unlock();
 }
 
+inline SocketMultiPool::SocketMultiPool(const SocketOptions& opt)
+    : _options(opt)
+    , _remote_side(opt.remote_side)
+    , _numfree(0)
+    , _num_created(0)
+    , _rpc_count(0)
+    , _lightest_sid(-1)
+    , _total_unwritten_bytes(0)
+    , _total_unwritten_num(0)
+    , _write_syscall_count(0)
+    , _total_rpc_count(0)
+    , _dynamic_gap_threshold(FLAGS_gap_threshold_for_multiple_connections) {
+    _last_adjust_time_us = butil::cpuwide_time_us();
+}
+
+inline SocketMultiPool::~SocketMultiPool() {
+    for (std::vector<SocketId>::iterator it = _multiple.begin();
+        it != _multiple.end(); ++it) {
+        SocketUniquePtr ptr;
+        if (Socket::Address(*it, &ptr) == 0) {
+            ptr->ReleaseAdditionalReference();
+        }
+    }
+}
+
+inline int SocketMultiPool::GetSocket(SocketUniquePtr* ptr) {
+    // 触发自适应调整（轻量级，1 秒频率控制）
+    if (FLAGS_enable_adaptive_gap_threshold) {
+        int64_t now_us = butil::cpuwide_time_us();
+        int64_t last = _last_adjust_time_us.load(butil::memory_order_relaxed);
+        if ((now_us - last >= 1000000) &&
+            _last_adjust_time_us.compare_exchange_strong(last, now_us, butil::memory_order_acq_rel)) {
+            AdaptiveAdjust();
+        }
+    }
+
+    int32_t gap_threshold = _dynamic_gap_threshold.load(butil::memory_order_relaxed);
+    _rpc_count.fetch_add(1, butil::memory_order_relaxed);
+    SocketId lsid = _lightest_sid.load(butil::memory_order_acquire);
+    SocketUniquePtr lptr = NULL;
+    SocketId sid;
+    if (lsid == -1) {
+        // 初始创建，加锁防并发
+        bthread::RWLockWrGuard wrguard(_mutex);
+        lsid = _lightest_sid.load(butil::memory_order_acquire);
+        SocketOptions opt = _options;
+        opt.health_check_interval_s = -1;
+        if (lsid == -1 && get_client_side_messenger()->Create(opt, &sid) == 0 &&
+            Socket::Address(sid, ptr) == 0) {
+            _num_created.fetch_add(1, butil::memory_order_relaxed);
+            (*ptr)->_rpc_count.fetch_add(1, butil::memory_order_relaxed);
+            // 更新_lightest_sid
+            _lightest_sid.compare_exchange_strong(lsid, sid, butil::memory_order_relaxed);
+            _multiple.push_back(sid);
+            return 0;
+        }
+        _rpc_count.fetch_sub(1, butil::memory_order_relaxed);
+        LOG(ERROR) << "Create socket failed";
+        return -1;
+    }
+    // 先检查_lightest_sid的负载是否小于threshold，如果小于保持在_lightest_sid发送请求
+    if (Socket::Address(lsid, &lptr) == 0) {
+        if (lptr->_rpc_count.fetch_add(1, butil::memory_order_relaxed) < (uint32_t)gap_threshold) {
+            ptr->reset(lptr.release());
+            return 0;
+        }
+        lptr->_rpc_count.fetch_sub(1, butil::memory_order_relaxed);
+    }
+    // 如果有负载为0的连接，弹出一个使用
+    if (_numfree.fetch_sub(1, butil::memory_order_relaxed) > 0) {
+        for (;;) {
+            {
+                bthread::RWLockWrGuard wrguard(_mutex);
+                if (_free_pool.empty()) {
+                    _numfree.fetch_add(1, butil::memory_order_relaxed);
+                    break;
+                }
+                sid = _free_pool.back();
+                _free_pool.pop_back();
+            }
+            if (Socket::Address(sid, ptr) == 0) {
+                (*ptr)->_rpc_count.fetch_add(1, butil::memory_order_relaxed);
+                // 更新当前_lightest_sid
+                _lightest_sid.compare_exchange_strong(lsid, sid, butil::memory_order_relaxed);
+                return 0;
+            }
+        }
+    } else {
+        _numfree.fetch_add(1, butil::memory_order_relaxed);
+    }
+
+    // 如果连接未建满，创建一个新的连接
+    uint32_t avg_rpc = _rpc_count / _num_created;
+    if (avg_rpc >= gap_threshold) {
+        if (_num_created.fetch_add(1, butil::memory_order_relaxed) < FLAGS_max_connection_multiple_size) {
+            SocketOptions opt = _options;
+            opt.health_check_interval_s = -1;
+            if (get_client_side_messenger()->Create(opt, &sid) == 0 &&
+                Socket::Address(sid, ptr) == 0) {
+                (*ptr)->_rpc_count.fetch_add(1, butil::memory_order_relaxed);
+                // 更新_lightest_sid
+                _lightest_sid.compare_exchange_strong(lsid, sid, butil::memory_order_relaxed);
+                bthread::RWLockWrGuard wrguard(_mutex);
+                _multiple.push_back(sid);
+                return 0;
+            }
+        }
+        _num_created.fetch_sub(1, butil::memory_order_relaxed);
+    }
+
+    // 保持在_lightest_sid上发送请求，在burst的情况下，瞬间可能有多个连接在上面发送。
+    // 可以比较当前的rpc_count均值来避免连接过大。
+    if (lptr) {
+        // _lightest_sid的负载超过2 * Av_load+threshold(平均负载的2倍加threshold)
+        // 这边条件应该较严格，防止经常跑进这个逻辑
+        if ((avg_rpc < gap_threshold) ||
+            (lptr->_rpc_count.load(butil::memory_order_relaxed) - (uint32_t)gap_threshold) * _num_created > (2 * _rpc_count)) {
+            // 随机遍历选择一个小于平均负载的sid
+            SocketUniquePtr rand_ptr;
+            {
+                bthread::RWLockRdGuard rdguard(_mutex);
+                size_t size = _multiple.size();
+                size_t start = butil::fast_rand_less_than(size);
+                for (size_t i = 0; i < size; i++) {
+                    sid = _multiple[(start + i) % size];
+                    if ((Socket::Address(sid, &rand_ptr) == 0) &&
+                        (rand_ptr->_rpc_count.load(butil::memory_order_acquire) < avg_rpc)) {
+                        _lightest_sid.compare_exchange_strong(lsid, sid, butil::memory_order_relaxed);
+                        rand_ptr->_rpc_count.fetch_add(1, butil::memory_order_relaxed);
+                        ptr->reset(rand_ptr.release());
+                        return 0;
+                    }
+                }
+            }
+        }
+        // 否则保持_lightest_sid
+        lptr->_rpc_count.fetch_add(1, butil::memory_order_relaxed);
+        ptr->reset(lptr.release());
+        return 0;
+    } else {
+        SocketUniquePtr rand_ptr;
+        // _lightest_sid socket已经失效，重新获取
+        bthread::RWLockWrGuard wrguard(_mutex);
+        auto it = _multiple.begin();
+        while (it != _multiple.end()) {
+            if (Socket::Address(*it, &rand_ptr) == 0) {
+                rand_ptr->_rpc_count.fetch_add(1, butil::memory_order_relaxed);
+                _lightest_sid.store(*it, butil::memory_order_relaxed);
+                ptr->reset(rand_ptr.release());
+                return 0;
+            }
+            it = _multiple.erase(it);
+            _num_created.fetch_sub(1, butil::memory_order_relaxed);
+        }
+        if (_multiple.empty()) {
+            _lightest_sid.store(-1, butil::memory_order_release);
+        }
+    }
+    _rpc_count.fetch_sub(1, butil::memory_order_relaxed);
+    LOG(ERROR) << "Lightest socket is NULL, " << lsid << ", conn num:" << _numfree.load(butil::memory_order_acquire);
+
+    return -1;
+}
+
+inline void SocketMultiPool::ReturnSocket(Socket* sock) {
+    // 总rpc_cout减一
+    _rpc_count.fetch_sub(1, butil::memory_order_relaxed);
+    // 当前连接的rpc_cout减一
+    uint32_t load = sock->_rpc_count.fetch_sub(1, butil::memory_order_relaxed);
+    SocketId id = sock->id();
+    SocketId min_sid = _lightest_sid.load(butil::memory_order_acquire);
+    if (id == min_sid) {
+        return;
+    }
+
+    // 如果该连接的rpc_cout 与_lightest_sid的差值大于threshold 则更新_lightest_sid。
+    // 目的防止颠簸，没有必要负载小于就更新
+    for(;;) {
+        SocketUniquePtr ptr;
+        if (Socket::Address(min_sid, &ptr) != 0) {
+            break;
+        }
+        uint32_t lightest_rpc = ptr->_rpc_count.load(butil::memory_order_acquire);
+        if (load > lightest_rpc || lightest_rpc < _dynamic_gap_threshold.load(butil::memory_order_relaxed)) {
+            break;
+        }
+        if (_lightest_sid.compare_exchange_strong(
+            min_sid, id, butil::memory_order_relaxed)) {
+            return;
+        }
+    }
+
+    // 如果没有更新成功，且负载为0，保存到free队列中去。
+    if ((load == 1) && sock->_rpc_count.load(butil::memory_order_acquire) == 0) {
+        _numfree.fetch_add(1, butil::memory_order_relaxed);
+        bthread::RWLockWrGuard wrguard(_mutex);
+        _free_pool.push_back(id);
+    }
+    return;
+}
+
+// Adaptive mode constants
+enum AdaptiveMode {
+    ADAPTIVE_MODE_SMALL_PACKET = 1,
+    ADAPTIVE_MODE_LARGE_PACKET = 2,
+    ADAPTIVE_MODE_MIXED = 3
+};
+
+static const double SMALL_PACKET_THRESHOLD = 4096.0;
+static const double LARGE_PACKET_THRESHOLD = 65536.0;
+static const double HIGH_UNWRITTEN_PER_CONN = 2 * 1024 * 1024.0;
+
+void SocketMultiPool::AdaptiveAdjust() {
+    size_t num_created;
+    {
+        bthread::RWLockRdGuard rdguard(_mutex);
+        num_created = _multiple.size();
+    }
+    int64_t total_unwritten = _total_unwritten_bytes.load(butil::memory_order_relaxed);
+    if ((total_unwritten == 0) || num_created == 0) {
+        return;
+    }
+
+    uint64_t rpc_count = _rpc_count.load(butil::memory_order_relaxed);
+    uint64_t write_calls = _write_syscall_count.exchange(0, butil::memory_order_acq_rel);
+    uint64_t total_rpc = _total_rpc_count.exchange(0, butil::memory_order_acq_rel);
+
+
+    // 平均每请求待发送字节数（区分大小包）
+    double avg_req_bytes = (double)total_unwritten / _total_unwritten_num.load(butil::memory_order_relaxed);
+
+    double avg_unwritten_per_conn = (double)total_unwritten / num_created;
+
+    // 写合并比 = 已发送请求总数 / sys_write次数
+    // 值越大说明合并越好（如 128 = 128条消息合并成1次write）
+    // 值为1说明每条请求单独write
+    double write_merge_ratio = (write_calls > 0) ? (double)total_rpc / write_calls : 0.0;
+
+    int32_t mode;
+    if (avg_req_bytes < SMALL_PACKET_THRESHOLD && avg_unwritten_per_conn < HIGH_UNWRITTEN_PER_CONN) {
+        mode = ADAPTIVE_MODE_SMALL_PACKET;
+    } else if (avg_req_bytes > LARGE_PACKET_THRESHOLD || avg_unwritten_per_conn >= HIGH_UNWRITTEN_PER_CONN) {
+        mode = ADAPTIVE_MODE_LARGE_PACKET;
+    } else {
+        mode = ADAPTIVE_MODE_MIXED;
+    }
+
+    // 小包低QPS场景保持不变，避免写合并率低进行无效调整
+    if ((mode == ADAPTIVE_MODE_SMALL_PACKET) &&
+        (rpc_count + total_rpc) < _dynamic_gap_threshold.load(butil::memory_order_relaxed)) {
+        return;
+    }
+
+    AdjustParameters(mode, rpc_count, avg_req_bytes, avg_unwritten_per_conn, write_merge_ratio);
+}
+
+void SocketMultiPool::AdjustParameters(int32_t mode, uint64_t rpc_count,
+        double avg_req_bytes, double avg_unwritten_per_conn, double write_merge_ratio) {
+    int32_t old_threshold = _dynamic_gap_threshold.load(butil::memory_order_relaxed);
+    int32_t target_gap = old_threshold;
+
+    switch (mode) {
+        case ADAPTIVE_MODE_SMALL_PACKET: {
+            // 小包模式：基于old_threshold，结合qps_growth和merge_growth动态增长gap
+
+            // 目标合并率用于判断写合并率是否达标
+            const double SMALL_PACKET_BYTES = 65536.0;
+            double target_merge_ratio = (double)SMALL_PACKET_BYTES / avg_req_bytes;
+            target_merge_ratio = std::min(target_merge_ratio, (double)DATA_LIST_MAX);
+
+            // 当前写合并率低于目标时额外增长
+ 	        double merge_growth = 0.0;
+            if (write_merge_ratio < target_merge_ratio * 0.3) {
+                merge_growth = 1.0;
+            } else if (write_merge_ratio < target_merge_ratio * 0.6) {
+                merge_growth = 0.5;
+            }
+
+            // QPS增长因子 = sqrt(rpc_count) / avg_req_bytes
+            // 相同消息大小，QPS越高→增长越大
+            // 相同QPS，消息越大→增长越小
+            double qps_growth = (rpc_count > 0) ? std::sqrt((double)rpc_count) / avg_req_bytes : 0.0;
+
+            // 增长比率 = qps_growth + merge_growth
+            double growth = qps_growth + merge_growth;
+            target_gap = (int32_t)(old_threshold * (1.0 + growth));
+
+            // 保证最大gap：基于目标合并率和QPS增长因子
+            int32_t max_gap = (int32_t)(target_merge_ratio * (1.0 + qps_growth));
+            target_gap = std::min(target_gap, max_gap);
+            break;
+        }
+
+        case ADAPTIVE_MODE_LARGE_PACKET: {
+            // 大包模式：基于目标流量设置gap，保证连接带宽均衡
+            const int32_t LARGE_MAX_BUFF = 16 * 1024 * 1024; // 带宽压力16MB
+            target_gap = std::max((int32_t)(LARGE_MAX_BUFF / avg_req_bytes), 1);
+            break;
+        }
+
+        case ADAPTIVE_MODE_MIXED:
+        default: {
+            // 混合模式：大小包混合（4k-64k）
+            // 1. 混合场景下大包会拉低写合并率，合并率判断阈值降低
+            // 2. 同时结合缓冲区填充率判断：填充率高说明连接压力大，需要减小gap
+
+            // 并包率受包大小和tcp发送缓冲区限制，4KB时=64(满值)，64KB时=4，范围4~64
+            const double MIXED_PACKET_BYTES = 256 * 1024;
+            double target_merge_ratio = MIXED_PACKET_BYTES / avg_req_bytes;
+
+            // QPS增长因子
+            double qps_growth = (rpc_count > 0) ? std::sqrt((double)rpc_count / avg_req_bytes) : 0.0;
+            // 大包天然合并率低，不应因此过度增大gap
+            double merge_growth = 0.0;
+            if (write_merge_ratio < target_merge_ratio * 0.3) {
+                merge_growth = qps_growth * 0.8;
+            } else if (write_merge_ratio < target_merge_ratio * 0.6) {
+                merge_growth = qps_growth * 0.3;
+            }
+
+            const int32_t MIXED_MAX_BUFF = 2 * 1024 * 1024; // 带宽压力2MB
+            // 缓冲区填充率：判断连接带宽压力
+            double buffer_fill_ratio = avg_unwritten_per_conn / (double)MIXED_MAX_BUFF;
+            // 缓冲区压力因子：填充率高需要减小gap增加连接
+            double buf_growth = 0.0;
+            if (buffer_fill_ratio > 0.7) {
+                buf_growth -= 0.3;
+            } else if (buffer_fill_ratio > 0.5) {
+                buf_growth -= 0.15;
+            }
+            double growth = merge_growth + buf_growth;
+            target_gap = (int32_t)(old_threshold * (1.0 + growth));
+
+            // 避免过度增长
+            int32_t max_gap = std::max((int32_t)((MIXED_MAX_BUFF / avg_req_bytes) * (1.0 + qps_growth)), 1);
+ 	        target_gap = std::min(target_gap, max_gap);
+            break;
+        }
+    }
+    _dynamic_gap_threshold.store(target_gap, butil::memory_order_relaxed);
+}
+
 Socket::SharedPart* Socket::GetOrNewSharedPartSlower() {
     // Create _shared_part optimistically.
     SharedPart* shared_part = GetSharedPart();
@@ -2787,6 +3202,77 @@ int Socket::ReturnToPool() {
     _last_writetime_us.store(butil::cpuwide_time_us(), butil::memory_order_relaxed);
     pool->ReturnSocket(this);
     sp->RemoveRefManually();
+    return 0;
+}
+
+int Socket::GetMultiPooledSocket(SocketUniquePtr* pooled_socket) {
+    if (pooled_socket == NULL) {
+        LOG(ERROR) << "pooled_socket is NULL";
+        return -1;
+    }
+    SharedPart* main_sp = GetOrNewSharedPart();
+    if (main_sp == NULL) {
+        LOG(ERROR) << "_shared_part is NULL";
+        return -1;
+    }
+    // Create socket_pool optimistically.
+    SocketMultiPool* socket_pool = main_sp->multi_socket_pool.load(butil::memory_order_consume);
+    if (socket_pool == NULL) {
+        SocketOptions opt;
+        opt.remote_side = remote_side();
+        opt.local_side = butil::EndPoint(local_side().ip, 0);
+        opt.user = user();
+        opt.on_edge_triggered_events = _on_edge_triggered_events;
+        opt.need_on_edge_trigger = _need_on_edge_trigger;
+        opt.initial_ssl_ctx = _ssl_ctx;
+        opt.keytable_pool = _keytable_pool;
+        opt.app_connect = _app_connect;
+        opt.socket_mode = _socket_mode;
+        socket_pool = new SocketMultiPool(opt);
+        SocketMultiPool* expected = NULL;
+        if (!main_sp->multi_socket_pool.compare_exchange_strong(
+                expected, socket_pool, butil::memory_order_acq_rel)) {
+            delete socket_pool;
+            CHECK(expected);
+            socket_pool = expected;
+        }
+    }
+    if (socket_pool->GetSocket(pooled_socket) != 0) {
+        return -1;
+    }
+    (*pooled_socket)->ShareStats(this);
+    CHECK((*pooled_socket)->parsing_context() == NULL)
+        << "context=" << (*pooled_socket)->parsing_context()
+        << " is not NULL when " << *(*pooled_socket) << " is got from"
+        " SocketPool, the protocol implementation is buggy";
+    return 0;
+}
+
+int Socket::ReturnToMultiPool() {
+    SharedPart* sp = GetOrNewSharedPart();
+    if (sp == NULL) {
+        LOG(ERROR) << "_shared_part is NULL";
+        SetFailed(EINVAL, "_shared_part is NULL");
+        return -1;
+    }
+    SocketMultiPool* pool = sp->multi_socket_pool.load(butil::memory_order_consume);
+    if (pool == NULL) {
+        LOG(ERROR) << "_shared_part->multi_socket_pool is NULL, sock " << id();
+        SetFailed(EINVAL, "_shared_part->multi_socket_pool is NULL");
+        sp->RemoveRefManually();
+        return -1;
+    }
+    CHECK(parsing_context() == NULL)
+        << "context=" << parsing_context() << " is not released when "
+        << *this << " is returned to SocketPool, the protocol "
+        "implementation is buggy";
+    // NOTE: be careful with the sequence.
+    // - related fields must be reset before returning to pool
+    // - sp must be released after returning to pool because it owns pool
+    _connection_type_for_progressive_read = CONNECTION_TYPE_UNKNOWN;
+    _controller_released_socket.store(false, butil::memory_order_relaxed);
+    _last_writetime_us.store(butil::cpuwide_time_us(), butil::memory_order_relaxed);
+    pool->ReturnSocket(this);
     return 0;
 }
 
@@ -2915,13 +3401,28 @@ void Socket::CancelUnwrittenBytes(size_t bytes) {
     }
 }
 void Socket::AddOutputBytes(size_t bytes) {
-    GetOrNewSharedPart()->out_size.fetch_add(bytes, butil::memory_order_relaxed);
+    SharedPart* sp = GetOrNewSharedPart();
+    sp->out_size.fetch_add(bytes, butil::memory_order_relaxed);
     _last_writetime_us.store(butil::cpuwide_time_us(),
                              butil::memory_order_relaxed);
     CancelUnwrittenBytes(bytes);
+    SocketMultiPool* pool = sp->multi_socket_pool.load(butil::memory_order_consume);
+    if (pool) {
+        pool->_total_unwritten_bytes.fetch_sub((int64_t)bytes, butil::memory_order_relaxed);
+        if (bytes > 0) {
+            pool->_write_syscall_count.fetch_add(1, butil::memory_order_relaxed);
+        }
+    }
 }
+
 void Socket::AddOutputMessages(size_t count) {
-    GetOrNewSharedPart()->out_num_messages.fetch_add(count, butil::memory_order_relaxed);
+    SharedPart* sp = GetOrNewSharedPart();
+    sp->out_num_messages.fetch_add(count, butil::memory_order_relaxed);
+    SocketMultiPool* pool = sp->multi_socket_pool.load(butil::memory_order_consume);
+    if (pool) {
+        pool->_total_rpc_count.fetch_add((int64_t)count, butil::memory_order_relaxed);
+        pool->_total_unwritten_num.fetch_sub((int64_t)count, butil::memory_order_relaxed);
+    }
 }
 
 SocketId Socket::main_socket_id() const {
@@ -2939,6 +3440,8 @@ void Socket::OnProgressiveReadCompleted() {
              true, butil::memory_order_relaxed))) {
         if (_connection_type_for_progressive_read == CONNECTION_TYPE_POOLED) {
             ReturnToPool();
+        } else if (_connection_type_for_progressive_read == CONNECTION_TYPE_MULTI) {
+            ReturnToMultiPool();
         } else if (_connection_type_for_progressive_read == CONNECTION_TYPE_SHORT) {
             SetFailed(EUNUSED, "[%s]Close short connection", __FUNCTION__);
         }

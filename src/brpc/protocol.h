@@ -56,7 +56,7 @@ class InputMessageBase;
 DECLARE_uint64(max_body_size);
 DECLARE_bool(log_error_text);
 
-// Get the serialized byte size of the protobuf message, 
+// Get the serialized byte size of the protobuf message,
 // different versions of protobuf have different methods
 // use template to avoid include `google/protobuf/message.h`
 template<typename T>
@@ -84,7 +84,7 @@ struct Protocol {
     //     `source' does not form a complete message yet.
     //   MakeParseError(PARSE_ERROR_TRY_OTHERS).
     //     `source' does not fit the protocol, the data should be tried by
-    //     other protocols. If the data is definitely corrupted (e.g. magic 
+    //     other protocols. If the data is definitely corrupted (e.g. magic
     //     header matches but other fields are wrong), pop corrupted part
     //     from `source' before returning.
     //  MakeMessage(InputMessageBase*):
@@ -103,7 +103,7 @@ struct Protocol {
         Controller* cntl,
         const google::protobuf::Message* request);
     SerializeRequest serialize_request;
-    
+
     // [Required by client]
     // The callback to pack `request_buf' into `iobuf_out' or `user_message_out'
     // Called before sending each request (including retries).
@@ -139,7 +139,7 @@ struct Protocol {
 
     // [Required by authenticating server]
     // The callback to verify authentication of this socket. Only called
-    // on the first message that a socket receives. Can be NULL when 
+    // on the first message that a socket receives. Can be NULL when
     // authentication is not needed or this is the client side.
     // Returns true on successful authentication.
     typedef bool (*Verify)(const InputMessageBase* msg);
@@ -178,10 +178,11 @@ const ConnectionType CONNECTION_TYPE_POOLED_AND_SHORT =
 const ConnectionType CONNECTION_TYPE_ALL =
     (ConnectionType)((int)CONNECTION_TYPE_SINGLE |
                      (int)CONNECTION_TYPE_POOLED |
+                     (int)CONNECTION_TYPE_MULTI |
                      (int)CONNECTION_TYPE_SHORT);
 
-// [thread-safe] 
-// Register `protocol' using key=`type'. 
+// [thread-safe]
+// Register `protocol' using key=`type'.
 // Returns 0 on success, -1 otherwise
 int RegisterProtocol(ProtocolType type, const Protocol& protocol);
 
