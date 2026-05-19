@@ -22,7 +22,8 @@
 #include <gflags/gflags.h>
 
 #ifdef BRPC_WITH_URMA
-#include "brpc_socket_adapter.h"
+#include "ubsocket_sock.h"
+#include "ubsocket_epoll.h"
 #ifndef UB_API_WRAP
 #error "You must make ubsocket exported socket APIs prefixed with ubsocket_"
 #endif

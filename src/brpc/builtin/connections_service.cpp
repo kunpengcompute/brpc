@@ -28,10 +28,6 @@
 #include "brpc/nshead_service.h"
 #include "brpc/builtin/common.h"
 #include "brpc/builtin/connections_service.h"
-#ifdef BRPC_WITH_URMA
-#include "brpc_context.h"
-#endif
-
 
 namespace brpc {
 
@@ -323,7 +319,7 @@ void ConnectionsService::PrintConnections(
                << min_width(stat.out_num_messages_m, 8) << bar
                << min_width(rtt_display, 11) << bar;
 #ifdef BRPC_WITH_URMA
-            bool use_ub = Brpc::Context::IsProtocolByUb(ptr->fd());
+            bool use_ub = false;
             os << min_width(use_ub, 5) << bar;
 #endif
         }
