@@ -37,7 +37,6 @@ ubsocket通过环境变量进行配置，在bRPC与ubsocket集成的过程中，
 |ubsocket_eid_idx|使用普通设备的eid编号|ub协议下，通过urma_admin show命令查询获得|0|否|
 |ubsocket_src_eid|使用bonding设备的eid|ub协议下，通过urma_admin show命令查询获得|主动获得当前环境bonding设备的eid|否|
 |ubsocket_log_level|日志级别|error，warn，notice，info，debug|info|否|
-|ubsocket_log_use_printf|是否将日志打印到前台|false，true|true|否|
 |ubsocket_tx_depth|发送队列深度|最小值是64，设置上限由实际机器环境决定（根据命令urma_admin show --whole中max_jfc_depth与max_jfs_depth两者的最小值）|1024|否|
 |ubsocket_rx_depth|接受队列深度|最小值是64，设置上限由实际机器环境决定（根据命令urma_admin show --whole中max_jfc_depth与max_jfr_depth两者的最小值）|1024|否|
 |ubsocket_readv_unlimited|是否打开readv上报限制|false，true|true|否|
@@ -79,12 +78,14 @@ client侧的配置，使用参考[echo_c++_client用例](../../example/echo_c++/
 |名称|含义|取值范围|默认值|必填|
 |--|--|--|--|--|
 |use_ub|client侧是否使用ub通信，单独设置预期建链失败|false, true|false|否|
+|minloglevel|日志等级参数|glog：0=INFO 1=WARNING 2=ERROR；blog：0=INFO 1=NOTICE 2=WARNING 3=ERROR|0|否|
 #### 3.2.2 brpc::ServerOptions
 server侧的配置，使用参考[echo_c++_server用例](../../example/echo_c++/server.cpp)。配置项说明见下表。
 
 |名称|含义|取值范围|默认值|必填|
 |--|--|--|--|--|
 |use_ub|server侧是否使用ub通信，单独设置预期建立TCP链路|false, true|false|否|
+|minloglevel|日志等级参数|glog：0=INFO 1=WARNING 2=ERROR；blog：0=INFO 1=NOTICE 2=WARNING 3=ERROR|0|否|
 
 ## 4 bazel编译
 
@@ -195,6 +196,19 @@ bazel build //example:echo_c++_client --define brpc_with_urma=true -c opt --copt
 bazel build //example:echo_c++_client --define brpc_with_urma=true -c opt --copt=-g --cxxopt=-g --strip=never --fission=no
 
 # 以上两种都使用了 -c opt, 隐含着 -O2. 如果在 gdb 时发现较多 variable optimized 时，可能需要把 -c opt 改成 -c dbg.
+```
+
+如果需要切换glog日志和blog日志，可通过在bazel里更改编译配置项实现。
+```bash
+# glog日志
+$ vim bazel/config/BUILD.bazel
+默认写有{"brpc_with_urma": "true"}
+```
+
+```bash
+# blog日志
+$ vim bazel/config/BUILD.bazel
+将{"brpc_with_urma": "true"}改成{"brpc_with_urma": "false"}
 ```
 
 ### 4.5 执行用例
