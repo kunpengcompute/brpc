@@ -24,7 +24,7 @@ def _local_deps_impl(module_ctx):
     git_repository(
         name = "ubsocket",
         remote = "https://atomgit.com/openeuler/ubs-comm.git",
-        commit = "9a591efe7d1c7fdb26e23c9a2bd6f11020273aa1",
+        commit = "ca3023af54bdaf762dba79b63cb598b0508d9789",
     )
 
     # boringssl: keep exactly the same as WORKSPACE definition

@@ -40,7 +40,10 @@
 #include "butil/fd_guard.h"                 // butil::fd_guard
 #include "butil/iobuf.h"
 #include "butil/iobuf_profiler.h"
+
+#ifdef BRPC_WITH_URMA
 #include "iobuf/ubsocket_zcopy_adapter.h"
+#endif
 
 namespace butil {
 namespace iobuf {
