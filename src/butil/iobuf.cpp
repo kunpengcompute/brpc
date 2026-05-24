@@ -45,6 +45,7 @@
 #include "iobuf/ubsocket_zcopy_adapter.h"
 #endif
 
+DECLARE_bool(ubsocket_enable);
 namespace butil {
 namespace iobuf {
 
@@ -170,8 +171,25 @@ void* cp(void *__restrict dest, const void *__restrict src, size_t n) {
 
 // Function pointers to allocate or deallocate memory for a IOBuf::Block
 #if BRPC_WITH_URMA
-void* (*blockmem_allocate)(size_t) = ock::ubs::blockmem_allocate_zero_copy;
-void  (*blockmem_deallocate)(void*) = ock::ubs::blockmem_deallocate_zero_copy;
+void* ub_malloc(size_t size)
+{
+    if (FLAGS_ubsocket_enable) {
+        return ock::ubs::blockmem_allocate_zero_copy(size);
+    }
+    return ::malloc(size);
+}
+
+void ub_free(void* buf)
+{
+    if (FLAGS_ubsocket_enable) {
+        ock::ubs::blockmem_deallocate_zero_copy(buf);
+        return;
+    }
+    ::free(buf);
+}
+
+void* (*blockmem_allocate)(size_t) = ub_malloc;
+void  (*blockmem_deallocate)(void*) = ub_free;
 #else
 void* (*blockmem_allocate)(size_t) = ::malloc;
 void  (*blockmem_deallocate)(void*) = ::free;
