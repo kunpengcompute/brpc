@@ -42,6 +42,10 @@
 #include "butil/iobuf_profiler.h"
 #include "iobuf/ubsocket_zcopy_adapter.h"
 
+#ifdef BRPC_WITH_URMA
+#include "iobuf/ubsocket_zcopy_adapter.h"
+#endif
+
 namespace butil {
 namespace iobuf {
 
