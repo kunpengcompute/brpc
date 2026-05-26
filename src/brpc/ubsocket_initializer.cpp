@@ -66,6 +66,9 @@ DEFINE_string(ubsocket_probe_time_ms, "1000", "ubsocket probe interval time, the
 DEFINE_string(ubsocket_probe_batch, "10", "ubsocket number of sock to probe per batch, the minimum value is 1, the maximum value is 500");
 DEFINE_string(ubsocket_ub_epoll_enable, "false", "Whether to enable ub epoll; default: false (optional: false, true)");
 DEFINE_string(ubsocket_use_brpc_zcopy, "true", "Whether to enable ub memory pool to support UB zero copy transportation; default: true (optional: false, true)");
+DEFINE_string(ubsocket_prof_enable, "false", "Enable ubsocket profiling (e.g., 'false', 'true')");
+DEFINE_string(ubsocket_prof_dump_interval_min, "1", "Set dump ubsocket profiling data output interval(minute), the minimum value is 1, the maximum value is 5");
+DEFINE_string(ubsocket_prof_dump_path, "/tmp/ubsocket/profiling", "Set dump ubsocket profiling data output path (e.g., '/tmp/ubsocket/profiling')");
 
 static void SetUBSocketEnv() {
     if (!FLAGS_ubsocket_trans_mode.empty()) {
@@ -182,7 +185,15 @@ static void SetUBSocketEnv() {
     if (!FLAGS_ubsocket_use_brpc_zcopy.empty()) {
 		::setenv("UBSOCKET_USE_BRPC_ZCOPY", FLAGS_ubsocket_use_brpc_zcopy.c_str(), 1);
 	}
-
+    if (!FLAGS_ubsocket_prof_enable.empty()) {
+        ::setenv("UBSOCKET_PROF_ENABLE", FLAGS_ubsocket_prof_enable.c_str(), 1);
+    }
+    if (!FLAGS_ubsocket_prof_dump_interval_min.empty()) {
+        ::setenv("UBSOCKET_PROF_DUMP_INTERVAL_MIN", FLAGS_ubsocket_prof_dump_interval_min.c_str(), 1);
+    }
+    if (!FLAGS_ubsocket_prof_dump_path.empty()) {
+        ::setenv("UBSOCKET_PROF_DUMP_PATH", FLAGS_ubsocket_prof_dump_path.c_str(), 1);
+    }
     ::setenv("UBSOCKET_USE_UB_FORCE", "false", 1);
 }
 
