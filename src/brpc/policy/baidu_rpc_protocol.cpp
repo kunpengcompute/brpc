@@ -43,6 +43,7 @@
 #include "brpc/details/usercode_backup_pool.h"
 #include "brpc/details/controller_private_accessor.h"
 #include "brpc/details/server_private_accessor.h"
+#include "brpc/memfd/shm_zero_copy_stream.h"
 
 extern "C" {
 void bthread_assign_data(void* data);
@@ -75,6 +76,30 @@ inline void PackRpcHeader(char* rpc_header, uint32_t meta_size, int payload_size
     butil::RawPacker(rpc_header + 4)
         .pack32(meta_size + payload_size)
         .pack32(meta_size);
+}
+
+static void SerializeRpcHeaderAndMeta(
+    google::protobuf::io::ZeroCopyOutputStream* stream,
+    const RpcMeta& meta, int payload_size) {
+    const uint32_t meta_size = GetProtobufByteSize(meta);
+    char header[12];
+    PackRpcHeader(header, meta_size, payload_size);
+    size_t header_written = 0;
+    while (header_written < sizeof(header)) {
+        void* data = nullptr;
+        int size = 0;
+        CHECK(stream->Next(&data, &size));
+        size_t to_write = std::min(static_cast<size_t>(size),
+                                   sizeof(header) - header_written);
+        memcpy(data, header + header_written, to_write);
+        header_written += to_write;
+        if (static_cast<size_t>(size) > to_write) {
+            stream->BackUp(size - static_cast<int>(to_write));
+        }
+    }
+    ::google::protobuf::io::CodedOutputStream coded_out(stream);
+    meta.SerializeWithCachedSizes(&coded_out);
+    CHECK(!coded_out.HadError());
 }
 
 static void SerializeRpcHeaderAndMeta(
@@ -149,8 +174,14 @@ bool SerializeRpcMessage(const google::protobuf::Message& message,
     auto serialize = [&](Serializer& serializer) -> bool {
         bool ok;
         if (COMPRESS_TYPE_NONE == compress_type) {
-            butil::IOBufAsZeroCopyOutputStream stream(buf);
-            ok = serializer.SerializeTo(&stream);
+            if (cntl.socket_mode() == SOCKET_MODE_MEMFD) {
+                ShmZeroCopyOutputStream stream(GetShmAllocator(), buf);
+                ok = serializer.SerializeTo(&stream);
+                stream.Finish();
+            } else {
+                butil::IOBufAsZeroCopyOutputStream stream(buf);
+                ok = serializer.SerializeTo(&stream);
+            }
         } else {
             const CompressHandler* handler = FindCompressHandler(compress_type);
             if (NULL == handler) {
@@ -377,7 +408,13 @@ void SendRpcResponse(int64_t correlation_id, Controller* cntl,
     }
 
     butil::IOBuf res_buf;
-    SerializeRpcHeaderAndMeta(&res_buf, meta, res_size + attached_size);
+    if (cntl->socket_mode() == SOCKET_MODE_MEMFD) {
+        ShmZeroCopyOutputStream shm_stream(GetShmAllocator(), &res_buf);
+        SerializeRpcHeaderAndMeta(&shm_stream, meta, res_size + attached_size);
+        shm_stream.Finish();
+    } else {
+        SerializeRpcHeaderAndMeta(&res_buf, meta, res_size + attached_size);
+    }
     if (append_body) {
         res_buf.append(res_body.movable());
         if (attached_size > 0) {
@@ -626,6 +663,7 @@ void ProcessRpcRequest(InputMessageBase* msg_base) {
         .set_request_protocol(PROTOCOL_BAIDU_STD)
         .set_begin_time_us(msg->received_us())
         .move_in_server_receiving_sock(socket_guard);
+    cntl->set_socket_mode(socket->socket_mode());
 
     if (meta.has_stream_settings()) {
         accessor.set_remote_stream_settings(meta.release_stream_settings());
@@ -866,7 +904,7 @@ bool VerifyRpcRequest(const InputMessageBase* msg_base) {
         static_cast<const MostCommonMessage*>(msg_base);
     const Server* server = static_cast<const Server*>(msg->arg());
     Socket* socket = msg->socket();
-    
+
     RpcMeta request_meta;
     if (!ParsePbFromIOBuf(&request_meta, msg->meta)) {
         LOG(WARNING) << "Fail to parse RpcRequestMeta";
@@ -931,7 +969,7 @@ void ProcessRpcResponse(InputMessageBase* msg_base) {
         }
         return;
     }
-    
+
     ControllerPrivateAccessor accessor(cntl);
     if (remote_stream_id != INVALID_STREAM_ID) {
         accessor.set_remote_stream_settings(
@@ -957,10 +995,10 @@ void ProcessRpcResponse(InputMessageBase* msg_base) {
     do {
         if (response_meta.error_code() != 0) {
             // If error_code is unset, default is 0 = success.
-            cntl->SetFailed(response_meta.error_code(), 
+            cntl->SetFailed(response_meta.error_code(),
                                   "%s", response_meta.error_text().c_str());
             break;
-        } 
+        }
         // Parse response message iff error code from meta is 0
         butil::IOBuf res_buf;
         const int res_size = msg->payload.length();
@@ -1103,7 +1141,7 @@ void PackRpcRequest(butil::IOBuf* req_buf,
     }
 
     // Don't use res->ByteSize() since it may be compressed
-    const size_t req_size = request_body.length(); 
+    const size_t req_size = request_body.length();
     const size_t attached_size = cntl->request_attachment().length();
     if (attached_size) {
         meta.set_attachment_size(attached_size);
@@ -1123,7 +1161,13 @@ void PackRpcRequest(butil::IOBuf* req_buf,
         request_meta->set_parent_span_id(span->parent_span_id());
     }
 
-    SerializeRpcHeaderAndMeta(req_buf, meta, req_size + attached_size);
+    if (cntl->socket_mode() == SOCKET_MODE_MEMFD) {
+        ShmZeroCopyOutputStream shm_stream(GetShmAllocator(), req_buf);
+        SerializeRpcHeaderAndMeta(&shm_stream, meta, req_size + attached_size);
+        shm_stream.Finish();
+    } else {
+        SerializeRpcHeaderAndMeta(req_buf, meta, req_size + attached_size);
+    }
     req_buf->append(request_body);
     if (attached_size) {
         req_buf->append(cntl->request_attachment());

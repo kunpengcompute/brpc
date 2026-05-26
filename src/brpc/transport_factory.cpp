@@ -18,6 +18,7 @@
 #include "brpc/transport_factory.h"
 #include "brpc/tcp_transport.h"
 #include "brpc/rdma_transport.h"
+#include "brpc/memfd_transport.h"
 
 namespace brpc {
 int TransportFactory::ContextInitOrDie(SocketMode mode, bool serverOrNot, const void* _options) {
@@ -29,6 +30,9 @@ int TransportFactory::ContextInitOrDie(SocketMode mode, bool serverOrNot, const 
         return RdmaTransport::ContextInitOrDie(serverOrNot, _options);
     }
 #endif
+    else if (mode == SOCKET_MODE_MEMFD) {
+        return MemfdTransport::ContextInitOrDie(serverOrNot, _options);
+    }
     else {
         LOG(ERROR) << "unknown transport type  " << mode;
         return 1;
@@ -44,6 +48,9 @@ std::unique_ptr<Transport> TransportFactory::CreateTransport(SocketMode mode) {
         return std::unique_ptr<RdmaTransport>(new RdmaTransport());
     }
 #endif
+    else if (mode == SOCKET_MODE_MEMFD) {
+        return std::unique_ptr<MemfdTransport>(new MemfdTransport());
+    }
     else {
         LOG(ERROR) << "socket_mode set error";
         return nullptr;
