@@ -8,12 +8,14 @@ def _local_deps_impl(module_ctx):
     This is used to keep using @urma, @libboundscheck and @ubsocket when
     bzlmod is enabled, without modifying those external repositories.
     """
-    new_local_repository(
-        name = "urma",
-        path = "/usr",
-        build_file = "//3rdparty/urma:BUILD.bazel",
-    )
 
+    git_repository(
+ 	    name = "urma",
+ 	    build_file = "//3rdparty/urma:BUILD.bazel",
+ 	    commit = "19b0cfe670700c4f88388f97effce6c476753046",
+ 	    remote = "https://gitcode.com/openeuler/umdk.git",
+ 	    strip_prefix = "src/urma",
+ 	 )
     git_repository(
         name = "libboundscheck",
         remote = "https://atomgit.com/openeuler/libboundscheck.git",
@@ -24,7 +26,7 @@ def _local_deps_impl(module_ctx):
     git_repository(
         name = "ubsocket",
         remote = "https://atomgit.com/openeuler/ubs-comm.git",
-        commit = "ca3023af54bdaf762dba79b63cb598b0508d9789",
+        commit = "63f5ce376b32e633ac9cdf0a716d8cef07a918e8",
     )
 
     # boringssl: keep exactly the same as WORKSPACE definition
@@ -38,4 +40,3 @@ def _local_deps_impl(module_ctx):
 local_deps = module_extension(
     implementation = _local_deps_impl,
 )
-
