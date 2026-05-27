@@ -35,6 +35,8 @@ DEFINE_int32(max_retry, 3, "Max retries(not including the first RPC)");
 DEFINE_bool(dont_fail, false, "Print fatal when some call failed");
 DEFINE_int32(dummy_port, -1, "Launch dummy server at this port");
 DEFINE_string(protocol, "http", "Client-side protocol");
+DEFINE_bool(use_ub, false, "whether use ub");
+DEFINE_int32(connect_timeout_ms, 20000, "RPC connect timeout in milliseconds");
 
 bvar::LatencyRecorder g_latency_recorder("client");
 
@@ -82,6 +84,8 @@ int main(int argc, char* argv[]) {
     brpc::ChannelOptions options;
     options.protocol = FLAGS_protocol;
     options.connection_type = FLAGS_connection_type;
+    options.connect_timeout_ms = FLAGS_connect_timeout_ms;
+    options.use_ub = FLAGS_use_ub;
     
     // Initialize the channel, NULL means using default options. 
     // options, see `brpc/channel.h'.

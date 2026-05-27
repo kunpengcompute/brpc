@@ -36,8 +36,8 @@ DEFINE_string(ubsocket_src_eid, "", "Bonding device eid idx for ubsocket, necess
 DEFINE_string(ubsocket_log_level, "info", "Log level for ubsocket (e.g., 'error', 'warn', 'notice', 'info', 'debug')");
 DEFINE_string(ubsocket_tx_depth, "1024", "Send queue depth, the minimum value is 2. The upper limit of the setting is determined by the actual machine environment, based on the value of 'max_jfc_depth' in the command 'urma_admin show --whole'.");
 DEFINE_string(ubsocket_rx_depth, "1024", "Receive queue depth, the minimum value is 2. The upper limit of the setting is determined by the actual machine environment, based on the value of 'max_jfc_depth' in the command 'urma_admin show --whole'.");
-DEFINE_string(ubsocket_block_type, "default", "Minimum fragment of the memory pool for ubsocket (e.g., 'default'(8k), 'small'(16k), 'medium'(32k), 'large'(64k))");
-DEFINE_string(ubsocket_pool_initial_size, "1024", "Total size of IO memory for ubsocket, in MB");
+DEFINE_string(ubsocket_block_type, "default", "Minimum fragment of the memory pool for ubsocket (e.g., 'tiny'(4K), 'default'(8k), 'small'(16k), 'medium'(32k), 'large'(64k))");
+DEFINE_string(ubsocket_pool_initial_size, "200", "Total size of IO memory for ubsocket, in MB");
 DEFINE_string(ubsocket_pool_max_size, "2048", "Max size of ubsocket pool, in MB");
 DEFINE_string(ubsocket_buf_pool_depth, "12000", "Depth of ubsocket buffer pool");
 DEFINE_string(ubsocket_schedule_policy, "affinity_priority", "Set the multi-plane load balancing policy (e.g., 'affinity_priority', 'affinity', 'rr')");
@@ -64,11 +64,13 @@ DEFINE_string(ubsocket_async_epoll_wait, "false", "Allow do epoll wait async; de
 DEFINE_string(ubsocket_probe_enable, "false", "Enable ubsocket probe (e.g., 'false', 'true')");
 DEFINE_string(ubsocket_probe_time_ms, "1000", "ubsocket probe interval time, the minimum value is 1, the maximum value is 360000");
 DEFINE_string(ubsocket_probe_batch, "10", "ubsocket number of sock to probe per batch, the minimum value is 1, the maximum value is 500");
-DEFINE_string(ubsocket_ub_epoll_enable, "false", "Whether to enable ub epoll; default: false (optional: false, true)");
+DEFINE_string(ubsocket_ub_epoll_enable, "true", "Whether to enable ub epoll; default: false (optional: false, true)");
 DEFINE_string(ubsocket_use_brpc_zcopy, "true", "Whether to enable ub memory pool to support UB zero copy transportation; default: true (optional: false, true)");
 DEFINE_string(ubsocket_prof_enable, "false", "Enable ubsocket profiling (e.g., 'false', 'true')");
 DEFINE_string(ubsocket_prof_dump_interval_min, "1", "Set dump ubsocket profiling data output interval(minute), the minimum value is 1, the maximum value is 5");
 DEFINE_string(ubsocket_prof_dump_path, "/tmp/ubsocket/profiling", "Set dump ubsocket profiling data output path (e.g., '/tmp/ubsocket/profiling')");
+DEFINE_string(ubsocket_ub_handshake_mode, "tfo", "Handshake mode for UB connection; default: tfo (optional: tfo, ub_sock_opt)");
+DEFINE_string(ubsocket_flow_control_enable, "true", "Whether to enable flow control; default: true (optional: false, true)");
 
 static void SetUBSocketEnv() {
     if (!FLAGS_ubsocket_trans_mode.empty()) {
@@ -185,6 +187,12 @@ static void SetUBSocketEnv() {
     if (!FLAGS_ubsocket_use_brpc_zcopy.empty()) {
 		::setenv("UBSOCKET_USE_BRPC_ZCOPY", FLAGS_ubsocket_use_brpc_zcopy.c_str(), 1);
 	}
+    if (!FLAGS_ubsocket_flow_control_enable.empty()) {
+        ::setenv("UBSOCKET_FLOW_CONTROL_ENABLE", FLAGS_ubsocket_flow_control_enable.c_str(), 1);
+    }
+    if (!FLAGS_ubsocket_ub_handshake_mode.empty()) {
+        ::setenv("UBSOCKET_UB_HANDSHAKE_MODE", FLAGS_ubsocket_ub_handshake_mode.c_str(), 1);
+    }
     if (!FLAGS_ubsocket_prof_enable.empty()) {
         ::setenv("UBSOCKET_PROF_ENABLE", FLAGS_ubsocket_prof_enable.c_str(), 1);
     }

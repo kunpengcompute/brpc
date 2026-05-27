@@ -56,6 +56,7 @@ struct PressOptions {
     std::string lb_policy; // "rr", "Policy of load balance rr ||random"
     std::string proto_file;
     std::string proto_includes;
+    bool use_ub = false;
     
     PressOptions() :
         server_type(0),
