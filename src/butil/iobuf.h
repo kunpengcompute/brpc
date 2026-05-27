@@ -125,6 +125,8 @@ public:
     // Exchange internal fields with another IOBuf.
     void swap(IOBuf&);
 
+    static size_t get_block_size();
+
     // Pop n bytes from front side
     // If n == 0, nothing popped; if n >= length(), all bytes are popped
     // Returns bytes popped.

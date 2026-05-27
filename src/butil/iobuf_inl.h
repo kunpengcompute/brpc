@@ -591,7 +591,13 @@ struct TLSData {
 
 // Max number of blocks in each TLS. This is a soft limit namely
 // release_tls_block_chain() may exceed this limit sometimes.
-const int MAX_BLOCKS_PER_THREAD = 8;
+#ifdef BRPC_WITH_URMA
+    // CTP 下每份 IOBuf 只有 4K, 需要提升 tls 存储个数以避免在发送 512K 以上数据时频
+    // 繁地向 global memory 申请.
+    const int MAX_BLOCKS_PER_THREAD = 128;
+#else
+    const int MAX_BLOCKS_PER_THREAD = 8;
+#endif
 
 inline int max_blocks_per_thread() {
     // If IOBufProfiler is enabled, do not cache blocks in TLS.
@@ -640,7 +646,7 @@ inline IOBuf::Block* create_block(const size_t block_size) {
 }
 
 inline IOBuf::Block* create_block() {
-    return create_block(IOBuf::DEFAULT_BLOCK_SIZE);
+    return create_block(IOBuf::get_block_size());
 }
 
 void* cp(void *__restrict dest, const void *__restrict src, size_t n);

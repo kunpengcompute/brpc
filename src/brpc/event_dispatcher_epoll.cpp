@@ -197,7 +197,13 @@ void* EventDispatcher::RunThis(void* arg) {
 
 void EventDispatcher::Run() {
     while (!_stop) {
+#ifdef BRPC_WITH_URMA
+        // 在 32 打 1 场景下，令可能让所有的客户端在一次 `epoll_wait` 下处理完毕
+        epoll_event e[64];
+#else
         epoll_event e[32];
+#endif
+
 #ifdef BRPC_ADDITIONAL_EPOLL
         // Performance downgrades in examples.
         int n = epoll_wait(_event_dispatcher_fd, e, ARRAY_SIZE(e), 0);

@@ -62,6 +62,7 @@ int PressClient::init() {
     rpc_options.max_retry = _options->max_retry;
     rpc_options.protocol = _options->protocol;
     rpc_options.connection_type = _options->connection_type;
+    rpc_options.use_ub = _options->use_ub;
     if (_options->attachment_size > 0) {
         _attachment.clear();
         _attachment.assign(_options->attachment_size, 'a');

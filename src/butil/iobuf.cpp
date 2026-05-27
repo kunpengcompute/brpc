@@ -45,8 +45,13 @@
 #include "iobuf/ubsocket_zcopy_adapter.h"
 #endif
 
+namespace brpc {
+    DECLARE_string(ubsocket_block_type);
+} // namespace brpc
+
 DECLARE_bool(ubsocket_enable);
 namespace butil {
+using brpc::FLAGS_ubsocket_block_type;
 namespace iobuf {
 
 DEFINE_int32(iobuf_aligned_buf_block_size, 0, "iobuf aligned buf block size");
@@ -656,6 +661,23 @@ void IOBuf::clear() {
         }
         iobuf::release_blockref_array(_bv.refs, _bv.capacity());
         new (this) IOBuf;
+    }
+}
+
+size_t IOBuf::get_block_size() {
+    if (FLAGS_ubsocket_block_type == "tiny") {
+        return 4UL * 1024;
+    } else if (FLAGS_ubsocket_block_type == "default") {
+        return IOBuf::DEFAULT_BLOCK_SIZE;
+    } else if (FLAGS_ubsocket_block_type == "small") {
+        return 16UL * 1024;
+    } else if (FLAGS_ubsocket_block_type == "medium") {
+        return 32UL * 1024;
+    } else if (FLAGS_ubsocket_block_type == "large") {
+        return 64UL * 1024;
+    } else {
+        LOG(WARNING) << "Unknown ubsocket_block_type: " << FLAGS_ubsocket_block_type << ", use the default IOBuf BLOCK_SIZE";
+        return IOBuf::DEFAULT_BLOCK_SIZE;
     }
 }
 

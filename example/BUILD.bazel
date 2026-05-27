@@ -78,6 +78,13 @@ proto_library(
     ],
 )
 
+proto_library(
+    name = "auto_concurrency_limiter_proto",
+    srcs = [
+        "auto_concurrency_limiter/cl_test.proto",
+    ],
+)
+
 cc_proto_library(
     name = "cc_http_c++_proto",
     deps = [
@@ -117,6 +124,13 @@ cc_proto_library(
     name = "cc_ub_performance_proto",
     deps = [
         ":ub_performance_proto",
+    ],
+)
+
+cc_proto_library(
+    name = "cc_auto_concurrency_limiter_proto",
+    deps = [
+        ":auto_concurrency_limiter_proto",
     ],
 )
 
@@ -292,6 +306,36 @@ cc_binary(
     ],
     copts = COPTS,
     deps = [
+        "//:brpc",
+    ],
+)
+
+cc_binary(
+    name = "auto_concurrency_limiter_c++_client",
+    srcs = [
+        "auto_concurrency_limiter/client.cpp",
+    ],
+    copts = COPTS,
+    includes = [
+        "auto_concurrency_limiter",
+    ],
+    deps = [
+        ":cc_auto_concurrency_limiter_proto",
+        "//:brpc",
+    ],
+)
+
+cc_binary(
+    name = "auto_concurrency_limiter_c++_server",
+    srcs = [
+        "auto_concurrency_limiter/server.cpp",
+    ],
+    copts = COPTS,
+    includes = [
+        "auto_concurrency_limiter",
+    ],
+    deps = [
+        ":cc_auto_concurrency_limiter_proto",
         "//:brpc",
     ],
 )

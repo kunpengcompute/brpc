@@ -44,6 +44,7 @@ DEFINE_int32(attachment_size, 0, "Carry so many byte attachment along with reque
 DEFINE_int32(duration, 0, "how many seconds the press keep");
 DEFINE_int32(qps, 100 , "how many calls  per seconds");
 DEFINE_bool(pretty, true, "output pretty jsons");
+DEFINE_bool(use_ub, false, "whether use ub");
 
 bool set_press_options(pbrpcframework::PressOptions* options){
     size_t dot_pos = FLAGS_method.find_last_of('.');
@@ -92,6 +93,7 @@ bool set_press_options(pbrpcframework::PressOptions* options){
     options->host = FLAGS_server;
     options->proto_file = FLAGS_proto;
     options->proto_includes = FLAGS_inc;
+    options->use_ub = FLAGS_use_ub;
     return true;
 }
 
