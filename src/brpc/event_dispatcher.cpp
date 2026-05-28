@@ -24,6 +24,9 @@
 #include "bvar/latency_recorder.h"                    // bvar::LatencyRecorder
 #include "bthread/bthread.h"                          // bthread_start_background
 #include "brpc/event_dispatcher.h"
+#if BRPC_WITH_URMA
+#include "ubsocket.h"
+#endif
 
 DECLARE_int32(task_group_ntags);
 
@@ -48,6 +51,9 @@ static void StopAndJoinGlobalDispatchers() {
             g_edisp[i * FLAGS_event_dispatcher_num + j].Join();
         }
     }
+#if BRPC_WITH_URMA
+    ubsocket_uninit();
+#endif
     delete g_edisp_read_lantency;
     delete g_edisp_write_lantency;
 }
