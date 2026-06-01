@@ -40,7 +40,6 @@ ubsocket通过环境变量进行配置，在bRPC与ubsocket集成的过程中，
 |ubsocket_tx_depth|发送队列深度|最小值是64，设置上限由实际机器环境决定（根据命令urma_admin show --whole中max_jfc_depth与max_jfs_depth两者的最小值）|1024|否|
 |ubsocket_rx_depth|接受队列深度|最小值是64，设置上限由实际机器环境决定（根据命令urma_admin show --whole中max_jfc_depth与max_jfr_depth两者的最小值）|1024|否|
 |ubsocket_readv_unlimited|是否打开readv上报限制|false，true|true|否|
-|ubsocket_block_type|内存池的最小分片|default：8k，small：16k，medium：32k，large：64k|default|否|
 |ubsocket_pool_initial_size|IO内存的总大小，单位MB|应用按需配置|200|否|
 |ubsocket_pool_max_size|单bRPC进程UB通信内存占用弹性扩容最大值，单位MB| [ubsocket_pool_initial_size + 64, 6144], 单次最小扩容大小为 64M，因此 ubsocket_pool_max_size - ubsocket_pool_initial_size >= 64M |2048|否|
 |ubsocket_buf_pool_depth|单bRPC进程线程内存池深度|应用按需配置|12000|否|
@@ -54,7 +53,8 @@ ubsocket通过环境变量进行配置，在bRPC与ubsocket集成的过程中，
 |ubsocket_enable_share_jfr|	设置是否开启共享JFR|false：不开启共享jfr<br>true：开启共享jfr|true|否|
 |ubsocket_share_jfr_rx_queue_depth|设置开启共享JFR后，每个Socket链接接收缓存队列深度|最小值是64，设置上限由实际机器环境决定|1024|否|
 |ubsocket_link_priority|设置URMA流量SL优先级|[0, 15]| -1 |否|
-|`ubsocket_ub_trans_mode` | ub协议模式 |`RC_TP`，`RM_TP`, `RM_CTP`, `RC_CTP`  | `RM_TP` | 否 |
+|`ubsocket_block_type`|内存池的最小分片|tiny: 4k, default：8k，small：16k，medium：32k，large：64k| tiny | 否 |
+|`ubsocket_ub_trans_mode` | ub协议模式 |`RC_TP`，`RM_TP`, `RM_CTP`, `RC_CTP`  | `RM_CTP` | 否 |
 |`ubsocket_enable` | 是否启用 ubsocket 加速 | false, true | false | 否 |
 |`ubsocket_degrade` | 是否允许 ubsocket 在 UB 错误时降级成 TCP | false, true | true | 否 |
 |`ubsocket_async_accept` | 是否允许 ubsocket 在server做accept时做异步accept | false, true | false | 否 |

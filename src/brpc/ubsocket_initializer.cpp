@@ -36,7 +36,7 @@ DEFINE_string(ubsocket_src_eid, "", "Bonding device eid idx for ubsocket, necess
 DEFINE_string(ubsocket_log_level, "info", "Log level for ubsocket (e.g., 'error', 'warn', 'notice', 'info', 'debug')");
 DEFINE_string(ubsocket_tx_depth, "1024", "Send queue depth, the minimum value is 2. The upper limit of the setting is determined by the actual machine environment, based on the value of 'max_jfc_depth' in the command 'urma_admin show --whole'.");
 DEFINE_string(ubsocket_rx_depth, "1024", "Receive queue depth, the minimum value is 2. The upper limit of the setting is determined by the actual machine environment, based on the value of 'max_jfc_depth' in the command 'urma_admin show --whole'.");
-DEFINE_string(ubsocket_block_type, "default", "Minimum fragment of the memory pool for ubsocket (e.g., 'tiny'(4K), 'default'(8k), 'small'(16k), 'medium'(32k), 'large'(64k))");
+DEFINE_string(ubsocket_block_type, "tiny", "Minimum fragment of the memory pool for ubsocket (e.g., 'tiny'(4K), 'default'(8k), 'small'(16k), 'medium'(32k), 'large'(64k))");
 DEFINE_string(ubsocket_pool_initial_size, "200", "Total size of IO memory for ubsocket, in MB");
 DEFINE_string(ubsocket_pool_max_size, "2048", "Max size of ubsocket pool, in MB");
 DEFINE_string(ubsocket_buf_pool_depth, "12000", "Depth of ubsocket buffer pool");
@@ -54,7 +54,7 @@ DEFINE_string(ubsocket_trace_time, "10", "Set monitoring ubsocket data output in
 DEFINE_string(ubsocket_trace_file_path, "/tmp/ubsocket/log", "Set monitoring ubsocket data output path (e.g., '/tmp/ubsocket/log')");
 DEFINE_string(ubsocket_trace_file_size, "10", "Set monitoring ubsocket data file size, the minimum value is 1, the maximum value is 300");
 DEFINE_string(ubsocket_stats_cli, "true", "Enable ubsocket cli service (e.g., 'false', 'true')");
-DEFINE_string(ubsocket_ub_trans_mode, "RM_TP", "Protocol mode for ubsocket (e.g., 'RC_TP', 'RM_TP', 'RM_CTP', 'RC_CTP')");
+DEFINE_string(ubsocket_ub_trans_mode, "RM_CTP", "Protocol mode for ubsocket (e.g., 'RC_TP', 'RM_TP', 'RM_CTP', 'RC_CTP')");
 DEFINE_string(ubsocket_min_reserved_credit, "64", "Minimum reserved credit, if the held credit <= min_reserved_credit, the credit will not be returned.");
 DEFINE_string(ubsocket_link_priority, "-1", "Set urma flow service level priority, range from 0 to 15.");
 DEFINE_string(ubsocket_degrade, "true", "Allow degradation to TCP when UB fails; default: true");
