@@ -665,6 +665,7 @@ void IOBuf::clear() {
 }
 
 size_t IOBuf::get_block_size() {
+#ifdef BRPC_WITH_URMA
     if (FLAGS_ubsocket_block_type == "tiny") {
         return 4UL * 1024;
     } else if (FLAGS_ubsocket_block_type == "default") {
@@ -679,6 +680,9 @@ size_t IOBuf::get_block_size() {
         LOG(WARNING) << "Unknown ubsocket_block_type: " << FLAGS_ubsocket_block_type << ", use the default IOBuf BLOCK_SIZE";
         return IOBuf::DEFAULT_BLOCK_SIZE;
     }
+#else
+    return IOBuf::DEFAULT_BLOCK_SIZE;
+#endif
 }
 
 size_t IOBuf::pop_front(size_t n) {
