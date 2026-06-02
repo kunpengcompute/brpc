@@ -12,7 +12,7 @@ def _local_deps_impl(module_ctx):
     git_repository(
  	    name = "urma",
  	    build_file = "//3rdparty/urma:BUILD.bazel",
- 	    commit = "19b0cfe670700c4f88388f97effce6c476753046",
+ 	    commit = "c42ebe196794d286edad884c7753748c23da2703",
  	    remote = "https://gitcode.com/openeuler/umdk.git",
  	    strip_prefix = "src/urma",
  	 )
