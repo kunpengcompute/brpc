@@ -43,6 +43,9 @@
 #include "brpc/details/usercode_backup_pool.h"
 #include "brpc/details/controller_private_accessor.h"
 #include "brpc/details/server_private_accessor.h"
+#ifdef BRPC_WITH_URMA
+#include "profiling/ubsocket_prof.h"
+#endif
 
 extern "C" {
 void bthread_assign_data(void* data);
@@ -316,7 +319,13 @@ void SendRpcResponse(int64_t correlation_id, Controller* cntl,
     // If user calls `SetFailed' on Controller, we don't serialize
     // response either
     if (res != NULL && !cntl->Failed()) {
+#ifdef BRPC_WITH_URMA
+        PROF_START(BRPC_SERIALIZE);
+#endif
         append_body = SerializeResponse(*res, *cntl, res_body);
+#ifdef BRPC_WITH_URMA
+        PROF_END(BRPC_SERIALIZE, true);
+#endif
     }
 
     // Don't use res->ByteSize() since it may be compressed
@@ -989,17 +998,26 @@ void ProcessRpcResponse(InputMessageBase* msg_base) {
             if (cntl->response()->GetDescriptor() == SerializedResponse::descriptor()) {
                 ((SerializedResponse*)cntl->response())->
                     serialized_data().append(*res_buf_ptr);
-            } else if (!DeserializeRpcMessage(*res_buf_ptr, *cntl, content_type,
+            } else {
+#ifdef BRPC_WITH_URMA
+                PROF_START(BRPC_DESERIALIZE);
+#endif
+                bool ret = DeserializeRpcMessage(*res_buf_ptr, *cntl, content_type,
                                               compress_type, checksum_type,
-                                              cntl->response())) {
-                cntl->SetFailed(
-                    EREQUEST,
-                    "Fail to parse response=%s, ContentType=%s, "
-                    "CompressType=%s, ChecksumType=%s, request_size=%d",
-                    cntl->response()->GetDescriptor()->full_name().data(),
-                    ContentTypeToCStr(content_type),
-                    CompressTypeToCStr(compress_type),
-                    ChecksumTypeToCStr(checksum_type), res_size);
+                                              cntl->response());
+#ifdef BRPC_WITH_URMA
+                PROF_END(BRPC_DESERIALIZE, true);
+#endif
+                if (!ret) {
+                    cntl->SetFailed(
+                        EREQUEST,
+                        "Fail to parse response=%s, ContentType=%s, "
+                        "CompressType=%s, ChecksumType=%s, request_size=%d",
+                        cntl->response()->GetDescriptor()->full_name().data(),
+                        ContentTypeToCStr(content_type),
+                        CompressTypeToCStr(compress_type),
+                        ChecksumTypeToCStr(checksum_type), res_size);
+                }
             }
         } // else silently ignore the response.
     } while (0);

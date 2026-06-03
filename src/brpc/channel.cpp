@@ -38,6 +38,10 @@
 #include "brpc/rdma/rdma_helper.h"
 #include "brpc/policy/esp_authenticator.h"
 
+#ifdef BRPC_WITH_URMA
+#include "profiling/ubsocket_prof.h"
+#endif
+
 namespace brpc {
 
 DECLARE_bool(enable_rpcz);
@@ -436,6 +440,9 @@ void Channel::CallMethod(const google::protobuf::MethodDescriptor* method,
                          const google::protobuf::Message* request,
                          google::protobuf::Message* response,
                          google::protobuf::Closure* done) {
+#ifdef BRPC_WITH_URMA
+    g_brpc_ubs_step_latency[BRPC_CLIENT_CALL] = butil::cpuwide_time_ns();
+#endif
     const int64_t start_send_real_us = butil::gettimeofday_us();
     Controller* cntl = static_cast<Controller*>(controller_base);
     cntl->OnRPCBegin(start_send_real_us);
@@ -544,7 +551,13 @@ void Channel::CallMethod(const google::protobuf::MethodDescriptor* method,
     // Ensure that serialize_request is done before pack_request in all
     // possible executions, including:
     //   HandleSendFailed => OnVersionedRPCReturned => IssueRPC(pack_request)
+#ifdef BRPC_WITH_URMA
+    PROF_START(BRPC_SERIALIZE);
+#endif
     _serialize_request(&cntl->_request_buf, cntl, request);
+#ifdef BRPC_WITH_URMA
+    PROF_END(BRPC_SERIALIZE, true);
+#endif
     if (cntl->FailedInline()) {
         // Handle failures caused by serialize_request, and these error_codes
         // should be excluded from the retry_policy.

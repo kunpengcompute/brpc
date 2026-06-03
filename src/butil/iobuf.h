@@ -35,6 +35,12 @@
 #include "butil/reader_writer.h"
 #include "butil/binary_printer.h"
 
+#ifdef BRPC_WITH_URMA
+#include "iobuf/ubsocket_zcopy_adapter.h"
+#include "profiling/ubsocket_prof.h"
+extern std::atomic<int64_t> g_brpc_ubs_step_latency[20];
+#endif
+
 // For IOBuf::appendv(const const_iovec*, size_t). The only difference of this
 // struct from iovec (defined in sys/uio.h) is that iov_base is `const void*'
 // which is assignable by const pointers w/o any error.

@@ -42,7 +42,7 @@
 #include "butil/iobuf_profiler.h"
 
 #ifdef BRPC_WITH_URMA
-#include "iobuf/ubsocket_zcopy_adapter.h"
+std::atomic<int64_t> g_brpc_ubs_step_latency[20];
 #endif
 
 namespace brpc {
@@ -901,7 +901,21 @@ ssize_t IOBuf::pcut_into_file_descriptor(int fd, off_t offset, size_t size_hint)
         static iobuf::iov_function pwritev_func = iobuf::get_pwritev_func();
         nw = pwritev_func(fd, vec, nvec, offset);
     } else {
+#ifdef BRPC_WITH_URMA
+        // only client record BRPC_CALL
+        if (g_brpc_ubs_step_latency[BRPC_CLIENT_CALL] != 0) {
+            PROF_RECORD(BRPC_CLIENT_CALL, butil::cpuwide_time_ns() - g_brpc_ubs_step_latency[BRPC_CLIENT_CALL], true);
+        }
+        // server record BRPC_RROCESS_REQ for server readv -> writev cost
+        if (g_brpc_ubs_step_latency[BRPC_SERVER_PROCESS_REQ] != 0) {
+            PROF_RECORD(BRPC_SERVER_PROCESS_REQ, butil::cpuwide_time_ns() - g_brpc_ubs_step_latency[BRPC_SERVER_PROCESS_REQ], true);
+        }
+        PROF_START(BRPC_WRITEV);
+#endif
         nw = ::ubsocket_wrapper_writev(fd, vec, nvec);
+#ifdef BRPC_WITH_URMA
+        PROF_END(BRPC_WRITEV, true);
+#endif
     }
     if (nw > 0) {
         pop_front(nw);
@@ -1029,7 +1043,13 @@ ssize_t IOBuf::pcut_multiple_into_file_descriptor(
         static iobuf::iov_function pwritev_func = iobuf::get_pwritev_func();
         nw = pwritev_func(fd, vec, nvec, offset);
     } else {
+#ifdef BRPC_WITH_URMA
+        PROF_START(BRPC_WRITEV);
+#endif
         nw = ::ubsocket_wrapper_writev(fd, vec, nvec);
+#ifdef BRPC_WITH_URMA
+        PROF_END(BRPC_WRITEV, true);
+#endif
     }
     if (nw <= 0) {
         return nw;
@@ -1565,7 +1585,17 @@ ssize_t IOPortal::pappend_from_file_descriptor(
 
     ssize_t nr = 0;
     if (offset < 0) {
+#ifdef BRPC_WITH_URMA
+        PROF_START(BRPC_READV);
+#endif
         nr = ::ubsocket_wrapper_readv(fd, vec, nvec);
+#ifdef BRPC_WITH_URMA
+        PROF_END(BRPC_READV, true);
+
+        auto time = butil::cpuwide_time_ns();
+        g_brpc_ubs_step_latency[BRPC_SERVER_PROCESS_REQ] = time;
+        g_brpc_ubs_step_latency[BRPC_CLIENT_PROCESS_RSP] = time;
+#endif
     } else {
         static iobuf::iov_function preadv_func = iobuf::get_preadv_func();
         nr = preadv_func(fd, vec, nvec, offset);
