@@ -55,6 +55,9 @@
 #if defined(OS_MACOSX)
 #include <sys/event.h>
 #endif
+#ifdef BRPC_WITH_URMA
+#include "profiling/ubsocket_prof.h"
+#endif
 
 DECLARE_bool(ubsocket_enable);
 

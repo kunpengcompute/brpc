@@ -50,6 +50,9 @@
 #include "brpc/selective_channel.h"
 #include "bthread/task_group.h"
 
+#ifdef BRPC_WITH_URMA
+#include "profiling/ubsocket_prof.h"
+#endif
 namespace bthread {
 extern BAIDU_THREAD_LOCAL TaskGroup* tls_task_group;
 }
@@ -969,6 +972,10 @@ void Controller::EndRPC(const CompletionInfo& info) {
             // can't Run() because all backup threads are blocked by Join().
 
             OnRPCEnd(butil::gettimeofday_us());
+#ifdef BRPC_WITH_URMA
+            PROF_RECORD(BRPC_CLIENT_PROCESS_RSP,
+                        butil::cpuwide_time_ns() - g_brpc_ubs_step_latency[BRPC_CLIENT_PROCESS_RSP], true);
+#endif
             const bool destroy_cid_in_done = has_flag(FLAGS_DESTROY_CID_IN_DONE);
             _done->Run();
             // NOTE: Don't touch this Controller anymore, because it's likely to be
