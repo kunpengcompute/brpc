@@ -51,6 +51,7 @@ DEFINE_string(ubsocket_enable_share_jfr, "true", "Whether to enable share jfr (e
 DEFINE_string(ubsocket_share_jfr_rx_queue_depth, "1024", "Share jfr receive queue depth, the minimum value is 64. The upper limit of the setting is determined by the actual machine environment.");
 DEFINE_string(ubsocket_share_jfr_rx_o3_queue_depth, "256", "Share jfr receive out of order queue depth (only available when ubsocket_ub_trans_mode is \"RM_CTP\"), the default value is 256. The upper limit of the setting is equal to ubsocket_share_jfr_rx_queue_depth.");
 DEFINE_string(ubsocket_trace_enable, "true", "Enable ubsocket trace statistics (e.g., 'false', 'true')");
+DEFINE_string(ubsocket_backup_link_enable, "false", "Enable ubsocket backup link (e.g., 'false', 'true')");
 DEFINE_string(ubsocket_trace_time, "10", "Set monitoring ubsocket data output interval, the minimum value is 1, the maximum value is 300");
 DEFINE_string(ubsocket_trace_file_path, "/tmp/ubsocket/log", "Set monitoring ubsocket data output path (e.g., '/tmp/ubsocket/log')");
 DEFINE_string(ubsocket_trace_file_size, "10", "Set monitoring ubsocket data file size, the minimum value is 1, the maximum value is 300");
@@ -142,6 +143,9 @@ static void SetUBSocketEnv() {
     }
     if (!FLAGS_ubsocket_trace_enable.empty()) {
         ::setenv("UBSOCKET_TRACE_ENABLE", FLAGS_ubsocket_trace_enable.c_str(), 1);
+    }
+    if (!FLAGS_ubsocket_backup_link_enable.empty()) {
+        ::setenv("UBSOCKET_BACKUP_LINK_ENABLE", FLAGS_ubsocket_backup_link_enable.c_str(), 1);
     }
     if (!FLAGS_ubsocket_trace_time.empty()) {
         ::setenv("UBSOCKET_TRACE_TIME", FLAGS_ubsocket_trace_time.c_str(), 1);
