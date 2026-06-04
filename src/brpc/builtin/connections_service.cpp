@@ -28,6 +28,10 @@
 #include "brpc/nshead_service.h"
 #include "brpc/builtin/common.h"
 #include "brpc/builtin/connections_service.h"
+#ifdef BRPC_WITH_URMA
+#include "include/ubsocket_def.h"
+#include "butil/ubsocket_wrapper.h"
+#endif
 
 namespace brpc {
 
@@ -319,7 +323,13 @@ void ConnectionsService::PrintConnections(
                << min_width(stat.out_num_messages_m, 8) << bar
                << min_width(rtt_display, 11) << bar;
 #ifdef BRPC_WITH_URMA
-            bool use_ub = false;
+            int connectType = 0;
+            socklen_t optlen = sizeof(int);
+            int ret = ubsocket_wrapper_getsockopt(
+                ptr->fd(), static_cast<int>(UbsocketLevel::SOL_UB),
+                static_cast<int>(UbSocketOpt::UBS_OPT_PROTOCOL), &connectType,
+                &optlen);
+            bool use_ub = ((ret == 0) && (connectType > 0));
             os << min_width(use_ub, 5) << bar;
 #endif
         }

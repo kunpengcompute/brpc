@@ -18,7 +18,6 @@
 #include "ubsocket_wrapper.h"
 
 #include <unistd.h>
-
 #include <gflags/gflags.h>
 
 #ifdef BRPC_WITH_URMA
@@ -78,4 +77,9 @@ ssize_t ubsocket_wrapper_writev(int fd, const struct iovec* iov, int iovcnt) {
 ssize_t ubsocket_wrapper_readv(int fd, const struct iovec* iov, int iovcnt) {
     return DELEGATE(readv)(fd, iov, iovcnt);
 }
+
+int ubsocket_wrapper_getsockopt(int fd, int level, int optname, void *optval, socklen_t *optlen) {
+    return DELEGATE(getsockopt)(fd, level, optname, optval, optlen);
+}
+
 }
