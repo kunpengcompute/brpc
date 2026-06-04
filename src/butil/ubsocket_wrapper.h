@@ -43,6 +43,8 @@ int ubsocket_wrapper_epoll_wait(int epfd, struct epoll_event* events, int maxeve
 ssize_t ubsocket_wrapper_writev(int fd, const struct iovec* iov, int iovcnt);
 
 ssize_t ubsocket_wrapper_readv(int fd, const struct iovec* iov, int iovcnt);
+
+int ubsocket_wrapper_getsockopt(int fd, int level, int optname, void *optval, socklen_t *optlen);
 }
 
 #endif
