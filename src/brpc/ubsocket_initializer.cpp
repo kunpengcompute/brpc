@@ -57,6 +57,8 @@ DEFINE_string(ubsocket_trace_file_path, "/tmp/ubsocket/log", "Set monitoring ubs
 DEFINE_string(ubsocket_trace_file_size, "10", "Set monitoring ubsocket data file size, the minimum value is 1, the maximum value is 300");
 DEFINE_string(ubsocket_stats_cli, "true", "Enable ubsocket cli service (e.g., 'false', 'true')");
 DEFINE_string(ubsocket_ub_trans_mode, "RM_CTP", "Protocol mode for ubsocket (e.g., 'RC_TP', 'RM_TP', 'RM_CTP', 'RC_CTP')");
+DEFINE_string(ubsocket_initial_credit, "128", "The initial credits requested for a new send operation.");
+DEFINE_string(ubsocket_max_credit_per_request, "1024", "Upper bound for credit in one request.");
 DEFINE_string(ubsocket_min_reserved_credit, "64", "Minimum reserved credit, if the held credit <= min_reserved_credit, the credit will not be returned.");
 DEFINE_string(ubsocket_link_priority, "-1", "Set urma flow service level priority, range from 0 to 15.");
 DEFINE_string(ubsocket_degrade, "true", "Allow degradation to TCP when UB fails; default: true");
@@ -161,6 +163,12 @@ static void SetUBSocketEnv() {
     }
     if (!FLAGS_ubsocket_ub_trans_mode.empty()) {
         ::setenv("UBSOCKET_UB_TRANS_MODE", FLAGS_ubsocket_ub_trans_mode.c_str(), 1);
+    }
+    if (!FLAGS_ubsocket_initial_credit.empty()) {
+        ::setenv("UBSOCKET_INITIAL_CREDIT", FLAGS_ubsocket_initial_credit.c_str(), 1);
+    }
+    if (!FLAGS_ubsocket_max_credit_per_request.empty()) {
+        ::setenv("UBSOCKET_MAX_CREDIT_PER_REQUEST", FLAGS_ubsocket_max_credit_per_request.c_str(), 1);
     }
     if (!FLAGS_ubsocket_min_reserved_credit.empty()) {
         ::setenv("UBSOCKET_MIN_RESERVED_CREDIT", FLAGS_ubsocket_min_reserved_credit.c_str(), 1);
