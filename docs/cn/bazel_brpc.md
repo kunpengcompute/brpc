@@ -46,7 +46,7 @@ ubsocket通过环境变量进行配置，在bRPC与ubsocket集成的过程中，
 |ubsocket_schedule_policy|设置多平面负载分担策略|affinity_priority, affinity，rr|affinity_priority|否|
 |ubsocket_auto_fallback_tcp|	协议不匹配时是否自动降级为TCP|false：协议不匹配时不降级为TCP true：协议不匹配时自动降级为TCP|true|否|
 |ubsocket_trace_enable | 是否打开trace统计|false, true | true |否|
-|ubsocket_backup_link_enable | 是否打开切换主备链路功能|false, true | false |否|
+|ubsocket_backup_link_enable | 是否打开切换主备链路功能|false, true | true |否|
 |ubsocket_trace_time | 控制维测数据输出间隔（单位s）| [1, 300] | 10 |否|
 |ubsocket_trace_file_path | 控制维测数据输出路径，路径长度范围在1到512bytes| [1, 512] | /tmp/ubsocket/log |否|
 |ubsocket_trace_file_size | 控制维测数据文件大小（MB）| [1, 300] | 10 |否|
