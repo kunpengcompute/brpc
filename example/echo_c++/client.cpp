@@ -20,6 +20,7 @@
 #include <gflags/gflags.h>
 #include <butil/logging.h>
 #include <butil/time.h>
+#include <butil/ubiobuf.h>
 #include <brpc/channel.h>
 #include "echo.pb.h"
 
@@ -74,7 +75,13 @@ int main(int argc, char* argv[]) {
         cntl.set_log_id(log_id ++);  // set by user
         // Set attachment which is wired to network directly instead of 
         // being serialized into protobuf messages.
-        cntl.request_attachment().append(FLAGS_attachment);
+        if (FLAGS_use_ub) {
+            butil::UBIOBuf attachment;
+            attachment.append(FLAGS_attachment);
+            cntl.request_attachment().append(attachment);
+        } else {
+            cntl.request_attachment().append(FLAGS_attachment);
+        }
 
         // Use checksum, only support CRC32C now.
         if (FLAGS_enable_checksum) {

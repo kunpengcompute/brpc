@@ -25,6 +25,7 @@
 #include "butil/atomicops.h"
 #include "butil/fast_rand.h"
 #include "butil/logging.h"
+#include "butil/ubiobuf.h"
 #ifdef WITH_RDMA
 #include "brpc/rdma/rdma_helper.h"
 #endif
@@ -99,7 +100,13 @@ public:
         if (attachment_size > 0) {
             _addr = malloc(attachment_size);
             butil::fast_rand_bytes(_addr, attachment_size);
-            _attachment.append(_addr, attachment_size);
+            if (FLAGS_use_ub) {
+                butil::UBIOBuf attachment;
+                attachment.append(_addr, attachment_size);
+                _attachment.append(attachment.movable());
+            } else {
+                _attachment.append(_addr, attachment_size);
+            }
         }
         _echo_attachment = echo_attachment;
     }

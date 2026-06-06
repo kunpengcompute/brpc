@@ -24,7 +24,11 @@
 #include "brpc/rdma/rdma_endpoint.h"
 #include "brpc/acceptor.h"
 
-
+#ifdef BRPC_WITH_URMA
+#include "include/ubsocket_def.h"
+#include "butil/ubsocket_wrapper.h"
+#endif
+ 	
 namespace brpc {
 
 static const int INITIAL_CONNECTION_CAP = 65536;
@@ -41,6 +45,7 @@ Acceptor::Acceptor(bthread_keytable_pool_t* pool)
     , _force_ssl(false)
     , _ssl_ctx(NULL) 
     , _use_rdma(false)
+    , _use_ub(false)
     , _bthread_tag(BTHREAD_TAG_DEFAULT) {
 }
 
@@ -294,6 +299,16 @@ void Acceptor::OnNewConnectionsUntilEAGAIN(Socket* acception) {
             options.on_edge_triggered_events = InputMessenger::OnNewMessages;
         }
         options.use_rdma = am->_use_rdma;
+#if BRPC_WITH_URMA
+        int connectType = 0;
+        socklen_t optlen = sizeof(int);
+        int ret = ubsocket_wrapper_getsockopt(
+            in_fd, static_cast<int>(UbsocketLevel::SOL_UB),
+            static_cast<int>(UbSocketOpt::UBS_OPT_PROTOCOL), &connectType,
+            &optlen);
+        bool use_ub = ((ret == 0) && (connectType > 0));
+        options.use_ub = am->_use_ub && use_ub;
+#endif
         options.bthread_tag = am->_bthread_tag;
         if (Socket::Create(options, &socket_id) != 0) {
             LOG(ERROR) << "Fail to create Socket";

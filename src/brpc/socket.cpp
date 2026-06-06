@@ -34,6 +34,7 @@
 #include "butil/object_pool.h"                    // get_object
 #include "butil/logging.h"                        // CHECK
 #include "butil/macros.h"
+#include "butil/ubiobuf.h"                        // butil::UBIOBuf
 #include "butil/class_name.h"                     // butil::class_name
 #include "butil/memory/scope_guard.h"
 #include "brpc/log.h"
@@ -309,6 +310,13 @@ bool Socket::CreatedByConnect() const {
 SocketMessage* const DUMMY_USER_MESSAGE = (SocketMessage*)0x1;
 const uint32_t MAX_PIPELINED_COUNT = 16384;
 
+static butil::Status NormalizeUbWriteData(butil::IOBuf* data) {
+    if (butil::UBIOBuf::normalize(data) < 0) {
+        return butil::Status(ENOMEM, "Fail to normalize write data to UBIOBuf");
+    }
+    return butil::Status::OK();
+}
+
 struct BAIDU_CACHELINE_ALIGNMENT Socket::WriteRequest {
     static WriteRequest* const UNCONNECTED;
 
@@ -396,6 +404,14 @@ void Socket::WriteRequest::Setup(Socket* s) {
             butil::Status st = msg->AppendAndDestroySelf(&data, s);
             if (!st.ok()) {
                 // Abandon the request.
+                data.clear();
+                bthread_id_error2(id_wait, st.error_code(), st.error_cstr());
+                return;
+            }
+        }
+        if (s->_use_ub && msg != DUMMY_USER_MESSAGE) {
+            butil::Status st = NormalizeUbWriteData(&data);
+            if (!st.ok()) {
                 data.clear();
                 bthread_id_error2(id_wait, st.error_code(), st.error_cstr());
                 return;
@@ -496,7 +512,8 @@ Socket::Socket(Forbidden f)
     , _total_streams_unconsumed_size(0)
     , _ninflight_app_health_check(0)
     , _tcp_user_timeout_ms(-1)
-    , _http_request_method(HTTP_METHOD_GET) {
+    , _http_request_method(HTTP_METHOD_GET)
+    , _use_ub(false) {
     CreateVarsOnce();
     pthread_mutex_init(&_id_wait_list_mutex, NULL);
     _epollout_butex = bthread::butex_create_checked<butil::atomic<int> >();
@@ -1652,6 +1669,14 @@ int Socket::Write(butil::IOBuf* data, const WriteOptions* options_in) {
     }
 
     req->data.swap(*data);
+    if (_use_ub) {
+        butil::Status st = NormalizeUbWriteData(&req->data);
+        if (!st.ok()) {
+            req->data.clear();
+            butil::return_object(req);
+            return SetError(opt.id_wait, st.error_code());
+        }
+    }
     // Set `req->next' to UNCONNECTED so that the KeepWrite thread will
     // wait until it points to a valid WriteRequest or NULL.
     req->next = WriteRequest::UNCONNECTED;
@@ -2142,6 +2167,9 @@ ssize_t Socket::DoRead(size_t size_hint) {
             return -1;
         }
         CHECK(_rdma_state == RDMA_OFF);
+        if (_use_ub) {
+            return _read_buf.ub_append_from_file_descriptor(fd(), size_hint);
+        }
         return _read_buf.append_from_file_descriptor(fd(), size_hint);
     }
 
@@ -2973,7 +3001,9 @@ int Socket::PeekAgentSocket(SocketUniquePtr* out) const {
 
 void Socket::GetStat(SocketStat* s) const {
     BAIDU_CASSERT(offsetof(Socket, _preferred_index) >= 64, different_cacheline);
-    BAIDU_CASSERT(sizeof(WriteRequest) == 64, sizeof_write_request_is_64);
+    // IOBuf size: 32B->40B (add vptr) and WriteRequest size: 64B->128B
+    BAIDU_CASSERT(sizeof(WriteRequest) == 2 * BAIDU_CACHELINE_SIZE,
+                  sizeof_write_request_is_two_cachelines);
 
     SharedPart* sp = GetSharedPart();
     if (sp != NULL && sp->extended_stat != NULL) {

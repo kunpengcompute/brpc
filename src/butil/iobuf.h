@@ -58,6 +58,9 @@ struct ssl_st;
 
 namespace butil {
 
+class UBIOBufAsZeroCopyOutputStream;
+class UBIOBuf;
+
 // IOBuf is a non-continuous buffer that can be cut and combined w/o copying
 // payload. It can be read from or flushed into file descriptors as well.
 // IOBuf is [thread-compatible]. Namely using different IOBuf in different
@@ -68,9 +71,11 @@ namespace butil {
 class IOBuf {
 friend class IOBufAsZeroCopyInputStream;
 friend class IOBufAsZeroCopyOutputStream;
+friend class UBIOBufAsZeroCopyOutputStream;
 friend class IOBufBytesIterator;
 friend class IOBufCutter;
 friend class SingleIOBuf;
+friend class UBIOBuf;
 
 public:
     static const size_t DEFAULT_BLOCK_SIZE = 8192;
@@ -122,16 +127,14 @@ public:
     IOBuf();
     IOBuf(const IOBuf&);
     IOBuf(const Movable&);
-    ~IOBuf() { clear(); }
-    void operator=(const IOBuf&);
-    void operator=(const Movable&);
-    void operator=(const char*);
-    void operator=(const std::string&);
+    virtual ~IOBuf() { clear(); }
+    virtual void operator=(const IOBuf&);
+    virtual void operator=(const Movable&);
+    virtual void operator=(const char*);
+    virtual void operator=(const std::string&);
 
     // Exchange internal fields with another IOBuf.
     void swap(IOBuf&);
-
-    static size_t get_block_size();
 
     // Pop n bytes from front side
     // If n == 0, nothing popped; if n >= length(), all bytes are popped
@@ -212,9 +215,9 @@ public:
 
     // Append another IOBuf to back side, payload of the IOBuf is shared
     // rather than copied.
-    void append(const IOBuf& other);
+    virtual void append(const IOBuf& other);
     // Append content of `other' to self and clear `other'.
-    void append(const Movable& other);
+    virtual void append(const Movable& other);
 
     // ===================================================================
     // Following push_back()/append() are just implemented for convenience
@@ -226,11 +229,11 @@ public:
     
     // Append a character to back side. (with copying)
     // Returns 0 on success, -1 otherwise.
-    int push_back(char c);
+    virtual int push_back(char c);
     
     // Append `data' with `count' bytes to back side. (with copying)
     // Returns 0 on success(include count == 0), -1 otherwise.
-    int append(void const* data, size_t count);
+    virtual int append(void const* data, size_t count);
 
     // Append multiple data to back side in one call, faster than appending
     // one by one separately.
@@ -240,28 +243,30 @@ public:
     //                         { data2, len2 },
     //                         { data3, len3 } };
     //   foo.appendv(vec, arraysize(vec));
-    int appendv(const const_iovec vec[], size_t n);
-    int appendv(const iovec* vec, size_t n)
+    virtual int appendv(const const_iovec vec[], size_t n);
+    virtual int appendv(const iovec* vec, size_t n)
     { return appendv((const const_iovec*)vec, n); }
 
     // Append a c-style string to back side. (with copying)
     // Returns 0 on success, -1 otherwise.
     // NOTE: Returns 0 when `s' is empty.
-    int append(char const* s);
+    virtual int append(char const* s);
 
     // Append a std::string to back side. (with copying)
     // Returns 0 on success, -1 otherwise.
     // NOTE: Returns 0 when `s' is empty.
-    int append(const std::string& s);
+    virtual int append(const std::string& s);
 
     // Append the user-data to back side WITHOUT copying.
     // The user-data can be split and shared by smaller IOBufs and will be
     // deleted using the deleter func when no IOBuf references it anymore.
-    int append_user_data(void* data, size_t size, std::function<void(void*)> deleter);
+    // UBIOBuf can hold user-data blocks; normalize() copies them into UB blocks.
+    virtual int append_user_data(void* data, size_t size, std::function<void(void*)> deleter);
 
     // Append the user-data to back side WITHOUT copying.
     // The meta is associated with this piece of user-data.
-    int append_user_data_with_meta(void* data, size_t size, std::function<void(void*)> deleter, uint64_t meta);
+    // UBIOBuf can hold user-data blocks; normalize() copies them into UB blocks.
+    virtual int append_user_data_with_meta(void* data, size_t size, std::function<void(void*)> deleter, uint64_t meta);
 
     // Get the data meta of the first byte in this IOBuf.
     // The meta is specified with append_user_data_with_meta before.
@@ -275,13 +280,13 @@ public:
     // as many |c| as needed to reach a size of n. If c is not specified,
     // null-character would be appended.
     // Returns 0 on success, -1 otherwise.
-    int resize(size_t n) { return resize(n, '\0'); }
-    int resize(size_t n, char c);
+    virtual int resize(size_t n) { return resize(n, '\0'); }
+    virtual int resize(size_t n, char c);
 
     // Reserve `n' uninitialized bytes at back-side.
     // Returns an object representing the reserved area, INVALID_AREA on failure.
     // NOTE: reserve(0) returns INVALID_AREA.
-    Area reserve(size_t n);
+    virtual Area reserve(size_t n);
 
     // [EXTREMELY UNSAFE]
     // Copy `data' to the reserved `area'. `data' must be as long as the
@@ -348,7 +353,7 @@ public:
     const void* fetch1() const;
 
     // Remove all data
-    void clear();
+    virtual void clear();
 
     // True iff there's no data
     bool empty() const;
@@ -375,6 +380,8 @@ public:
 
     // Make a movable version of self
     Movable movable() { return Movable(*this); }
+
+    virtual bool use_ub() const;
 
 protected:
     int _cut_by_char(IOBuf* out, char);
@@ -459,7 +466,7 @@ class IOPortal : public IOBuf {
 public:
     IOPortal() : _block(NULL) { }
     IOPortal(const IOPortal& rhs) : IOBuf(rhs), _block(NULL) { } 
-    ~IOPortal();
+    ~IOPortal() override;
     IOPortal& operator=(const IOPortal& rhs);
         
     // Read at most `max_count' bytes from the reader and append to self.
@@ -469,6 +476,9 @@ public:
     // append to self.
     ssize_t append_from_file_descriptor(int fd, size_t max_count);
  
+    // Read at most `max_count' bytes from file descriptor `fd' and
+    // append to self use UBIOBuf.
+    ssize_t ub_append_from_file_descriptor(int fd, size_t max_count);
     // Read at most `max_count' bytes from file descriptor `fd' at a given
     // offset and append to self. The file offset is not changed.
     // If `offset' is negative, does exactly what append_from_file_descriptor does.
@@ -480,7 +490,7 @@ public:
                                     size_t max_count = 1024*1024);
 
     // Remove all data inside and return cached blocks.
-    void clear();
+    void clear() override;
 
     // Return cached blocks to TLS. This function should be called by users
     // when this IOPortal are cut into intact messages and becomes empty, to
@@ -503,7 +513,7 @@ class IOReserveAlignedBuf : public IOBuf {
 public:
     IOReserveAlignedBuf(size_t alignment)
         : _alignment(alignment), _reserved(false) {}
-    Area reserve(size_t count);
+    Area reserve(size_t count) override;
 
 private:
     size_t _alignment;
