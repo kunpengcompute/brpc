@@ -43,6 +43,7 @@ void SubmitIOBufSample(IOBuf::Block* block, int64_t ref);
 
 const uint16_t IOBUF_BLOCK_FLAGS_USER_DATA = 1 << 0;
 const uint16_t IOBUF_BLOCK_FLAGS_SAMPLED = 1 << 1;
+const uint16_t IOBUF_BLOCK_FLAGS_UB = 1 << 2;
 
 inline ssize_t IOBuf::cut_into_file_descriptor(int fd, size_t size_hint) {
     return pcut_into_file_descriptor(fd, -1, size_hint);
@@ -81,13 +82,21 @@ inline IOBuf::IOBuf() {
 
 inline IOBuf::IOBuf(const Movable& rhs) {
     _sv = rhs.value()._sv;
-    new (&rhs.value()) IOBuf;
+    // Do not reconstruct IOBuf with placement new here, maybe rhs is
+    // a derived object such as UBIOBuf, and rebuilding the base subobject
+    // would overwrite the derived class vptr.
+    reset_block_ref(rhs.value()._sv.refs[0]);
+    reset_block_ref(rhs.value()._sv.refs[1]);
 }
 
 inline void IOBuf::operator=(const Movable& rhs) {
     clear();
     _sv = rhs.value()._sv;
-    new (&rhs.value()) IOBuf;
+    // Do not reconstruct IOBuf with placement new here, maybe rhs is
+    // a derived object such as UBIOBuf, and rebuilding the base subobject
+    // would overwrite the derived class vptr.
+    reset_block_ref(rhs.value()._sv.refs[0]);
+    reset_block_ref(rhs.value()._sv.refs[1]);
 }
 
 inline void IOBuf::operator=(const char* s) {
@@ -460,6 +469,18 @@ extern void  (*blockmem_deallocate)(void*);
 
 } // namespace iobuf
 
+namespace ubiobuf {
+void inc_g_nblock();
+void dec_g_nblock();
+
+void inc_g_blockmem();
+void dec_g_blockmem();
+
+extern void* (*blockmem_allocate)(size_t);
+extern void  (*blockmem_deallocate)(void*);
+
+} // namespace ubiobuf
+
 struct IOBuf::Block {
     butil::atomic<int> nshared;
     uint16_t flags;
@@ -487,6 +508,26 @@ struct IOBuf::Block {
         , data(data_in) {
         iobuf::inc_g_nblock();
         iobuf::inc_g_blockmem();
+        if (is_samplable()) {
+            SubmitIOBufSample(this, 1);
+        }
+    }
+
+    Block(char* data_in, uint32_t data_size, uint16_t flags)
+        : nshared(1)
+        , flags(flags)
+        , abi_check(0)
+        , size(0)
+        , cap(data_size)
+        , u({NULL})
+        , data(data_in) {
+        if (flags & IOBUF_BLOCK_FLAGS_UB) {
+            ubiobuf::inc_g_nblock();
+            ubiobuf::inc_g_blockmem();
+        } else {
+            iobuf::inc_g_nblock();
+            iobuf::inc_g_blockmem();
+        }
         if (is_samplable()) {
             SubmitIOBufSample(this, 1);
         }
@@ -538,6 +579,13 @@ struct IOBuf::Block {
         if (nshared.fetch_sub(1, butil::memory_order_release) == 1) {
             butil::atomic_thread_fence(butil::memory_order_acquire);
             if (!is_user_data()) {
+                if (flags & IOBUF_BLOCK_FLAGS_UB) {
+                    ubiobuf::dec_g_nblock();
+                    ubiobuf::dec_g_blockmem();
+                    this->~Block();
+                    ubiobuf::blockmem_deallocate(this);
+                    return;
+                }
                 iobuf::dec_g_nblock();
                 iobuf::dec_g_blockmem();
                 this->~Block();
@@ -646,7 +694,7 @@ inline IOBuf::Block* create_block(const size_t block_size) {
 }
 
 inline IOBuf::Block* create_block() {
-    return create_block(IOBuf::get_block_size());
+    return create_block(IOBuf::DEFAULT_BLOCK_SIZE);
 }
 
 void* cp(void *__restrict dest, const void *__restrict src, size_t n);

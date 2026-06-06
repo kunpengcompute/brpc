@@ -23,6 +23,7 @@
 #include <google/protobuf/text_format.h>
 #include "butil/logging.h"                       // LOG()
 #include "butil/iobuf.h"                         // butil::IOBuf
+#include "butil/ubiobuf.h"                       // butil::UBIOBuf
 #include "butil/raw_pack.h"                      // RawPacker RawUnpacker
 #include "butil/memory/scope_guard.h"
 #include "json2pb/json_to_pb.h"
@@ -80,6 +81,38 @@ inline void PackRpcHeader(char* rpc_header, uint32_t meta_size, int payload_size
         .pack32(meta_size);
 }
 
+static inline butil::IOBuf* SelectIOBuf(bool use_ub, butil::IOBuf* buf,
+                                 butil::UBIOBuf* ub_buf) {
+    return use_ub ? static_cast<butil::IOBuf*>(ub_buf) : buf;
+}
+
+static inline bool SerializeToIOBuf(Serializer& serializer, butil::IOBuf* out) {
+    if (out->use_ub()) {
+        butil::UBIOBufAsZeroCopyOutputStream stream(static_cast<butil::UBIOBuf*>(out));
+        return serializer.SerializeTo(&stream);
+    }
+    butil::IOBufAsZeroCopyOutputStream stream(out);
+    return serializer.SerializeTo(&stream);
+}
+
+template <typename OutputStream>
+static inline void SerializeCachedMetaToOutputStream(const RpcMeta& meta,
+                                              OutputStream* stream) {
+    ::google::protobuf::io::CodedOutputStream coded_out(stream);
+    meta.SerializeWithCachedSizes(&coded_out);
+    CHECK(!coded_out.HadError());
+}
+
+static inline void SerializeCachedMetaToIOBuf(const RpcMeta& meta, butil::IOBuf* out) {
+    if (out->use_ub()) {
+        butil::UBIOBufAsZeroCopyOutputStream buf_stream(static_cast<butil::UBIOBuf*>(out));
+        SerializeCachedMetaToOutputStream(meta, &buf_stream);
+    } else {
+        butil::IOBufAsZeroCopyOutputStream buf_stream(out);
+        SerializeCachedMetaToOutputStream(meta, &buf_stream);
+    }
+}
+
 static void SerializeRpcHeaderAndMeta(
     butil::IOBuf* out, const RpcMeta& meta, int payload_size) {
     const uint32_t meta_size = GetProtobufByteSize(meta);
@@ -95,10 +128,7 @@ static void SerializeRpcHeaderAndMeta(
         char header[12];
         PackRpcHeader(header, meta_size, payload_size);
         CHECK_EQ(0, out->append(header, sizeof(header)));
-        butil::IOBufAsZeroCopyOutputStream buf_stream(out);
-        ::google::protobuf::io::CodedOutputStream coded_out(&buf_stream);
-        meta.SerializeWithCachedSizes(&coded_out);
-        CHECK(!coded_out.HadError());
+        SerializeCachedMetaToIOBuf(meta, out);
     }
 }
 
@@ -152,8 +182,7 @@ bool SerializeRpcMessage(const google::protobuf::Message& message,
     auto serialize = [&](Serializer& serializer) -> bool {
         bool ok;
         if (COMPRESS_TYPE_NONE == compress_type) {
-            butil::IOBufAsZeroCopyOutputStream stream(buf);
-            ok = serializer.SerializeTo(&stream);
+            ok = SerializeToIOBuf(serializer, buf);
         } else {
             const CompressHandler* handler = FindCompressHandler(compress_type);
             if (NULL == handler) {
@@ -314,7 +343,10 @@ void SendRpcResponse(int64_t correlation_id, Controller* cntl,
         return;
     }
     bool append_body = false;
+    const bool use_ub = sock->use_ub();
     butil::IOBuf res_body;
+    butil::UBIOBuf ub_res_body;
+    butil::IOBuf* res_body_ptr = SelectIOBuf(use_ub, &res_body, &ub_res_body);
     // `res' can be NULL here, in which case we don't serialize it
     // If user calls `SetFailed' on Controller, we don't serialize
     // response either
@@ -322,7 +354,7 @@ void SendRpcResponse(int64_t correlation_id, Controller* cntl,
 #ifdef BRPC_WITH_URMA
         PROF_START(BRPC_SERIALIZE);
 #endif
-        append_body = SerializeResponse(*res, *cntl, res_body);
+        append_body = SerializeResponse(*res, *cntl, *res_body_ptr);
 #ifdef BRPC_WITH_URMA
         PROF_END(BRPC_SERIALIZE, true);
 #endif
@@ -332,7 +364,7 @@ void SendRpcResponse(int64_t correlation_id, Controller* cntl,
     size_t res_size = 0;
     size_t attached_size = 0;
     if (append_body) {
-        res_size = res_body.length();
+        res_size = res_body_ptr->length();
         attached_size = cntl->response_attachment().length();
     }
 
@@ -386,18 +418,19 @@ void SendRpcResponse(int64_t correlation_id, Controller* cntl,
     }
 
     butil::IOBuf res_buf;
-    SerializeRpcHeaderAndMeta(&res_buf, meta, res_size + attached_size);
+    butil::UBIOBuf ub_res_buf;
+    butil::IOBuf* res_buf_ptr = SelectIOBuf(use_ub, &res_buf, &ub_res_buf);
+    SerializeRpcHeaderAndMeta(res_buf_ptr, meta, res_size + attached_size);
     if (append_body) {
-        res_buf.append(res_body.movable());
+        res_buf_ptr->append(res_body_ptr->movable());
         if (attached_size > 0) {
-            res_buf.append(cntl->response_attachment().movable());
+            res_buf_ptr->append(cntl->response_attachment().movable());
         }
     }
-
     ResponseWriteInfo args;
     bthread_id_t response_id = INVALID_BTHREAD_ID;
     if (span) {
-        span->set_response_size(res_buf.size());
+        span->set_response_size(res_buf_ptr->size());
         CHECK_EQ(0, bthread_id_create(&response_id, &args, HandleResponseWritten));
     }
 
@@ -407,7 +440,7 @@ void SendRpcResponse(int64_t correlation_id, Controller* cntl,
         // Send the response over stream to notify that this stream connection
         // is successfully built.
         // Response_stream can be INVALID_STREAM_ID when error occurs.
-        if (SendStreamData(sock, &res_buf,
+        if (SendStreamData(sock, res_buf_ptr,
                            accessor.remote_stream_settings()->stream_id(),
                            response_stream_id, response_id) != 0) {
             error_code = errno;
@@ -448,7 +481,7 @@ void SendRpcResponse(int64_t correlation_id, Controller* cntl,
             wopt.id_wait = response_id;
             wopt.notify_on_success = true;
         }
-        if (sock->Write(&res_buf, &wopt) != 0) {
+        if (sock->Write(res_buf_ptr, &wopt) != 0) {
             const int errcode = errno;
             PLOG_IF(WARNING, errcode != EPIPE) << "Fail to write into " << *sock;
             cntl->SetFailed(errcode, "Fail to write into %s",
@@ -903,10 +936,12 @@ bool VerifyRpcRequest(const InputMessageBase* msg_base) {
         response_meta.mutable_response()->mutable_error_text()->append(user_error_text);
     }
     butil::IOBuf res_buf;
-    SerializeRpcHeaderAndMeta(&res_buf, response_meta, 0);
+    butil::UBIOBuf ub_res_buf;
+    butil::IOBuf* res_buf_ptr = SelectIOBuf(socket->use_ub(), &res_buf, &ub_res_buf);
+    SerializeRpcHeaderAndMeta(res_buf_ptr, response_meta, 0);
     Socket::WriteOptions opt;
     opt.ignore_eovercrowded = true;
-    if (socket->Write(&res_buf, &opt) != 0) {
+    if (socket->Write(res_buf_ptr, &opt) != 0) {
         PLOG_IF(WARNING, errno != EPIPE) << "Fail to write into " << *socket;
     }
 

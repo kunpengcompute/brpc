@@ -17,6 +17,7 @@
 
 
 #include "butil/logging.h"
+#include "butil/ubiobuf.h"                       // butil::UBIOBufAsSnappySink
 #include "butil/third_party/snappy/snappy.h"
 #include "brpc/policy/snappy_compress.h"
 #include "brpc/protocol.h"
@@ -24,6 +25,20 @@
 
 namespace brpc {
 namespace policy {
+
+namespace {
+
+bool SnappyCompressToIOBuf(const butil::IOBuf& in, butil::IOBuf* out) {
+    butil::IOBufAsSnappySource source(in);
+    if (out->use_ub()) {
+        butil::UBIOBufAsSnappySink sink(*static_cast<butil::UBIOBuf*>(out));
+        return butil::snappy::Compress(&source, &sink);
+    }
+    butil::IOBufAsSnappySink sink(*out);
+    return butil::snappy::Compress(&source, &sink);
+}
+
+}  // namespace
 
 bool SnappyCompress(const google::protobuf::Message& msg, butil::IOBuf* buf) {
     butil::IOBuf serialized_pb;
@@ -70,9 +85,7 @@ bool SnappyDecompress(const butil::IOBuf& data, google::protobuf::Message* msg) 
 }
 
 bool SnappyCompress(const butil::IOBuf& in, butil::IOBuf* out) {
-    butil::IOBufAsSnappySource source(in);
-    butil::IOBufAsSnappySink sink(*out);
-    return butil::snappy::Compress(&source, &sink);
+    return SnappyCompressToIOBuf(in, out);
 }
 
 bool SnappyDecompress(const butil::IOBuf& in, butil::IOBuf* out) {

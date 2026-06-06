@@ -40,18 +40,15 @@
 #include "butil/fd_guard.h"                 // butil::fd_guard
 #include "butil/iobuf.h"
 #include "butil/iobuf_profiler.h"
+#include "butil/ubiobuf.h"
 
 #ifdef BRPC_WITH_URMA
 std::atomic<int64_t> g_brpc_ubs_step_latency[20];
 #endif
 
-namespace brpc {
-    DECLARE_string(ubsocket_block_type);
-} // namespace brpc
-
 DECLARE_bool(ubsocket_enable);
 namespace butil {
-using brpc::FLAGS_ubsocket_block_type;
+
 namespace iobuf {
 
 DEFINE_int32(iobuf_aligned_buf_block_size, 0, "iobuf aligned buf block size");
@@ -174,31 +171,8 @@ void* cp(void *__restrict dest, const void *__restrict src, size_t n) {
     return memcpy(dest, src, n);
 }
 
-// Function pointers to allocate or deallocate memory for a IOBuf::Block
-#if BRPC_WITH_URMA
-void* ub_malloc(size_t size)
-{
-    if (FLAGS_ubsocket_enable) {
-        return ock::ubs::blockmem_allocate_zero_copy(size);
-    }
-    return ::malloc(size);
-}
-
-void ub_free(void* buf)
-{
-    if (FLAGS_ubsocket_enable) {
-        ock::ubs::blockmem_deallocate_zero_copy(buf);
-        return;
-    }
-    ::free(buf);
-}
-
-void* (*blockmem_allocate)(size_t) = ub_malloc;
-void  (*blockmem_deallocate)(void*) = ub_free;
-#else
 void* (*blockmem_allocate)(size_t) = ::malloc;
 void  (*blockmem_deallocate)(void*) = ::free;
-#endif
 
 void remove_tls_block_chain();
 
@@ -209,6 +183,7 @@ void reset_blockmem_allocate_and_deallocate() {
     remove_tls_block_chain();
     blockmem_allocate = ::malloc;
     blockmem_deallocate = ::free;
+    ubiobuf::remove_tls_ub_block_chain();
 }
 
 butil::static_atomic<size_t> g_nblock = BUTIL_STATIC_ATOMIC_INIT(0);
@@ -483,6 +458,10 @@ void IOBuf::operator=(const IOBuf& rhs) {
     }
 }
 
+bool IOBuf::use_ub() const {
+    return false;
+}
+
 template <bool MOVE>
 void IOBuf::_push_or_move_back_ref_to_smallview(const BlockRef& r) {
     BlockRef* const refs = _sv.refs;
@@ -660,29 +639,12 @@ void IOBuf::clear() {
             _bv.ref_at(i).block->dec_ref();
         }
         iobuf::release_blockref_array(_bv.refs, _bv.capacity());
-        new (this) IOBuf;
+        // Do not reconstruct IOBuf with placement new here: clear() may run on
+        // a derived object such as UBIOBuf, and rebuilding the base subobject
+        // would overwrite the derived class vptr.
+        reset_block_ref(_sv.refs[0]);
+        reset_block_ref(_sv.refs[1]);
     }
-}
-
-size_t IOBuf::get_block_size() {
-#ifdef BRPC_WITH_URMA
-    if (FLAGS_ubsocket_block_type == "tiny") {
-        return 4UL * 1024;
-    } else if (FLAGS_ubsocket_block_type == "default") {
-        return IOBuf::DEFAULT_BLOCK_SIZE;
-    } else if (FLAGS_ubsocket_block_type == "small") {
-        return 16UL * 1024;
-    } else if (FLAGS_ubsocket_block_type == "medium") {
-        return 32UL * 1024;
-    } else if (FLAGS_ubsocket_block_type == "large") {
-        return 64UL * 1024;
-    } else {
-        LOG(WARNING) << "Unknown ubsocket_block_type: " << FLAGS_ubsocket_block_type << ", use the default IOBuf BLOCK_SIZE";
-        return IOBuf::DEFAULT_BLOCK_SIZE;
-    }
-#else
-    return IOBuf::DEFAULT_BLOCK_SIZE;
-#endif
 }
 
 size_t IOBuf::pop_front(size_t n) {
@@ -1118,7 +1080,8 @@ void IOBuf::append(const Movable& movable_other) {
         if (!other._small()) {
             iobuf::release_blockref_array(other._bv.refs, other._bv.capacity());
         }
-        new (&other) IOBuf;
+        reset_block_ref(other._sv.refs[0]);
+        reset_block_ref(other._sv.refs[1]);
     }
 }
 

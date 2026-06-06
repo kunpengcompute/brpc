@@ -419,6 +419,8 @@ public:
 
     int32_t health_check_timeout_ms() const {return _hc_option.health_check_timeout_ms; }
 
+    bool use_ub() const { return _use_ub; }
+
     // True if health checking is enabled.
     bool HCEnabled() const {
         // This fence makes sure that we see change of

@@ -22,6 +22,7 @@
 #include <memory>
 #include "butil/time.h"                              // milliseconds_from_now
 #include "butil/logging.h"
+#include "butil/ubiobuf.h"                           // butil::UBIOBuf
 #include "butil/third_party/murmurhash3/murmurhash3.h"
 #include "butil/strings/string_util.h"
 #include "bthread/unstable.h"                        // bthread_timer_add
@@ -41,6 +42,7 @@
 #ifdef BRPC_WITH_URMA
 #include "profiling/ubsocket_prof.h"
 #endif
+DECLARE_bool(ubsocket_enable);
 
 namespace brpc {
 
@@ -83,7 +85,8 @@ static ChannelSignature ComputeChannelSignature(const ChannelOptions& opt) {
     if (opt.auth == NULL &&
         !opt.has_ssl_options() &&
         opt.connection_group.empty() &&
-        opt.hc_option.health_check_path.empty()) {
+        opt.hc_option.health_check_path.empty() &&
+        !opt.use_ub) {
         // Returning zeroized result by default is more intuitive for users.
         return ChannelSignature();
     }
@@ -127,6 +130,9 @@ static ChannelSignature ComputeChannelSignature(const ChannelOptions& opt) {
         }
         if (opt.use_rdma) {
             buf.append("|rdma");
+        }
+        if (opt.use_ub) {
+            buf.append("|ub");
         }
         butil::MurmurHash3_x64_128_Update(&mm_ctx, buf.data(), buf.size());
         buf.clear();
@@ -183,6 +189,19 @@ static bool OptionsAvailableForRdma(const ChannelOptions* opt) {
 }
 #endif
 
+static bool OptionsAvailableForUb(const ChannelOptions* opt) {
+#if BRPC_WITH_URMA
+    (void)opt;
+    if (!FLAGS_ubsocket_enable) {
+        return false;
+    }
+    return true;
+#else
+    (void)opt;
+    return false;
+#endif
+}
+
 int Channel::InitChannelOptions(const ChannelOptions* options) {
     if (options) {  // Override default options if user provided one.
         _options = *options;
@@ -209,6 +228,9 @@ int Channel::InitChannelOptions(const ChannelOptions* options) {
         LOG(WARNING) << "Cannot use rdma since brpc does not compile with rdma";
         return -1;
 #endif
+    }
+    if (_options.use_ub && !OptionsAvailableForUb(&_options)) {
+        _options.use_ub = false;
     }
 
     _serialize_request = protocol->serialize_request;
@@ -551,14 +573,25 @@ void Channel::CallMethod(const google::protobuf::MethodDescriptor* method,
     // Ensure that serialize_request is done before pack_request in all
     // possible executions, including:
     //   HandleSendFailed => OnVersionedRPCReturned => IssueRPC(pack_request)
+    bool request_failed = false;
 #ifdef BRPC_WITH_URMA
     PROF_START(BRPC_SERIALIZE);
 #endif
-    _serialize_request(&cntl->_request_buf, cntl, request);
+    if (_options.use_ub) {
+        butil::UBIOBuf request_buf;
+        _serialize_request(&request_buf, cntl, request);
+        request_failed = cntl->FailedInline();
+        if (!request_failed) {
+            cntl->_request_buf.swap(request_buf);
+        }
+    } else {
+        _serialize_request(&cntl->_request_buf, cntl, request);
+        request_failed = cntl->FailedInline();
+    }
 #ifdef BRPC_WITH_URMA
-    PROF_END(BRPC_SERIALIZE, true);
+ 	PROF_END(BRPC_SERIALIZE, true);
 #endif
-    if (cntl->FailedInline()) {
+    if (request_failed) {
         // Handle failures caused by serialize_request, and these error_codes
         // should be excluded from the retry_policy.
         return cntl->HandleSendFailed();

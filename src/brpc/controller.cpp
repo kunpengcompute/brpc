@@ -25,6 +25,7 @@
 #include "butil/string_printf.h"
 #include "butil/logging.h"
 #include "butil/time.h"
+#include "butil/ubiobuf.h"                         // butil::UBIOBuf
 #include "bthread/bthread.h"
 #include "bthread/unstable.h"
 #include "bvar/bvar.h"
@@ -1205,8 +1206,11 @@ void Controller::IssueRPC(int64_t start_realtime_us) {
     }
     // Make request
     butil::IOBuf packet;
+    butil::UBIOBuf ub_packet;
+    butil::IOBuf* packet_ptr = _current_call.sending_sock->use_ub() ?
+        static_cast<butil::IOBuf*>(&ub_packet) : &packet;
     SocketMessage* user_packet = NULL;
-    _pack_request(&packet, &user_packet, cid.value, _method, this,
+    _pack_request(packet_ptr, &user_packet, cid.value, _method, this,
                   _request_buf, using_auth);
     // TODO: PackRequest may accept SocketMessagePtr<>?
     SocketMessagePtr<> user_packet_guard(user_packet);
@@ -1247,8 +1251,8 @@ void Controller::IssueRPC(int64_t start_realtime_us) {
         }
         rc = _current_call.sending_sock->Write(user_packet_guard, &wopt);
     } else {
-        packet_size = packet.size();
-        rc = _current_call.sending_sock->Write(&packet, &wopt);
+        packet_size = packet_ptr->size();
+        rc = _current_call.sending_sock->Write(packet_ptr, &wopt);
     }
     if (span) {
         if (_current_call.nretry == 0) {

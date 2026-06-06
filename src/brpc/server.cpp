@@ -93,6 +93,7 @@ void* bthread_get_assigned_data();
 }
 
 DECLARE_int32(task_group_ntags);
+DECLARE_bool(ubsocket_enable);
 
 namespace brpc {
 
@@ -794,6 +795,21 @@ static bool OptionsAvailableOverRdma(const ServerOptions* opt) {
 }
 #endif
 
+static bool OptionsAvailableOverUb(const ServerOptions* opt) {
+#if BRPC_WITH_URMA
+    if (!FLAGS_ubsocket_enable) {
+        return false;
+    }
+    if (opt->has_ssl_options()) {
+        return false;
+    }
+    return true;
+#else
+    (void)opt;
+    return false;
+#endif
+}
+
 static AdaptiveMaxConcurrency g_default_max_concurrency_of_method(0);
 static bool g_default_ignore_eovercrowded(false);
 
@@ -903,6 +919,9 @@ int Server::StartInternal(const butil::EndPoint& endpoint,
         LOG(WARNING) << "Cannot use rdma since brpc does not compile with rdma";
         return -1;
 #endif
+    }
+    if (_options.use_ub && !OptionsAvailableOverUb(&_options)) {
+        _options.use_ub = false;
     }
 
     if (_options.http_master_service) {
