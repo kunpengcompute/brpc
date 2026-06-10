@@ -69,6 +69,10 @@ ubsocket通过环境变量进行配置，在bRPC与ubsocket集成的过程中，
 |`ubsocket_use_brpc_zcopy` | ubsocket 设置是否使用UB内存池使能免拷贝加速UB传输 | false: 关闭UB内存池加速（关闭后仅支持TCP传输），true: 使用UB内存池免拷贝加速UB传输 | true | 否 |
 |`ubsocket_ub_handshake_mode` | UB通信建链握手模式 | tfo, ub_sock_opt | tfo | 否 |
 |`ubsocket_flow_control_enable` | 是否开启流控 | false, true | true | 否 |
+|`ubsocket_prof_enable` | 是否打开profiling打点功能  | false,true | false | 否 |
+|`ubsocket_prof_mode` | 是否打开profiling百分位统计功能，fast：关闭，ext：打开 | [fast, ext] | fast | 否 |
+|`ubsocket_prof_dump_interval_min` | 每次统计profiling打点数据时间间隔（单位s）） | [1, 5] | 1 | 否 |
+|`ubsocket_prof_dump_path` | profiling打点数据输出路径 | [1, 512] | /tmp/ubsocket/profiling | 否 |
 
 > 注意：
 > 
