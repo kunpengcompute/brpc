@@ -59,7 +59,7 @@ DEFINE_string(ubsocket_stats_cli, "true", "Enable ubsocket cli service (e.g., 'f
 DEFINE_string(ubsocket_ub_trans_mode, "RM_CTP", "Protocol mode for ubsocket (e.g., 'RC_TP', 'RM_TP', 'RM_CTP', 'RC_CTP')");
 DEFINE_string(ubsocket_initial_credit, "128", "The initial credits requested for a new send operation.");
 DEFINE_string(ubsocket_max_credit_per_request, "1024", "Upper bound for credit in one request.");
-DEFINE_string(ubsocket_min_reserved_credit, "64", "Minimum reserved credit, if the held credit <= min_reserved_credit, the credit will not be returned.");
+DEFINE_string(ubsocket_min_reserved_credit, "100", "Minimum reserved credit, if the held credit <= min_reserved_credit, the credit will not be returned.");
 DEFINE_string(ubsocket_link_priority, "-1", "Set urma flow service level priority, range from 0 to 15.");
 DEFINE_string(ubsocket_degrade, "true", "Allow degradation to TCP when UB fails; default: true");
 DEFINE_string(ubsocket_async_accept, "false", "Allow do accept async; default: false");
