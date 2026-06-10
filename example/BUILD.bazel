@@ -58,6 +58,13 @@ proto_library(
 )
 
 proto_library(
+    name = "ub_test_proto",
+    srcs = [
+        "ub_test/test.proto",
+    ],
+)
+
+proto_library(
     name = "http_c++_proto",
     srcs = [
         "http_c++/http.proto",
@@ -124,6 +131,13 @@ cc_proto_library(
     name = "cc_ub_performance_proto",
     deps = [
         ":ub_performance_proto",
+    ],
+)
+
+cc_proto_library(
+    name = "cc_ub_test_proto",
+    deps = [
+        ":ub_test_proto",
     ],
 )
 
@@ -366,6 +380,36 @@ cc_binary(
     copts = COPTS + ["-DBRPC_WITH_RDMA=1"],
     deps = [
         ":cc_ub_performance_proto",
+        "//:brpc",
+    ],
+)
+
+cc_binary(
+    name = "ub_test_server",
+    srcs = [
+        "ub_test/server.cpp",
+    ],
+    includes = [
+        "ub_test",
+    ],
+    copts = COPTS + ["-DBRPC_WITH_RDMA=1"],
+    deps = [
+        ":cc_ub_test_proto",
+        "//:brpc",
+    ],
+)
+
+cc_binary(
+    name = "ub_test_client",
+    srcs = [
+        "ub_test/client.cpp",
+    ],
+    includes = [
+        "ub_test",
+    ],
+    copts = COPTS + ["-DBRPC_WITH_RDMA=1"],
+    deps = [
+        ":cc_ub_test_proto",
         "//:brpc",
     ],
 )
