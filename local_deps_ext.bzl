@@ -9,13 +9,11 @@ def _local_deps_impl(module_ctx):
     bzlmod is enabled, without modifying those external repositories.
     """
 
-    git_repository(
- 	    name = "urma",
- 	    build_file = "//3rdparty/urma:BUILD.bazel",
- 	    commit = "c42ebe196794d286edad884c7753748c23da2703",
- 	    remote = "https://gitcode.com/openeuler/umdk.git",
- 	    strip_prefix = "src/urma",
- 	 )
+    new_local_repository( 
+        name = "urma", 
+        path = "/usr", 
+        build_file = "//3rdparty/urma:BUILD.bazel", 
+    )
     git_repository(
         name = "libboundscheck",
         remote = "https://atomgit.com/openeuler/libboundscheck.git",
