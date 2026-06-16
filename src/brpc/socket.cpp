@@ -608,6 +608,10 @@ int Socket::ResetFileDescriptor(int fd) {
             return -1;
         }
     }
+
+    // Notify transport that fd is set (for memfd handshake)
+    _transport->OnFdSet();
+
     return 0;
 }
 
@@ -849,9 +853,9 @@ void Socket::BeforeRecycled() {
             g_vars->channel_conn << -1;
         }
     }
+    _read_buf.clear();
     _transport->Release();
     reset_parsing_context(NULL);
-    _read_buf.clear();
 
     _auth_flag_error.store(0, butil::memory_order_relaxed);
     bthread_id_error(_auth_id, 0);

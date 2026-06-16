@@ -94,7 +94,7 @@ namespace brpc {
 DEFINE_bool(graceful_quit_on_sigterm, false,
             "Register SIGTERM handle func to quit graceful");
 DEFINE_bool(graceful_quit_on_sighup, false,
-            "Register SIGHUP handle func to quit graceful");            
+            "Register SIGHUP handle func to quit graceful");
 
 const IdlNames idl_single_req_single_res = { "req", "res" };
 const IdlNames idl_single_req_multi_res = { "req", "" };
@@ -252,6 +252,7 @@ void Controller::ResetPods() {
     _auth_context = NULL;
     _sampled_request = NULL;
     _request_protocol = PROTOCOL_UNKNOWN;
+    _socket_mode = SOCKET_MODE_TCP;
     _max_retry = UNSET_MAGIC_NUM;
     _retry_policy = NULL;
     _correlation_id = INVALID_BTHREAD_ID;

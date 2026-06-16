@@ -50,7 +50,7 @@ typedef ssize_t (*iov_function)(int fd, const struct iovec *vector,
                                    int count, off_t offset);
 
 // Userpsace preadv
-static ssize_t user_preadv(int fd, const struct iovec *vector, 
+static ssize_t user_preadv(int fd, const struct iovec *vector,
                            int count, off_t offset) {
     ssize_t total_read = 0;
     for (int i = 0; i < count; ++i) {
@@ -95,12 +95,12 @@ static ssize_t user_pwritev(int fd, const struct iovec* vector,
 #endif // SYS_pwritev
 
 // SYS_preadv/SYS_pwritev is available since Linux 2.6.30
-static ssize_t sys_preadv(int fd, const struct iovec *vector, 
+static ssize_t sys_preadv(int fd, const struct iovec *vector,
                           int count, off_t offset) {
     return syscall(SYS_preadv, fd, vector, count, offset);
 }
 
-static ssize_t sys_pwritev(int fd, const struct iovec *vector, 
+static ssize_t sys_pwritev(int fd, const struct iovec *vector,
                            int count, off_t offset) {
     return syscall(SYS_pwritev, fd, vector, count, offset);
 }
@@ -167,6 +167,8 @@ void* cp(void *__restrict dest, const void *__restrict src, size_t n) {
 // Function pointers to allocate or deallocate memory for a IOBuf::Block
 void* (*blockmem_allocate)(size_t) = ::malloc;
 void  (*blockmem_deallocate)(void*) = ::free;
+void  (*shm_block_release)(IOBuf::Block*) = nullptr;
+IOBuf::Block* (*shm_block_acquire)() = nullptr;
 
 void remove_tls_block_chain();
 
@@ -617,14 +619,14 @@ void IOBuf::clear() {
         if (_sv.refs[0].block != NULL) {
             _sv.refs[0].block->dec_ref();
             reset_block_ref(_sv.refs[0]);
-                        
+
             if (_sv.refs[1].block != NULL) {
                 _sv.refs[1].block->dec_ref();
                 reset_block_ref(_sv.refs[1]);
             }
         }
     } else {
-        for (uint32_t i = 0; i < _bv.nref; ++i) { 
+        for (uint32_t i = 0; i < _bv.nref; ++i) {
             _bv.ref_at(i).block->dec_ref();
         }
         iobuf::release_blockref_array(_bv.refs, _bv.capacity());
@@ -710,7 +712,7 @@ size_t IOBuf::cutn(IOBuf* out, size_t n) {
         } else {
             const IOBuf::BlockRef cr = { r.offset, (uint32_t)n, r.block };
             out->_push_back_ref(cr);
-            
+
             r.offset += n;
             r.length -= n;
             if (!_small()) {
@@ -765,7 +767,7 @@ size_t IOBuf::cutn(std::string* out, size_t n) {
 int IOBuf::_cut_by_char(IOBuf* out, char d) {
     const size_t nref = _ref_num();
     size_t n = 0;
-    
+
     for (size_t i = 0; i < nref; ++i) {
         IOBuf::BlockRef const& r = _ref_at(i);
         char const* const s = r.block->data + r.offset;
@@ -785,16 +787,16 @@ int IOBuf::_cut_by_char(IOBuf* out, char d) {
 int IOBuf::_cut_by_delim(IOBuf* out, char const* dbegin, size_t ndelim) {
     typedef unsigned long SigType;
     const size_t NMAX = sizeof(SigType);
-    
+
     if (ndelim > NMAX || ndelim > length()) {
         return -1;
     }
-    
+
     SigType dsig = 0;
     for (size_t i = 0; i < ndelim; ++i) {
         dsig = (dsig << CHAR_BIT) | static_cast<SigType>(dbegin[i]);
     }
-    
+
     const SigType SIGMASK =
         (ndelim == NMAX ? (SigType)-1 : (((SigType)1 << (ndelim * CHAR_BIT)) - 1));
 
@@ -805,7 +807,7 @@ int IOBuf::_cut_by_delim(IOBuf* out, char const* dbegin, size_t ndelim) {
     for (size_t i = 0; i < nref; ++i) {
         IOBuf::BlockRef const& r = _ref_at(i);
         char const* const s = r.block->data + r.offset;
-        
+
         for (uint32_t j = 0; j < r.length; ++j, ++n) {
             sig = ((sig << CHAR_BIT) | static_cast<SigType>(s[j])) & SIGMASK;
             if (sig == dsig) {
@@ -828,7 +830,7 @@ ssize_t IOBuf::pcut_into_file_descriptor(int fd, off_t offset, size_t size_hint)
     if (empty()) {
         return 0;
     }
-    
+
     const size_t nref = std::min(_ref_num(), IOBUF_IOV_MAX);
     struct iovec vec[nref];
     size_t nvec = 0;
@@ -885,7 +887,7 @@ ssize_t IOBuf::cut_into_SSL_channel(SSL* ssl, int* ssl_error) {
     if (empty()) {
         return 0;
     }
-    
+
     IOBuf::BlockRef const& r = _ref_at(0);
     ERR_clear_error();
     const int nw = SSL_write(ssl, r.block->data + r.offset, r.length);
@@ -1068,7 +1070,7 @@ int IOBuf::append(char const* s) {
     return -1;
 }
 
-int IOBuf::append(void const* data, size_t count) {
+int IOBuf::append(void const* data, size_t count, BufferType type) {
     if (BAIDU_UNLIKELY(!data)) {
         return -1;
     }
@@ -1077,13 +1079,13 @@ int IOBuf::append(void const* data, size_t count) {
     }
     size_t total_nc = 0;
     while (total_nc < count) {  // excluded count == 0
-        IOBuf::Block* b = iobuf::share_tls_block();
+        IOBuf::Block* b = (type == BUFFER_TYPE_SHM) ? iobuf::shm_block_acquire() : iobuf::share_tls_block();
         if (BAIDU_UNLIKELY(!b)) {
             return -1;
         }
         const size_t nc = std::min(count - total_nc, b->left_space());
         iobuf::cp(b->data + b->size, (char*)data + total_nc, nc);
-        
+
         const IOBuf::BlockRef r = { (uint32_t)b->size, (uint32_t)nc, b };
         _push_back_ref(r);
         b->size += nc;
@@ -1110,7 +1112,7 @@ int IOBuf::appendv(const const_iovec* vec, size_t n) {
                 break;
             }
         }
-        
+
         const IOBuf::BlockRef r = { (uint32_t)b->size, total_cp, b };
         b->size += total_cp;
         _push_back_ref(r);
@@ -1155,6 +1157,15 @@ uint64_t IOBuf::get_first_data_meta() {
     return r.block->u.data_meta;
 }
 
+int IOBuf::append_user_block(Block* block, uint32_t offset, uint32_t length) {
+    if (!block || length == 0) {
+        return -1;
+    }
+    const BlockRef r = { offset, length, block };
+    _push_back_ref(r);
+    return 0;
+}
+
 int IOBuf::resize(size_t n, char c) {
     const size_t saved_len = length();
     if (n < saved_len) {
@@ -1170,7 +1181,7 @@ int IOBuf::resize(size_t n, char c) {
         }
         const size_t nc = std::min(count - total_nc, b->left_space());
         memset(b->data + b->size, c, nc);
-        
+
         const IOBuf::BlockRef r = { (uint32_t)b->size, (uint32_t)nc, b };
         _push_back_ref(r);
         b->size += nc;
@@ -1245,7 +1256,7 @@ int IOBuf::unsafe_assign(Area area, const void* data) {
         // NOTE: we can't check if the block is shared with another IOBuf or
         // not since even a single IOBuf may reference a block multiple times
         // (by different BlockRef-s)
-        
+
         const size_t nc = std::min(length, r.length - ref_offset);
         iobuf::cp(r.block->data + r.offset + ref_offset, data, nc);
         if (length == nc) {
@@ -1255,7 +1266,7 @@ int IOBuf::unsafe_assign(Area area, const void* data) {
         length -= nc;
         data = (char*)data + nc;
     }
-    
+
     // Use check because we need to see the stack here.
     CHECK(false) << "IOBuf(" << size() << ", nref=" << _ref_num()
                  << ") is shorter than what we reserved("
@@ -1355,7 +1366,7 @@ void const* IOBuf::fetch(void* d, size_t n) const {
         if (n <= r0.length) {
             return r0.block->data + r0.offset;
         }
-    
+
         iobuf::cp(d, r0.block->data + r0.offset, r0.length);
         size_t total_nc = r0.length;
         const size_t nref = _ref_num();
@@ -1767,7 +1778,7 @@ size_t IOBufCutter::cutn(butil::IOBuf* out, size_t n) {
                                     _block };
         out->_push_back_ref(r);
         _data = (char*)_data + n;
-        return n; 
+        return n;
     } else if (size != 0) {
         const IOBuf::BlockRef r = { (uint32_t)((char*)_data - _block->data),
                                     (uint32_t)size,
@@ -1884,7 +1895,7 @@ IOBufAsZeroCopyOutputStream::IOBufAsZeroCopyOutputStream(
     , _block_size(block_size)
     , _cur_block(NULL)
     , _byte_count(0) {
-    
+
     if (_block_size <= offsetof(IOBuf::Block, data)) {
         throw std::invalid_argument("block_size is too small");
     }
@@ -1906,7 +1917,7 @@ bool IOBufAsZeroCopyOutputStream::Next(void** data, int* size) {
             return false;
         }
     }
-    const IOBuf::BlockRef r = { _cur_block->size, 
+    const IOBuf::BlockRef r = { _cur_block->size,
                                 (uint32_t)_cur_block->left_space(),
                                 _cur_block };
     *data = _cur_block->data + r.offset;
@@ -1920,7 +1931,7 @@ bool IOBufAsZeroCopyOutputStream::Next(void** data, int* size) {
 void IOBufAsZeroCopyOutputStream::BackUp(int count) {
     while (!_buf->empty()) {
         IOBuf::BlockRef& r = _buf->_back_ref();
-        if (_cur_block) {  
+        if (_cur_block) {
             // A ordinary BackUp that should be supported by all ZeroCopyOutputStream
             // _cur_block must match end of the IOBuf
             if (r.block != _cur_block) {
@@ -1935,8 +1946,8 @@ void IOBufAsZeroCopyOutputStream::BackUp(int count) {
                 return;
             }
         } else {
-            // An extended BackUp which is undefined in regular 
-            // ZeroCopyOutputStream. The `count' given by user is larger than 
+            // An extended BackUp which is undefined in regular
+            // ZeroCopyOutputStream. The `count' given by user is larger than
             // size of last _cur_block (already released in last iteration).
             if (r.block->ref_count() == 1) {
                 // A special case: the block is only referenced by last
@@ -2024,7 +2035,7 @@ void IOBufAsSnappySink::Append(const char* bytes, size_t n) {
 char* IOBufAsSnappySink::GetAppendBuffer(size_t length, char* scratch) {
     // TODO: butil::IOBuf supports dynamic sized blocks.
     if (length <= 8000/*just a hint*/) {
-        if (_buf_stream.Next(reinterpret_cast<void**>(&_cur_buf), &_cur_len)) { 
+        if (_buf_stream.Next(reinterpret_cast<void**>(&_cur_buf), &_cur_len)) {
             if (_cur_len >= static_cast<int>(length)) {
                 return _cur_buf;
             } else {

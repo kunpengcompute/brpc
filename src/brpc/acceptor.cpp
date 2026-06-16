@@ -286,6 +286,7 @@ void Acceptor::OnNewConnectionsUntilEAGAIN(Socket* acception) {
         options.initial_ssl_ctx = am->_ssl_ctx;
         options.socket_mode = am->_socket_mode;
         options.bthread_tag = am->_bthread_tag;
+        options.is_server = true;
         if (Socket::Create(options, &socket_id) != 0) {
             LOG(ERROR) << "Fail to create Socket";
             continue;

@@ -63,6 +63,8 @@ class AuthContext;
 class EventDispatcher;
 class Stream;
 class Transport;
+class ServerOptions;
+class ChannelOptions;
 
 // A special closure for processing the about-to-recycle socket. Socket does
 // not delete SocketUser, if you want, `delete this' at the end of
@@ -300,6 +302,9 @@ struct SocketOptions {
     // Tag of this socket
     bthread_tag_t bthread_tag{bthread_self_tag()};
     HealthCheckOption hc_option;
+
+    // For shared memory transport
+    bool is_server{false};
 };
 
 // Abstractions on reading from and writing into file descriptors.
@@ -327,6 +332,8 @@ friend void DereferenceSocket(Socket*);
 friend class Transport;
 friend class TcpTransport;
 friend class RdmaTransport;
+friend class ShmSession;
+friend class MemfdTransport;
 friend class TransportFactory;
     class SharedPart;
     struct WriteRequest;
@@ -661,6 +668,7 @@ public:
 
     void set_http_request_method(const HttpMethod& method) { _http_request_method = method; }
     HttpMethod http_request_method() const { return _http_request_method; }
+    SocketMode socket_mode() const { return _socket_mode; }
 
 private:
     DISALLOW_COPY_AND_ASSIGN(Socket);
