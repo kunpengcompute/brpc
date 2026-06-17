@@ -81,6 +81,8 @@ DEFINE_string(ubsocket_flow_control_enable, "true", "Whether to enable flow cont
 DEFINE_string(ubsocket_split_trace_enable, "false", "Enable ubsocket split trace (e.g., 'false', 'true')");
 DEFINE_string(ubsocket_split_trace_buf_cap, "65535", "Set ubsocket split trace buf capacity; default: 65535, the minimum value is 16384, the maximum value is 65536");
 DEFINE_string(ubsocket_split_trace_drain_interval_ms, "10", "Set ubsocket split trace buf log drain interval(ms), the minimum value is 1, the maximum value is 10000");
+DEFINE_string(ubsocket_tp_type, "single", "Ubsocket jetty tranport type; default: single (optional: single, pool)");
+DEFINE_string(ubsocket_tp_pool_size, "16", "Ubsocket jetty tranport pool size; the minimum value is 1, the maximum value is 1000");
 
 static void SetUBSocketEnv() {
     if (!FLAGS_ubsocket_trans_mode.empty()) {
@@ -235,6 +237,12 @@ static void SetUBSocketEnv() {
     }
     if (!FLAGS_ubsocket_prof_dump_path.empty()) {
         ::setenv("UBSOCKET_PROF_DUMP_PATH", FLAGS_ubsocket_prof_dump_path.c_str(), 1);
+    }
+    if (!FLAGS_ubsocket_tp_type.empty()) {
+      ::setenv("UBSOCKET_TP_TYPE", FLAGS_ubsocket_tp_type.c_str(), 1);
+    }
+    if (!FLAGS_ubsocket_tp_pool_size.empty()) {
+      ::setenv("UBSOCKET_TP_POOL_SIZE", FLAGS_ubsocket_tp_pool_size.c_str(), 1);
     }
     ::setenv("UBSOCKET_USE_UB_FORCE", "false", 1);
 }
@@ -482,7 +490,7 @@ enum UBSocketLogLevel {
 
 void UBSocketLogger(int level, const char *msg, const char *filename, int line)
 {
-    switch (level) {
+    switch (level - 1) {
         case UBSOCKET_LOG_ERR:
             UBSOCKET_LOG(ERROR, filename, line, msg);
             break;

@@ -73,6 +73,8 @@ ubsocket通过环境变量进行配置，在bRPC与ubsocket集成的过程中，
 |`ubsocket_prof_mode` | 是否打开profiling百分位统计功能，fast：关闭，ext：打开 | [fast, ext] | fast | 否 |
 |`ubsocket_prof_dump_interval_min` | 每次统计profiling打点数据时间间隔（单位s）） | [1, 5] | 1 | 否 |
 |`ubsocket_prof_dump_path` | profiling打点数据输出路径 | [1, 512] | /tmp/ubsocket/profiling | 否 |
+|`ubsocket_tp_type` | jetty连接复用方式 | single,pool | single | 否 |
+|`ubsocket_tp_pool_size` | jetty连接池大小 | [1, 1000] | 16 | 否 |
 
 > 注意：
 > 
