@@ -16,9 +16,11 @@
 // under the License.
 
 #if BRPC_WITH_URMA
+#include <gflags/gflags.h>
 #include "brpc/log.h"
 #include "bthread/rwlock.h"
 #include "bthread/bthread.h"
+#include "butil/logging.h"
 #include "ubsocket.h"
 
 DECLARE_bool(ubsocket_enable);
@@ -437,10 +439,14 @@ u_external_semaphore_ops_t brpc_semaphore_ops = {
         LOG_AT1(level, filename, line) << (msg)
 #endif
 
+#define UBSOCKET_VLOG_AT(verboselevel, filename, line) \
+     if (!VLOG_IS_ON(verboselevel)) ; \
+     else LOG_AT(INFO, filename, line) << (msg)
+
 // Keep consistent with the basic log level definitions in UBSocket.
 enum UBSocketLogLevel {
-    UBSOCKET_LOG_DEBUG = 0,
-    UBSOCKET_LOG_INFO,
+    UBSOCKET_LOG_DEBUG = -1,
+    UBSOCKET_LOG_INFO = 0,
     UBSOCKET_LOG_NOTICE,
     UBSOCKET_LOG_WARN,
     UBSOCKET_LOG_ERR,
@@ -461,6 +467,13 @@ void UBSocketLogger(int level, const char *msg, const char *filename, int line)
         case UBSOCKET_LOG_NOTICE:
             UBSOCKET_LOG(NOTICE, filename, line, msg);
             break;
+        case UBSOCKET_LOG_DEBUG:
+            UBSOCKET_LOG(DEBUG, filename, line, msg);
+            break;
+#else
+        case UBSOCKET_LOG_DEBUG:
+            UBSOCKET_VLOG_AT(1, filename, line) << msg;
+            break;
 #endif
         default:
             UBSOCKET_LOG(INFO, filename, line, msg);
@@ -480,6 +493,36 @@ int InitializeUBSocket()
     }
 
     SetUBSocketEnv();
+
+
+    // 1. 获取基础日志级别
+#if BRPC_WITH_GLOG
+    const int min_level = FLAGS_minloglevel;
+#else
+    const int min_level = ::logging::GetMinLogLevel();
+#endif
+
+    // 2. 声明BRPC minloglevel与ubsocket日志级别的映射
+#if BRPC_WITH_GLOG
+    const int level_map[] = { UBSOCKET_LOG_INFO, UBSOCKET_LOG_WARN, UBSOCKET_LOG_ERR };
+#else
+    const int level_map[] = { UBSOCKET_LOG_INFO, UBSOCKET_LOG_NOTICE, UBSOCKET_LOG_WARN };
+#endif
+
+    /**
+      * minloglevel配置映射关系：
+      *  minloglevel |   0  |    1    |    2    |   3   |   4   |
+      *  glog        | INFO | WARNING |  ERROR  | FATAL | NONE  |
+      *  blog        | INFO | NOTICE  | WARNING | ERROR | FATAL |
+      *  ubsocket    | INFO | NOTICE  | WARNING | ERROR | NONE  |
+      *
+      *  ubsocket DEBUG级别日志由--v控制
+     */
+    int ub_log_level = UBSOCKET_LOG_ERR; // 默认为 min_level >= 3 的情况
+    if (min_level >= 0 && min_level < static_cast<int>(sizeof(level_map) / sizeof(level_map[0]))) {
+        ub_log_level = level_map[min_level];
+    }
+    ubsocket_set_log_level(ub_log_level);
     ubsocket_set_logger(UBSocketLogger);
 
     /* initialize ubsocket */
