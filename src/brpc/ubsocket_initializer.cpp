@@ -78,6 +78,9 @@ DEFINE_string(ubsocket_prof_dump_interval_min, "1", "Set dump ubsocket profiling
 DEFINE_string(ubsocket_prof_dump_path, "/tmp/ubsocket/profiling", "Set dump ubsocket profiling data output path (e.g., '/tmp/ubsocket/profiling')");
 DEFINE_string(ubsocket_ub_handshake_mode, "tfo", "Handshake mode for UB connection; default: tfo (optional: tfo, ub_sock_opt)");
 DEFINE_string(ubsocket_flow_control_enable, "true", "Whether to enable flow control; default: true (optional: false, true)");
+DEFINE_string(ubsocket_split_trace_enable, "false", "Enable ubsocket split trace (e.g., 'false', 'true')");
+DEFINE_string(ubsocket_split_trace_buf_cap, "65535", "Set ubsocket split trace buf capacity; default: 65535, the minimum value is 16384, the maximum value is 65536");
+DEFINE_string(ubsocket_split_trace_drain_interval_ms, "10", "Set ubsocket split trace buf log drain interval(ms), the minimum value is 1, the maximum value is 10000");
 
 static void SetUBSocketEnv() {
     if (!FLAGS_ubsocket_trans_mode.empty()) {
@@ -220,6 +223,15 @@ static void SetUBSocketEnv() {
     }
     if (!FLAGS_ubsocket_prof_dump_interval_min.empty()) {
         ::setenv("UBSOCKET_PROF_DUMP_INTERVAL_MIN", FLAGS_ubsocket_prof_dump_interval_min.c_str(), 1);
+    }
+    if (!FLAGS_ubsocket_split_trace_enable.empty()) {
+        ::setenv("UBSOCKET_SPLIT_TRACE_ENABLE", FLAGS_ubsocket_split_trace_enable.c_str(), 1);
+    }
+    if (!FLAGS_ubsocket_split_trace_buf_cap.empty()) {
+        ::setenv("UBSOCKET_SPLIT_TRACE_BUF_CAPACITY", FLAGS_ubsocket_split_trace_buf_cap.c_str(), 1);
+    }
+    if (!FLAGS_ubsocket_split_trace_drain_interval_ms.empty()) {
+        ::setenv("UBSOCKET_SPLIT_TRACE_DRAIN_INTERVAL_MS", FLAGS_ubsocket_split_trace_drain_interval_ms.c_str(), 1);
     }
     if (!FLAGS_ubsocket_prof_dump_path.empty()) {
         ::setenv("UBSOCKET_PROF_DUMP_PATH", FLAGS_ubsocket_prof_dump_path.c_str(), 1);
@@ -402,6 +414,16 @@ static int brpc_semaphore_post(u_semaphore_t *s)
     return bthread_sem_post(reinterpret_cast<bthread_sem_t*>(s));
 }
 
+static void* brpc_get_rpc_id()
+{
+    return bthread_getspecific(ubsocket_trace_rpcid_key);
+}
+
+static void* brpc_get_call_timestamp()
+{
+    return bthread_getspecific(ubsocket_trace_call_timestamp);
+}
+
 u_external_lock_ops_t brpc_external_lock_ops = {
     .create = brpc_external_lock_create,
     .destroy = brpc_external_lock_destroy,
@@ -428,6 +450,10 @@ u_external_semaphore_ops_t brpc_semaphore_ops = {
     .post = brpc_semaphore_post
 };
 
+u_external_rpc_id_ops_t brpc_rpc_id_ops = {
+    .get_rpc_id = brpc_get_rpc_id,
+    .get_rpc_call_timestamp = brpc_get_call_timestamp,
+};
 ///////////////////////////////////////////////////////////////////////////////
 // Register brpc log for UBSocket.
 ///////////////////////////////////////////////////////////////////////////////
@@ -536,6 +562,7 @@ int InitializeUBSocket()
     options.lock_ops = &brpc_external_lock_ops;
     options.rw_lock_ops = &brpc_rw_lock_ops;
     options.sem_ops = &brpc_semaphore_ops;
+    options.rpc_id_ops = &brpc_rpc_id_ops;
     /* init ubsocket */
     if (ubsocket_init(&options) != 0) {
         LOG(ERROR) << "Inner error: ubsocket_init failed";
