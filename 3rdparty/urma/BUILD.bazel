@@ -5,16 +5,8 @@ package(
     default_visibility=["//visibility:public"]
 )
 
-cc_library(
- 	name = "urma_headers",
- 	hdrs = glob([
- 	    "lib/urma/bond/include/*.h",
- 	         "lib/urma/core/include/*.h",
- 	         "lib/uvs/core/include/*.h",
- 	]),
- 	includes = [
- 	    "lib/urma/bond/include",
- 	    "lib/urma/core/include",
- 	         "lib/uvs/core/include",
- 	],
+cc_import(	 
+    name = "urma_headers",	 
+    includes = ["/usr/include/ub/umdk/urma"],	 
+    system_provided = True,
 )
