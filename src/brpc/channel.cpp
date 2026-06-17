@@ -26,6 +26,7 @@
 #include "butil/third_party/murmurhash3/murmurhash3.h"
 #include "butil/strings/string_util.h"
 #include "bthread/unstable.h"                        // bthread_timer_add
+#include "bthread/bthread.h"
 #include "brpc/socket_map.h"                         // SocketMapInsert
 #include "brpc/compress.h"
 #include "brpc/global.h"
@@ -463,7 +464,9 @@ void Channel::CallMethod(const google::protobuf::MethodDescriptor* method,
                          google::protobuf::Message* response,
                          google::protobuf::Closure* done) {
 #ifdef BRPC_WITH_URMA
-    g_brpc_ubs_step_latency[BRPC_CLIENT_CALL] = butil::cpuwide_time_ns();
+    uint64_t timestamp = butil::cpuwide_time_ns();
+    g_brpc_ubs_step_latency[BRPC_CLIENT_CALL] = timestamp;
+    bthread_setspecific(ubsocket_trace_call_timestamp, reinterpret_cast<void*>(timestamp));
 #endif
     const int64_t start_send_real_us = butil::gettimeofday_us();
     Controller* cntl = static_cast<Controller*>(controller_base);
@@ -495,6 +498,9 @@ void Channel::CallMethod(const google::protobuf::MethodDescriptor* method,
         cntl->add_flag(Controller::FLAGS_ENABLED_CIRCUIT_BREAKER);
     }
     const CallId correlation_id = cntl->call_id();
+#ifdef BRPC_WITH_URMA
+    bthread_setspecific(ubsocket_trace_rpcid_key, reinterpret_cast<void*>(correlation_id.value));
+#endif
     const int rc = bthread_id_lock_and_reset_range(
                     correlation_id, NULL, 2 + cntl->max_retry());
     if (rc != 0) {
