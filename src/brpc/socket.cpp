@@ -1323,7 +1323,7 @@ int Socket::Connect(const timespec* abstime,
     CHECK_EQ(0, butil::make_close_on_exec(sockfd));
     // We need to do async connect (to manage the timeout by ourselves).
     CHECK_EQ(0, butil::make_non_blocking(sockfd));
-    
+    LOG(INFO) << "Start connect without data time: " << butil::cpuwide_time_ns() << " ns";
     const int rc = ::ubsocket_wrapper_connect(
         sockfd, (struct sockaddr*)&serv_addr, addr_size);
     if (rc != 0 && errno != EINPROGRESS) {
@@ -1551,6 +1551,7 @@ static void* RunClosure(void* arg) {
 }
 
 int Socket::KeepWriteIfConnected(int fd, int err, void* data) {
+    LOG(INFO) << "Finish connect to fd: " << fd << " without data time: " << butil::cpuwide_time_ns() << " ns";
     WriteRequest* req = static_cast<WriteRequest*>(data);
     Socket* s = req->get_socket();
     if (err == 0 && s->ssl_state() == SSL_CONNECTING) {
