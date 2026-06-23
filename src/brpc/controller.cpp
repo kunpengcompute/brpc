@@ -810,6 +810,7 @@ void Controller::Call::OnComplete(
         }
         break;
     case CONNECTION_TYPE_POOLED:
+    case CONNECTION_TYPE_MULTI:
         // NOTE: Not reuse pooled connection if this call fails and no response
         // has been received through this connection
         // Otherwise in-flight responses may come back in future and break the
@@ -821,7 +822,11 @@ void Controller::Call::OnComplete(
                 // safe to return. Notice that Socket::is_read_progressive may
                 // differ from Controller::is_response_read_progressively()
                 // because RPC possibly ends before setting up the socket.
-                sending_sock->ReturnToPool();
+                if (c->connection_type() == CONNECTION_TYPE_MULTI) {
+                    sending_sock->ReturnToMultiPool();
+                } else {
+                    sending_sock->ReturnToPool();
+                }
             } else {
                 // Progressively-read socket. Should be returned when the read
                 // ends. The method handles the details.
@@ -1047,7 +1052,7 @@ void Controller::HandleSendFailed() {
 
 void Controller::IssueRPC(int64_t start_realtime_us) {
     _current_call.begin_time_us = start_realtime_us;
-    
+
     // If has retry/backup request，we will recalculate the timeout,
     if (_real_timeout_ms > 0) {
         _real_timeout_ms -= (start_realtime_us - _begin_time_us) / 1000;
@@ -1146,7 +1151,9 @@ void Controller::IssueRPC(int64_t start_realtime_us) {
         _current_call.sending_sock->set_preferred_index(_preferred_index);
     } else {
         int rc = 0;
-        if (_connection_type == CONNECTION_TYPE_POOLED) {
+        if (_connection_type == CONNECTION_TYPE_MULTI) {
+            rc = tmp_sock->GetMultiPooledSocket(&_current_call.sending_sock);
+        } else if (_connection_type == CONNECTION_TYPE_POOLED) {
             rc = tmp_sock->GetPooledSocket(&_current_call.sending_sock);
         } else if (_connection_type == CONNECTION_TYPE_SHORT) {
             rc = tmp_sock->GetShortSocket(&_current_call.sending_sock);

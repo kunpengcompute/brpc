@@ -590,6 +590,9 @@ public:
     // True if this socket was created by Connect.
     bool CreatedByConnect() const;
 
+    int GetMultiPooledSocket(SocketUniquePtr* pooled_socket);
+    int ReturnToMultiPool();
+
     // Get an UNUSED socket connecting to the same place as this socket
     // from the SocketPool of this socket.
     int GetPooledSocket(SocketUniquePtr* pooled_socket);
@@ -669,6 +672,8 @@ public:
     void set_http_request_method(const HttpMethod& method) { _http_request_method = method; }
     HttpMethod http_request_method() const { return _http_request_method; }
     SocketMode socket_mode() const { return _socket_mode; }
+
+    butil::atomic<uint32_t>  _rpc_count;
 
 private:
     DISALLOW_COPY_AND_ASSIGN(Socket);

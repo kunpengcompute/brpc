@@ -136,7 +136,7 @@ static ChannelSignature ComputeChannelSignature(const ChannelOptions& opt) {
         }
         butil::MurmurHash3_x64_128_Update(&mm_ctx, buf.data(), buf.size());
         buf.clear();
-    
+
         if (opt.has_ssl_options()) {
             const CertInfo& cert = opt.ssl_options().client_cert;
             if (!cert.certificate.empty()) {
@@ -203,11 +203,13 @@ int Channel::InitChannelOptions(const ChannelOptions* options) {
         // Save has_error which will be overriden in later assignments to
         // connection_type.
         const bool has_error = _options.connection_type.has_error();
-        
+
         if (protocol->supported_connection_type & CONNECTION_TYPE_SINGLE) {
             _options.connection_type = CONNECTION_TYPE_SINGLE;
         } else if (protocol->supported_connection_type & CONNECTION_TYPE_POOLED) {
             _options.connection_type = CONNECTION_TYPE_POOLED;
+        } else if (protocol->supported_connection_type & CONNECTION_TYPE_MULTI) {
+            _options.connection_type = CONNECTION_TYPE_MULTI;
         } else {
             _options.connection_type = CONNECTION_TYPE_SHORT;
         }
@@ -409,7 +411,7 @@ int Channel::Init(const char* ns_url,
                                                    LoadBalancerWithNaming);
     if (NULL == lb) {
         LOG(FATAL) << "Fail to new LoadBalancerWithNaming";
-        return -1;        
+        return -1;
     }
     GetNamingServiceThreadOptions ns_opt;
     ns_opt.succeed_without_server = _options.succeed_without_server;
