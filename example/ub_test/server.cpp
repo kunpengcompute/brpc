@@ -168,7 +168,6 @@ int main(int argc, char* argv[]) {
     g_start_time.store(0, butil::memory_order_relaxed);
     g_last_request_time.store(0, butil::memory_order_relaxed);
     g_end_time.store(0, butil::memory_order_relaxed);
-    g_done_count.store(0, butil::memory_order_relaxed);
 
     if (server.AddService(&perf_test_service_impl, 
                           brpc::SERVER_DOESNT_OWN_SERVICE) != 0) {
