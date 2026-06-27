@@ -53,6 +53,9 @@
 #include "brpc/periodic_task.h"
 #include "brpc/details/health_check.h"
 #include "brpc/transport_factory.h"
+#include "brpc/rdma/rdma_endpoint.h"
+#include "brpc/rdma/rdma_helper.h"
+#include "brpc/event_dispatcher_iouring_impl.h"
 #if defined(OS_MACOSX)
 #include <sys/event.h>
 #endif
@@ -108,6 +111,9 @@ DEFINE_int32(connect_timeout_as_unreachable, 3,
              "If the socket failed to connect due to ETIMEDOUT for so many "
              "times *continuously*, the error is changed to ENETUNREACH which "
              "fails the main socket as well when this socket is pooled.");
+
+DEFINE_bool(force_write_in_background, false,
+            "Force all writes to go through KeepWrite for profiling");
 
 DECLARE_bool(usercode_in_coroutine);
 
@@ -1091,7 +1097,7 @@ int Socket::WaitAndReset(int32_t expected_nref) {
     // parsing_context is very likely to be associated with the fd,
     // removing it is a safer choice and required by http2.
     reset_parsing_context(NULL);
-    // Must clear _read_buf otehrwise even if the connections is recovered,
+    // Must clear _read_buf otherwise even if the connection is recovered,
     // the kept old data is likely to make parsing fail.
     _read_buf.clear();
     _ninprocess.store(1, butil::memory_order_relaxed);
@@ -1799,7 +1805,8 @@ int Socket::StartWrite(WriteRequest* req, const WriteOptions& opt) {
     // in some protocols(namely RTMP).
     req->Setup(this);
 
-    if (opt.write_in_background || ssl_state() != SSL_OFF) {
+    if (opt.write_in_background || ssl_state() != SSL_OFF
+        || FLAGS_force_write_in_background) {
         // Writing into SSL may block the current bthread, always write
         // in the background.
         goto KEEPWRITE_IN_BACKGROUND;
@@ -3446,6 +3453,125 @@ void Socket::OnProgressiveReadCompleted() {
             SetFailed(EUNUSED, "[%s]Close short connection", __FUNCTION__);
         }
     }
+}
+
+void Socket::add_task(iouring_backend::IoUringFdInfo* fd_info) {
+    std::size_t curr_write = _write_index.load(butil::memory_order_relaxed);
+    std::size_t curr_read = _read_index.load(butil::memory_order_relaxed);
+    if (curr_write - curr_read == MAX_TASK_LIST_LENGTH) {
+        LOG(ERROR) << "Too many tasks in Socket, curr_write: " << curr_write
+                << ", curr_read: " << curr_read;
+        // Recycle the registered buffer before discarding, otherwise it leaks
+        if (fd_info->is_registered_buffer) {
+            iouring_backend::RecycleRegisteredBuffer(
+                fd_info->recycle_ctx, fd_info->registered_buf_id);
+        }
+        clean_resource(fd_info);
+        return;
+    }
+    tasklist[curr_write % MAX_TASK_LIST_LENGTH] = fd_info;
+    _write_index.store(curr_write + 1, butil::memory_order_release);
+}
+
+iouring_backend::IoUringFdInfo* Socket::get_task() {
+    std::size_t curr_read = _read_index.load(butil::memory_order_relaxed);
+    std::size_t curr_write = _write_index.load(butil::memory_order_acquire);
+    if (curr_write == curr_read) {
+        return nullptr;
+    }
+    iouring_backend::IoUringFdInfo* fd_info = tasklist[curr_read % MAX_TASK_LIST_LENGTH];
+    _read_index.store(curr_read + 1, butil::memory_order_release);
+    return fd_info;
+}
+
+bool Socket::is_queue_empty() const {
+    std::size_t r = _read_index.load(butil::memory_order_relaxed);
+    std::size_t w = _write_index.load(butil::memory_order_acquire);
+    return (r == w);
+}
+
+void* Socket::iouring_callback(void* arg) {
+    SocketId sid = reinterpret_cast<SocketId>(arg);
+    SocketUniquePtr guard;
+
+    if (Socket::Address(sid, &guard) != 0) {
+        return nullptr;
+    }
+    Socket* socket = guard.get();
+    InputMessageClosure last_msg;
+    while (1) {
+        iouring_backend::IoUringFdInfo* fd_info = socket->get_task();
+        if (fd_info == nullptr) {
+            socket->_is_working.store(false, butil::memory_order_release);
+
+            if (socket->is_queue_empty()) {
+                break;
+            }
+            bool expected = false;
+            if (!socket->_is_working.compare_exchange_strong(
+                    expected, true,
+                    butil::memory_order_acq_rel,
+                    butil::memory_order_relaxed)) {
+                break;
+            }
+            continue;
+        }
+        const int64_t received_us = butil::cpuwide_time_us();
+        const int64_t base_realtime = butil::gettimeofday_us() - received_us;
+        char* buf_data = fd_info->buffer;
+        fd_info->buffer = nullptr;
+        int32_t data_len = fd_info->res;
+        bool read_eof = (data_len == 0);
+
+        if (fd_info->is_registered_buffer) {
+            void* recycle_ctx = fd_info->recycle_ctx;
+            uint32_t buf_id = fd_info->registered_buf_id;
+            socket->_read_buf.append_user_data(buf_data, data_len,
+                [recycle_ctx, buf_id](void*) {
+                    iouring_backend::RecycleRegisteredBuffer(recycle_ctx, buf_id);
+                });
+        } else {
+            socket->_read_buf.append_user_data(buf_data, data_len,
+                [buf_data](void* data) {
+                    delete[] buf_data;
+                });
+        }
+        socket->clean_resource(fd_info);
+
+        InputMessenger* messenger = static_cast<InputMessenger*>(socket->user());
+        const size_t read_buf_before = socket->_read_buf.length();
+        int rc = messenger->ProcessNewMessage(socket, data_len, read_eof, received_us, base_realtime, last_msg);
+        if (rc != 0) {
+            const std::size_t qw = socket->_write_index.load(butil::memory_order_relaxed);
+            const std::size_t qr = socket->_read_index.load(butil::memory_order_relaxed);
+            LOG(WARNING) << "[IOURing-DIAG] ProcessNewMessage FAILED!"
+                         << " fd=" << socket->fd()
+                         << " task_data_len=" << data_len
+                         << " read_buf.size_before=" << read_buf_before
+                         << " read_buf.size_after=" << socket->_read_buf.length()
+                         << " queue_size=" << (qw >= qr ? qw - qr : 0)
+                         << " read_idx=" << qr << " write_idx=" << qw
+                         << " _is_working=" << socket->_is_working.load(butil::memory_order_relaxed)
+                         << " _read_buf(first_16)="
+                         << butil::ToPrintable(socket->_read_buf, 16);
+
+            // Drain remaining tasks in the queue to prevent leaks.
+            while (1) {
+                iouring_backend::IoUringFdInfo* leftover = socket->get_task();
+                if (leftover == nullptr) {
+                    break;
+                }
+                if (leftover->is_registered_buffer) {
+                    iouring_backend::RecycleRegisteredBuffer(
+                        leftover->recycle_ctx, leftover->registered_buf_id);
+                }
+                socket->clean_resource(leftover);
+            }
+            socket->_is_working.store(false, butil::memory_order_release);
+            return nullptr;
+        }
+    }
+    return nullptr;
 }
 
 SocketSSLContext::SocketSSLContext()

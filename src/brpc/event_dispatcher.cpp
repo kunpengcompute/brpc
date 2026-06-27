@@ -16,14 +16,18 @@
 // under the License.
 
 
-#include <gflags/gflags.h>                            // DEFINE_int32
+#include <gflags/gflags.h>
 #include "butil/compat.h"
-#include "butil/fd_utility.h"                         // make_close_on_exec
-#include "butil/logging.h"                            // LOG
-#include "butil/third_party/murmurhash3/murmurhash3.h"// fmix32
-#include "bvar/latency_recorder.h"                    // bvar::LatencyRecorder
-#include "bthread/bthread.h"                          // bthread_start_background
+#include "butil/fd_utility.h"
+#include "butil/logging.h"
+#include "butil/third_party/murmurhash3/murmurhash3.h"
+#include "bvar/latency_recorder.h"
+#include "bthread/bthread.h"
 #include "brpc/event_dispatcher.h"
+
+#ifdef BRPC_WITH_IO_URING
+#include <liburing.h>
+#endif
 
 DECLARE_int32(task_group_ntags);
 
@@ -31,15 +35,42 @@ namespace brpc {
 
 DEFINE_int32(event_dispatcher_num, 1, "Number of event dispatcher");
 
-DEFINE_bool(usercode_in_pthread, false, 
+DEFINE_bool(usercode_in_pthread, false,
             "Call user's callback in pthreads, use bthreads otherwise");
 DEFINE_bool(usercode_in_coroutine, false,
             "User's callback are run in coroutine, no bthread or pthread blocking call");
+
+DEFINE_string(io_backend, "epoll",
+              "I/O backend: auto, epoll, io_uring. Only works when BRPC_WITH_IO_URING is enabled");
+
+static const int IO_BACKEND_EPOLL = 0;
+static const int IO_BACKEND_IOURING = 1;
 
 static EventDispatcher* g_edisp = NULL;
 static bvar::LatencyRecorder* g_edisp_read_lantency = NULL;
 static bvar::LatencyRecorder* g_edisp_write_lantency = NULL;
 static pthread_once_t g_edisp_once = PTHREAD_ONCE_INIT;
+
+static int ResolveIoBackend() {
+    const std::string& backend = FLAGS_io_backend;
+    if (backend == "epoll") {
+        return IO_BACKEND_EPOLL;
+    }
+#ifdef BRPC_WITH_IO_URING
+    if (backend == "io_uring") {
+        return IO_BACKEND_IOURING;
+    }
+    if (backend == "auto") {
+        return IO_BACKEND_IOURING;
+    }
+#else
+    if (backend == "io_uring") {
+        LOG(WARNING) << "io_uring is not compiled in, falling back to epoll. "
+                     << "Recompile with -DWITH_IO_URING=ON to enable io_uring.";
+    }
+#endif
+    return IO_BACKEND_EPOLL;
+}
 
 static void StopAndJoinGlobalDispatchers() {
     for (int i = 0; i < FLAGS_task_group_ntags; ++i) {
@@ -65,8 +96,6 @@ void InitializeGlobalDispatchers() {
             CHECK_EQ(0, g_edisp[i * FLAGS_event_dispatcher_num + j].Start(&attr));
         }
     }
-    // This atexit is will be run before g_task_control.stop() because above
-    // Start() initializes g_task_control by creating bthread (to run epoll/kqueue).
     CHECK_EQ(0, atexit(StopAndJoinGlobalDispatchers));
 }
 
@@ -100,7 +129,126 @@ void IOEventData::BeforeRecycled() {
 } // namespace brpc
 
 #if defined(OS_LINUX)
-    #include "brpc/event_dispatcher_epoll.cpp"
+
+#include "brpc/event_dispatcher_epoll_impl.cpp"
+#ifdef BRPC_WITH_IO_URING
+#include "brpc/event_dispatcher_iouring_impl.cpp"
+#endif
+
+namespace brpc {
+
+EventDispatcher::EventDispatcher()
+    : _event_dispatcher_fd(-1)
+    , _stop(false)
+    , _tid(0)
+    , _thread_attr(BTHREAD_ATTR_NORMAL)
+    , _wakeup_fds{-1, -1}
+    , _backend_type(ResolveIoBackend())
+    , _iouring_ctx(NULL) {
+    if (_backend_type == IO_BACKEND_IOURING) {
+#ifdef BRPC_WITH_IO_URING
+        iouring_backend::Init(this);
+#endif
+    } else {
+        epoll_backend::Init(this);
+    }
+}
+
+EventDispatcher::~EventDispatcher() {
+    Stop();
+    Join();
+    if (_backend_type == IO_BACKEND_IOURING) {
+#ifdef BRPC_WITH_IO_URING
+        iouring_backend::Destroy(this);
+#endif
+    } else {
+        epoll_backend::Destroy(this);
+    }
+}
+
+int EventDispatcher::Start(const bthread_attr_t* thread_attr) {
+    if (_backend_type == IO_BACKEND_IOURING) {
+#ifdef BRPC_WITH_IO_URING
+        return iouring_backend::Start(this, thread_attr);
+#endif
+    }
+    return epoll_backend::Start(this, thread_attr);
+}
+
+bool EventDispatcher::Running() const {
+    return !_stop && _event_dispatcher_fd >= 0 && _tid != 0;
+}
+
+void EventDispatcher::Stop() {
+    if (_backend_type == IO_BACKEND_IOURING) {
+#ifdef BRPC_WITH_IO_URING
+        iouring_backend::Stop(this);
+#endif
+    } else {
+        epoll_backend::Stop(this);
+    }
+}
+
+void EventDispatcher::Join() {
+    if (_tid) {
+        bthread_join(_tid, NULL);
+        _tid = 0;
+    }
+}
+
+int EventDispatcher::AddConsumer(IOEventDataId event_data_id, int fd) {
+    if (_backend_type == IO_BACKEND_IOURING) {
+#ifdef BRPC_WITH_IO_URING
+        return iouring_backend::AddConsumer(this, event_data_id, fd);
+#endif
+    }
+    return epoll_backend::AddConsumer(this, event_data_id, fd);
+}
+
+int EventDispatcher::RemoveConsumer(int fd) {
+    if (_backend_type == IO_BACKEND_IOURING) {
+#ifdef BRPC_WITH_IO_URING
+        return iouring_backend::RemoveConsumer(this, fd);
+#endif
+    }
+    return epoll_backend::RemoveConsumer(this, fd);
+}
+
+int EventDispatcher::RegisterEvent(IOEventDataId event_data_id, int fd, bool pollin) {
+    if (_backend_type == IO_BACKEND_IOURING) {
+#ifdef BRPC_WITH_IO_URING
+        return iouring_backend::RegisterEvent(this, event_data_id, fd, pollin);
+#endif
+    }
+    return epoll_backend::RegisterEvent(this, event_data_id, fd, pollin);
+}
+
+int EventDispatcher::UnregisterEvent(IOEventDataId event_data_id, int fd, bool pollin) {
+    if (_backend_type == IO_BACKEND_IOURING) {
+#ifdef BRPC_WITH_IO_URING
+        return iouring_backend::UnregisterEvent(this, event_data_id, fd, pollin);
+#endif
+    }
+    return epoll_backend::UnregisterEvent(this, event_data_id, fd, pollin);
+}
+
+void* EventDispatcher::RunThis(void* arg) {
+    ((EventDispatcher*)arg)->Run();
+    return NULL;
+}
+
+void EventDispatcher::Run() {
+    if (_backend_type == IO_BACKEND_IOURING) {
+#ifdef BRPC_WITH_IO_URING
+        iouring_backend::Run(this);
+#endif
+    } else {
+        epoll_backend::Run(this);
+    }
+}
+
+} // namespace brpc
+
 #elif defined(OS_MACOSX)
     #include "brpc/event_dispatcher_kqueue.cpp"
 #else
