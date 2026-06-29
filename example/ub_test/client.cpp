@@ -80,6 +80,7 @@ DEFINE_bool(client_ignore_oc, false, "Client ignore eovercrowded, false by defau
 DEFINE_int32(max_retry, 3, "max retry times (0-1000)");
 DEFINE_int32(connect_retry_interval, 200, "connect retry interval(ms)");
 DEFINE_bool(use_connection_group, false, "Set connection_group for each channel or not");
+DEFINE_bool(test_keep_alive, false, "Keep connections alive for 10 seconds after establishment");
 
 // ==================== 全局变量 ====================
 // 性能统计记录器 (bvar 内部线程安全)
@@ -703,6 +704,11 @@ void Test(int thread_num, int attachment_size) {
 
     // 直接使用 RunPerformanceTest 进行性能测试
     RunPerformanceTest(success_tests);
+
+    if (FLAGS_test_keep_alive) {
+        std::cout << "Keeping connections alive for 10 seconds..." << std::endl;
+        std::this_thread::sleep_for(std::chrono::seconds(10));
+    }
 
     g_stop = true;
 }
