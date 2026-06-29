@@ -34,7 +34,8 @@ DEFINE_int32(num_threads, 5, "The max number of threads are used");
 DEFINE_int32(max_concurrency, 128, "max concurrency");
 DEFINE_int32(server_bthread_concurrency, 5, "server bthread concurrency");
 DEFINE_int64(rsp_size, 0, "response size");
-DEFINE_int32(stats_timeout_seconds, 3, "Timeout in seconds to detect test end (default 3)");
+DEFINE_int32(stats_timeout_seconds, 3, "Timeout in seconds before collecting statistics. (default 3)");
+DEFINE_int32(test_seconds, 40, "Test duration in seconds (should match client)");
 
 butil::atomic<uint64_t> g_last_time(0);
 butil::atomic<uint64_t> g_total_cnt(0);
@@ -58,19 +59,16 @@ static void* StatsPrinter(void* arg) {
         uint64_t now = butil::monotonic_time_us();
         uint64_t last = g_last_request_time.load(butil::memory_order_relaxed);
         uint64_t end = g_end_time.load(butil::memory_order_relaxed);
-        brpc::ServerStatistics stat;
-        server->GetStat(&stat);
-        size_t active_connections = stat.connection_count;
+        uint64_t start_time = g_start_time.load(butil::memory_order_relaxed);
         
-        if (end == 0 && last > 0) {
-            uint64_t idle_time = now - last;
-            bool idle_timeout = idle_time > (uint64_t)FLAGS_stats_timeout_seconds * 1000000;
-            bool no_connections = (active_connections == 0);
-            bool long_idle = idle_time > (uint64_t)FLAGS_stats_timeout_seconds * 2 * 1000000;
+        if (end == 0 && start_time > 0) {
+            uint64_t test_duration_us = now - start_time;
+            uint64_t trigger_time_us = ((uint64_t)FLAGS_test_seconds + FLAGS_stats_timeout_seconds) * 1000000;
             
-            if ((idle_timeout && no_connections) || long_idle) {
-                if (g_end_time.compare_exchange_strong(end, last)) {
-                    double duration_s = (last - g_start_time.load(butil::memory_order_relaxed)) / 1000000.0;
+            if (test_duration_us >= trigger_time_us) {
+                uint64_t end_expected = 0;
+                if (g_end_time.compare_exchange_strong(end_expected, last)) {
+                    double duration_s = (last - start_time) / 1000000.0;
                     uint64_t total_cnt = g_total_cnt.load(butil::memory_order_relaxed);
                     uint64_t total_bytes = g_total_bytes.load(butil::memory_order_relaxed);
                     
