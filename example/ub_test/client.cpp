@@ -402,7 +402,8 @@ static void* GenerateToken(void* arg) {
     int64_t start_time = butil::monotonic_time_ns();
     int64_t accumulative_token = g_token.load(butil::memory_order_relaxed);
     while (!g_stop) {
-        bthread_usleep(100000);
+//        bthread_usleep(100000);
+        bthread_usleep(10000);
         int64_t now = butil::monotonic_time_ns();
         if (accumulative_token * 1000000000 / (now - start_time) < FLAGS_expected_qps) {
             int64_t delta = FLAGS_expected_qps * (now - start_time) / 1000000000 - accumulative_token;
