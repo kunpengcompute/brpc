@@ -45,7 +45,7 @@ DEFINE_int32(timeout_ms, 100, "RPC timeout in milliseconds");
 DEFINE_int32(max_retry, 3, "Maximum retry times");
 DEFINE_int32(dummy_port, 8899, "Port of dummy server(to monitor replaying)");
 DEFINE_string(http_host, "", "Host field for http protocol");
-DEFINE_bool(use_ub, false, "Use UB or not");
+DEFINE_bool(ubsocket_use_ub, false, "Use UB or not");
 DEFINE_int32(connect_timeout_ms, 2000, "connect timeout");
 
 bvar::LatencyRecorder g_latency_recorder("rpc_replay");
@@ -92,7 +92,7 @@ int ChannelGroup::Init() {
         options.connection_type = FLAGS_connection_type;
         options.timeout_ms = FLAGS_timeout_ms/*milliseconds*/;
         options.max_retry = FLAGS_max_retry;
-        options.use_ub = FLAGS_use_ub;
+        options.use_ub = FLAGS_ubsocket_use_ub;
         options.connect_timeout_ms = FLAGS_connect_timeout_ms;
         if ((options.connection_type == brpc::CONNECTION_TYPE_UNKNOWN || 
             options.connection_type & protocol.supported_connection_type) &&

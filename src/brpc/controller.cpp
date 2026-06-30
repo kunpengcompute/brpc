@@ -25,7 +25,7 @@
 #include "butil/string_printf.h"
 #include "butil/logging.h"
 #include "butil/time.h"
-#include "butil/ubiobuf.h"                         // butil::UBIOBuf
+#include "butil/ub/ubiobuf.h"                         // butil::UBIOBuf
 #include "bthread/bthread.h"
 #include "bthread/unstable.h"
 #include "bvar/bvar.h"

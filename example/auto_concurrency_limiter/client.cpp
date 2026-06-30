@@ -38,7 +38,7 @@ DEFINE_int32(case_interval, 20, "Intervals for different test cases");
 DEFINE_int32(client_qps_change_interval_us, 50000, 
              "The interval for client changes the sending speed");
 DEFINE_string(case_file, "", "File path for test_cases");
-DEFINE_bool(use_ub, false, "whether use ub");
+DEFINE_bool(ubsocket_use_ub, false, "whether use ub");
 DEFINE_int32(connect_timeout_ms, 20000, "RPC connect timeout in milliseconds");
 
 void DisplayStage(const test::Stage& stage) {
@@ -180,7 +180,7 @@ void RunCase(test::ControlService_Stub &cntl_stub,
     options.timeout_ms = FLAGS_timeout_ms;
     options.max_retry = FLAGS_max_retry;
     options.connect_timeout_ms = FLAGS_connect_timeout_ms;
-    options.use_ub = FLAGS_use_ub;
+    options.use_ub = FLAGS_ubsocket_use_ub;
     if (channel.Init(FLAGS_echo_server.c_str(), &options) != 0) {
         LOG(FATAL) << "Fail to initialize channel";
     }

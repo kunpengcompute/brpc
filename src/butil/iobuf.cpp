@@ -40,7 +40,7 @@
 #include "butil/fd_guard.h"                 // butil::fd_guard
 #include "butil/iobuf.h"
 #include "butil/iobuf_profiler.h"
-#include "butil/ubiobuf.h"
+#include "butil/ub/ubiobuf.h"
 
 #ifdef BRPC_WITH_URMA
 std::atomic<int64_t> g_brpc_ubs_step_latency[20];

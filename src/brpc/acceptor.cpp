@@ -26,7 +26,7 @@
 
 #ifdef BRPC_WITH_URMA
 #include "include/ubsocket_def.h"
-#include "butil/ubsocket_wrapper.h"
+#include "butil/ub/ubsocket_wrapper.h"
 #endif
  	
 namespace brpc {

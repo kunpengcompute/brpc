@@ -23,7 +23,7 @@
 #include <google/protobuf/text_format.h>
 #include "butil/logging.h"                       // LOG()
 #include "butil/iobuf.h"                         // butil::IOBuf
-#include "butil/ubiobuf.h"                       // butil::UBIOBuf
+#include "butil/ub/ubiobuf.h"                       // butil::UBIOBuf
 #include "butil/raw_pack.h"                      // RawPacker RawUnpacker
 #include "butil/memory/scope_guard.h"
 #include "json2pb/json_to_pb.h"

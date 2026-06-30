@@ -46,7 +46,7 @@ DEFINE_int32(server_max_concurrency, 0, "Echo Server's max_concurrency");
 DEFINE_bool(use_usleep, false, 
             "EchoServer uses ::usleep or bthread_usleep to simulate latency "
             "when processing requests");
-DEFINE_bool(use_ub, false, "whether use ub");
+DEFINE_bool(ubsocket_use_ub, false, "whether use ub");
 
 
 bthread::TimerThread g_timer_thread;
@@ -226,7 +226,7 @@ public:
             _echo_service->SetTestCase(test_case);
             brpc::ServerOptions options;
             options.max_concurrency = FLAGS_server_max_concurrency;
-            options.use_ub = FLAGS_use_ub;
+            options.use_ub = FLAGS_ubsocket_use_ub;
             _server.MaxConcurrencyOf("test.EchoService.Echo") = test_case.max_concurrency();
 
             _server.Start(FLAGS_echo_port, &options);            

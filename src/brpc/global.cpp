@@ -339,6 +339,7 @@ static void GlobalInitializeOrDieImpl() {
 #if BRPC_WITH_URMA
     if (FLAGS_ubsocket_enable) {
         if (InitializeUBSocket() != 0) {
+            LOG(ERROR) << "Fail to initialize ubsocket";
             exit(1);
         }
     }
