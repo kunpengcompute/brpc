@@ -16,7 +16,14 @@
 // under the License.
 
 #if BRPC_WITH_URMA
+#include <atomic>
+#include <cerrno>
+#include <cstdint>
+#include <new>
+#include <sys/epoll.h>
+
 #include <gflags/gflags.h>
+#include "brpc/event_dispatcher.h"
 #include "brpc/log.h"
 #include "bthread/rwlock.h"
 #include "bthread/bthread.h"
@@ -83,6 +90,132 @@ DEFINE_string(ubsocket_split_trace_buf_cap, "65535", "Set ubsocket split trace b
 DEFINE_string(ubsocket_split_trace_drain_interval_ms, "10", "Set ubsocket split trace buf log drain interval(ms), the minimum value is 1, the maximum value is 10000");
 DEFINE_string(ubsocket_tp_type, "single", "Ubsocket jetty tranport type; default: single (optional: single, pool)");
 DEFINE_string(ubsocket_tp_pool_size, "16", "Ubsocket jetty tranport pool size; the minimum value is 1, the maximum value is 1000");
+
+namespace {
+
+class UBSocketPollerConsumer {
+public:
+    UBSocketPollerConsumer(int fd, void *arg, u_poller_event_cb_t callback)
+        : _fd(fd)
+        , _arg(arg)
+        , _callback(callback) {}
+
+    int Start()
+    {
+        if (_io_event.Init(this) != 0) {
+            LOG(ERROR) << "Fail to init ubsocket poller IOEvent";
+            return -1;
+        }
+        if (_io_event.AddConsumer(_fd) != 0) {
+            PLOG(ERROR) << "Fail to add ubsocket poller fd=" << _fd << " into EventDispatcher";
+            _io_event.Reset();
+            return -1;
+        }
+        _started = true;
+        return 0;
+    }
+
+    void Stop()
+    {
+        if (!_started) {
+            return;
+        }
+        _io_event.RemoveConsumer(_fd);
+        _io_event.Reset();
+        while (_running_tasks.load(std::memory_order_acquire) != 0) {
+            bthread_usleep(1000);
+        }
+        _started = false;
+    }
+
+    static int OnInputEvent(void *user_data, uint32_t events, const bthread_attr_t &thread_attr)
+    {
+        auto *consumer = static_cast<UBSocketPollerConsumer *>(user_data);
+        if (consumer == nullptr || consumer->_callback == nullptr) {
+            return -1;
+        }
+        if ((events & (EPOLLIN | EPOLLERR | EPOLLHUP)) == 0) {
+            return 0;
+        }
+        if (consumer->_pending_events.fetch_add(1, std::memory_order_acq_rel) == 0) {
+            consumer->_running_tasks.fetch_add(1, std::memory_order_acq_rel);
+            bthread_t tid;
+            bthread_attr_t attr = thread_attr;
+            attr.tag = bthread_self_tag();
+            if (bthread_start_urgent(&tid, &attr, DrainTask, consumer) != 0) {
+                consumer->_pending_events.fetch_sub(1, std::memory_order_acq_rel);
+                LOG(ERROR) << "Fail to start ubsocket poller bthread";
+                DrainInline(consumer);
+                consumer->_running_tasks.fetch_sub(1, std::memory_order_acq_rel);
+                return -1;
+            }
+        }
+        return 0;
+    }
+
+    static int OnOutputEvent(void *, uint32_t, const bthread_attr_t &)
+    {
+        return 0;
+    }
+
+private:
+    static void DrainInline(UBSocketPollerConsumer *consumer)
+    {
+        consumer->_callback(consumer->_arg);
+    }
+
+    static void *DrainTask(void *arg)
+    {
+        auto *consumer = static_cast<UBSocketPollerConsumer *>(arg);
+        while (true) {
+            DrainInline(consumer);
+            if (consumer->_pending_events.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                break;
+            }
+        }
+        consumer->_running_tasks.fetch_sub(1, std::memory_order_acq_rel);
+        return nullptr;
+    }
+
+    int _fd;
+    void *_arg;
+    u_poller_event_cb_t _callback;
+    IOEvent<UBSocketPollerConsumer> _io_event;
+    std::atomic<uint32_t> _pending_events{0};
+    std::atomic<uint32_t> _running_tasks{0};
+    bool _started{false};
+};
+
+} // namespace
+
+static int brpc_poller_add_consumer(int fd, void *arg, u_poller_event_cb_t callback, void **consumer)
+{
+    if (consumer == nullptr || callback == nullptr || fd < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    auto *poller_consumer = new (std::nothrow) UBSocketPollerConsumer(fd, arg, callback);
+    if (poller_consumer == nullptr) {
+        errno = ENOMEM;
+        return -1;
+    }
+    if (poller_consumer->Start() != 0) {
+        delete poller_consumer;
+        return -1;
+    }
+    *consumer = poller_consumer;
+    return 0;
+}
+
+static void brpc_poller_remove_consumer(void *consumer, int)
+{
+    auto *poller_consumer = static_cast<UBSocketPollerConsumer *>(consumer);
+    if (poller_consumer == nullptr) {
+        return;
+    }
+    poller_consumer->Stop();
+    delete poller_consumer;
+}
 
 static void SetUBSocketEnv() {
     if (!FLAGS_ubsocket_trans_mode.empty()) {
@@ -462,6 +595,11 @@ u_external_rpc_id_ops_t brpc_rpc_id_ops = {
     .get_rpc_id = brpc_get_rpc_id,
     .get_rpc_call_timestamp = brpc_get_call_timestamp,
 };
+
+u_external_poller_ops_t brpc_poller_ops = {
+    .add_consumer = brpc_poller_add_consumer,
+    .remove_consumer = brpc_poller_remove_consumer
+};
 ///////////////////////////////////////////////////////////////////////////////
 // Register brpc log for UBSocket.
 ///////////////////////////////////////////////////////////////////////////////
@@ -570,6 +708,7 @@ int InitializeUBSocket()
     options.rw_lock_ops = &brpc_rw_lock_ops;
     options.sem_ops = &brpc_semaphore_ops;
     options.rpc_id_ops = &brpc_rpc_id_ops;
+    options.poller_ops = &brpc_poller_ops;
     /* init ubsocket */
     if (ubsocket_init(&options) != 0) {
         LOG(ERROR) << "Inner error: ubsocket_init failed";
