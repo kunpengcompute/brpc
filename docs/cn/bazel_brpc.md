@@ -40,6 +40,7 @@ ubsocket通过环境变量进行配置，在bRPC与ubsocket集成的过程中，
 |ubsocket_tx_depth|发送队列深度|最小值是64，设置上限由实际机器环境决定（根据命令urma_admin show --whole中max_jfc_depth与max_jfs_depth两者的最小值）|1024|否|
 |ubsocket_rx_depth|接受队列深度|最小值是64，设置上限由实际机器环境决定（根据命令urma_admin show --whole中max_jfc_depth与max_jfr_depth两者的最小值）|1024|否|
 |ubsocket_readv_unlimited|是否打开readv上报限制|false，true|true|否|
+|ubsocket_block_type|内存池的最小分片|default：8k，small：16k，medium：32k，large：64k|default|否|
 |ubsocket_pool_initial_size|IO内存的总大小，单位MB|应用按需配置|200|否|
 |ubsocket_pool_max_size|单bRPC进程UB通信内存占用弹性扩容最大值，单位MB| [ubsocket_pool_initial_size + 64, 6144], 单次最小扩容大小为 64M，因此 ubsocket_pool_max_size - ubsocket_pool_initial_size >= 64M |2048|否|
 |ubsocket_buf_pool_depth|单bRPC进程线程内存池深度|应用按需配置|12000|否|
@@ -91,15 +92,18 @@ client侧的配置，使用参考[echo_c++_client用例](../../example/echo_c++/
 
 |名称|含义|取值范围|默认值|必填|
 |--|--|--|--|--|
-|use_ub|client侧是否使用ub通信，单独设置预期建链失败|false, true|false|否|
+|ubsocket_use_ub|client侧是否使用ub通信，单独设置预期建链失败|false, true|false|否|
 |minloglevel|日志等级参数|glog：0=INFO 1=WARNING 2=ERROR；blog：0=INFO 1=NOTICE 2=WARNING 3=ERROR|0|否|
+|v|自定义详细日志（VLOG）的输出级别。大于1时会打印ubsocket中的debug日志|大于等于 0 的整数|0|否|
+
 #### 3.2.2 brpc::ServerOptions
 server侧的配置，使用参考[echo_c++_server用例](../../example/echo_c++/server.cpp)。配置项说明见下表。
 
 |名称|含义|取值范围|默认值|必填|
 |--|--|--|--|--|
-|use_ub|server侧是否使用ub通信，单独设置预期建立TCP链路|false, true|false|否|
+|ubsocket_use_ub|server侧是否使用ub通信，单独设置预期建立TCP链路|false, true|false|否|
 |minloglevel|日志等级参数|glog：0=INFO 1=WARNING 2=ERROR；blog：0=INFO 1=NOTICE 2=WARNING 3=ERROR|0|否|
+|v|自定义详细日志（VLOG）的输出级别。大于1时会打印ubsocket中的debug日志|大于等于 0 的整数|0|否|
 
 ## 4 bazel编译
 
@@ -217,12 +221,14 @@ bazel build //example:echo_c++_client --define brpc_with_urma=true -c opt --copt
 # glog日志
 $ vim bazel/config/BUILD.bazel
 默认写有{"brpc_with_urma": "true"}
+默认写有{"BRPC_WITH_GLOG": "true"}
 ```
 
 ```bash
 # blog日志
 $ vim bazel/config/BUILD.bazel
 将{"brpc_with_urma": "true"}改成{"brpc_with_urma": "false"}
+将{"BRPC_WITH_GLOG": "true"}改成{"BRPC_WITH_GLOG": "false"}
 ```
 
 ### 4.5 执行用例
@@ -277,10 +283,10 @@ mount -o remount,ro /proc/sys
 上述完成后可以获得echo_c++_server和echo_c++_client两个可执行文件，分别放到放到两台服务器上
 ```
 $ # 启动echo_c++_server
-$ ./echo_c++_server --ubsocket_enable=true --use_ub=true
+$ ./echo_c++_server --ubsocket_enable=true --ubsocket_use_ub=true
 
 $ # 在另一个节点启动echo_c++_client
-$ ./echo_c++_client --server=141.61.85.60:8000 --ubsocket_enable=true --use_ub=true
+$ ./echo_c++_client --server=141.61.85.60:8000 --ubsocket_enable=true --ubsocket_use_ub=true
 ```
 ![image](../images/echo_server.png)
 ![image](../images/echo_client.png)
@@ -294,10 +300,10 @@ ub_performance测试工具执行方法
 
 ```
 $ # 启动ub_performance_server
-$ ./ub_performance_server --use_ub=true --ubsocket_enable=true
+$ ./ub_performance_server --ubsocket_use_ub=true --ubsocket_enable=true
 
 $ # 在另一个节点启动ub_performance_client
-$ ./ub_performance_client --server=141.61.85.60:8002  --use_ub=true --ubsocket_enable=true
+$ ./ub_performance_client --server=141.61.85.60:8002  --ubsocket_use_ub=true --ubsocket_enable=true
 ```
 
 ### 容器内调试

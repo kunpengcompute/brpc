@@ -34,7 +34,7 @@
 #include "butil/object_pool.h"                    // get_object
 #include "butil/logging.h"                        // CHECK
 #include "butil/macros.h"
-#include "butil/ubiobuf.h"                        // butil::UBIOBuf
+#include "butil/ub/ubiobuf.h"                        // butil::UBIOBuf
 #include "butil/class_name.h"                     // butil::class_name
 #include "butil/memory/scope_guard.h"
 #include "brpc/log.h"
@@ -317,6 +317,15 @@ static butil::Status NormalizeUbWriteData(butil::IOBuf* data) {
     return butil::Status::OK();
 }
 
+static void WarnIfUbBlockOnTcpWrite(const Socket* s, const butil::IOBuf* data) {
+    if (butil::UBIOBuf::has_ub_block(data)) {
+        LOG_EVERY_SECOND(WARNING)
+            << "UB IOBuf block is written through TCP socket, fd=" << s->fd()
+            << " remote_side=" << s->remote_side()
+            << " data_size=" << data->size();
+    }
+}
+
 struct BAIDU_CACHELINE_ALIGNMENT Socket::WriteRequest {
     static WriteRequest* const UNCONNECTED;
 
@@ -416,6 +425,8 @@ void Socket::WriteRequest::Setup(Socket* s) {
                 bthread_id_error2(id_wait, st.error_code(), st.error_cstr());
                 return;
             }
+        } else if (msg != DUMMY_USER_MESSAGE) {
+            WarnIfUbBlockOnTcpWrite(s, &data);
         }
         const int64_t before_write =
             s->_unwritten_bytes.fetch_add(data.size(), butil::memory_order_relaxed);
@@ -1676,6 +1687,8 @@ int Socket::Write(butil::IOBuf* data, const WriteOptions* options_in) {
             butil::return_object(req);
             return SetError(opt.id_wait, st.error_code());
         }
+    } else {
+        WarnIfUbBlockOnTcpWrite(this, &req->data);
     }
     // Set `req->next' to UNCONNECTED so that the KeepWrite thread will
     // wait until it points to a valid WriteRequest or NULL.

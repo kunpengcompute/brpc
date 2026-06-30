@@ -528,7 +528,6 @@ int InitializeUBSocket()
 
     SetUBSocketEnv();
 
-
     // 1. 获取基础日志级别
 #if BRPC_WITH_GLOG
     const int min_level = FLAGS_minloglevel;

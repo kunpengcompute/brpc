@@ -30,7 +30,7 @@ DEFINE_string(server, "0.0.0.0:8003", "IP Address of server");
 DEFINE_string(load_balancer, "", "The algorithm for load balancing");
 DEFINE_int32(timeout_ms, 100, "RPC timeout in milliseconds");
 DEFINE_int32(max_retry, 3, "Max retries(not including the first RPC)"); 
-DEFINE_bool(use_ub, false, "whether use ub");
+DEFINE_bool(ubsocket_use_ub, false, "whether use ub");
 DEFINE_int32(connect_timeout_ms, 20000, "RPC connect timeout in milliseconds");
 
 void HandleEchoResponse(
@@ -66,7 +66,7 @@ int main(int argc, char* argv[]) {
     options.timeout_ms = FLAGS_timeout_ms/*milliseconds*/;
     options.max_retry = FLAGS_max_retry;
     options.connect_timeout_ms = FLAGS_connect_timeout_ms;
-    options.use_ub = FLAGS_use_ub;
+    options.use_ub = FLAGS_ubsocket_use_ub;
 
     if (channel.Init(FLAGS_server.c_str(), FLAGS_load_balancer.c_str(), &options) != 0) {
         LOG(ERROR) << "Fail to initialize channel";

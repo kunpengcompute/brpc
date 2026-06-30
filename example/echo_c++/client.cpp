@@ -20,7 +20,7 @@
 #include <gflags/gflags.h>
 #include <butil/logging.h>
 #include <butil/time.h>
-#include <butil/ubiobuf.h>
+#include <butil/ub/ubiobuf.h>
 #include <brpc/channel.h>
 #include "echo.pb.h"
 
@@ -34,7 +34,7 @@ DEFINE_int32(connect_timeout_ms, 20000, "RPC connect timeout in milliseconds");
 DEFINE_int32(max_retry, 3, "Max retries(not including the first RPC)"); 
 DEFINE_int32(interval_ms, 1000, "Milliseconds between consecutive requests");
 DEFINE_bool(enable_checksum, false, "Enable checksum or not");
-DEFINE_bool(use_ub, false, "whether use ub");
+DEFINE_bool(ubsocket_use_ub, false, "whether use ub");
 
 int main(int argc, char* argv[]) {
     // Parse gflags. We recommend you to use gflags as well.
@@ -51,7 +51,7 @@ int main(int argc, char* argv[]) {
     options.timeout_ms = FLAGS_timeout_ms/*milliseconds*/;
     options.max_retry = FLAGS_max_retry;
     options.connect_timeout_ms = FLAGS_connect_timeout_ms;
-    options.use_ub = FLAGS_use_ub;
+    options.use_ub = FLAGS_ubsocket_use_ub;
     if (channel.Init(FLAGS_server.c_str(), FLAGS_load_balancer.c_str(), &options) != 0) {
         LOG(ERROR) << "Fail to initialize channel";
         return -1;
@@ -75,7 +75,7 @@ int main(int argc, char* argv[]) {
         cntl.set_log_id(log_id ++);  // set by user
         // Set attachment which is wired to network directly instead of 
         // being serialized into protobuf messages.
-        if (FLAGS_use_ub) {
+        if (FLAGS_ubsocket_use_ub) {
             butil::UBIOBuf attachment;
             attachment.append(FLAGS_attachment);
             cntl.request_attachment().append(attachment);

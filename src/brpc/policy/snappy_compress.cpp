@@ -17,7 +17,7 @@
 
 
 #include "butil/logging.h"
-#include "butil/ubiobuf.h"                       // butil::UBIOBufAsSnappySink
+#include "butil/ub/ubiobuf.h"                       // butil::UBIOBufAsSnappySink
 #include "butil/third_party/snappy/snappy.h"
 #include "brpc/policy/snappy_compress.h"
 #include "brpc/protocol.h"

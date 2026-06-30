@@ -27,7 +27,7 @@ DEFINE_bool(send_attachment, true, "Carry attachment along with response");
 DEFINE_int32(port, 8003, "TCP Port of this server");
 DEFINE_int32(idle_timeout_s, -1, "Connection will be closed if there is no "
              "read/write operations during the last `idle_timeout_s'");
-DEFINE_bool(use_ub, false, "whether use ub");
+DEFINE_bool(ubsocket_use_ub, false, "whether use ub");
 
 // Your implementation of example::EchoService
 class EchoServiceImpl : public example::EchoService {
@@ -108,7 +108,7 @@ int main(int argc, char* argv[]) {
     // Start the server.
     brpc::ServerOptions options;
     options.idle_timeout_sec = FLAGS_idle_timeout_s;
-    options.use_ub = FLAGS_use_ub;
+    options.use_ub = FLAGS_ubsocket_use_ub;
 
     if (server.Start(FLAGS_port, &options) != 0) {
         LOG(ERROR) << "Fail to start EchoServer";

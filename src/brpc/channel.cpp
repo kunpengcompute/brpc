@@ -22,7 +22,7 @@
 #include <memory>
 #include "butil/time.h"                              // milliseconds_from_now
 #include "butil/logging.h"
-#include "butil/ubiobuf.h"                           // butil::UBIOBuf
+#include "butil/ub/ubiobuf.h"                           // butil::UBIOBuf
 #include "butil/third_party/murmurhash3/murmurhash3.h"
 #include "butil/strings/string_util.h"
 #include "bthread/unstable.h"                        // bthread_timer_add
@@ -193,10 +193,7 @@ static bool OptionsAvailableForRdma(const ChannelOptions* opt) {
 static bool OptionsAvailableForUb(const ChannelOptions* opt) {
 #if BRPC_WITH_URMA
     (void)opt;
-    if (!FLAGS_ubsocket_enable) {
-        return false;
-    }
-    return true;
+    return FLAGS_ubsocket_enable;
 #else
     (void)opt;
     return false;
