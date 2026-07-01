@@ -83,7 +83,7 @@ DEFINE_string(ubsocket_prof_enable, "false", "Enable ubsocket profiling (e.g., '
 DEFINE_string(ubsocket_prof_mode, "fast", "Set ubsocket profiling mode; default: fast (optional: fast, ext)");
 DEFINE_string(ubsocket_prof_dump_interval_min, "1", "Set dump ubsocket profiling data output interval(minute), the minimum value is 1, the maximum value is 5");
 DEFINE_string(ubsocket_prof_dump_path, "/tmp/ubsocket/profiling", "Set dump ubsocket profiling data output path (e.g., '/tmp/ubsocket/profiling')");
-DEFINE_string(ubsocket_ub_handshake_mode, "tfo", "Handshake mode for UB connection; default: tfo (optional: tfo, ub_sock_opt)");
+DEFINE_string(ubsocket_ub_handshake_mode, "ub_sock_opt", "Handshake mode for UB connection; default: ub_sock_opt (optional: tfo, ub_sock_opt)");
 DEFINE_string(ubsocket_flow_control_enable, "true", "Whether to enable flow control; default: true (optional: false, true)");
 DEFINE_string(ubsocket_split_trace_enable, "false", "Enable ubsocket split trace (e.g., 'false', 'true')");
 DEFINE_string(ubsocket_split_trace_buf_cap, "65535", "Set ubsocket split trace buf capacity; default: 65535, the minimum value is 16384, the maximum value is 65536");

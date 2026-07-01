@@ -591,6 +591,7 @@ void Channel::CallMethod(const google::protobuf::MethodDescriptor* method,
         _serialize_request(&cntl->_request_buf, cntl, request);
         request_failed = cntl->FailedInline();
     }
+
 #ifdef BRPC_WITH_URMA
  	PROF_END(BRPC_SERIALIZE, true);
 #endif

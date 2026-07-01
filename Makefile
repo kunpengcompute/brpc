@@ -163,7 +163,7 @@ BUTIL_SOURCES = \
     src/butil/crc32c.cc \
     src/butil/containers/case_ignored_flat_map.cpp \
     src/butil/iobuf.cpp \
-    src/butil/ubiobuf.cpp \
+    src/butil/ub/ubiobuf.cpp \
     src/butil/single_iobuf.cpp \
     src/butil/iobuf_profiler.cpp \
     src/butil/binary_printer.cpp \
