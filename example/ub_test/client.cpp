@@ -103,6 +103,7 @@ butil::atomic<int64_t> g_channel_id(0);
 // 原子计数器 (多线程安全)
 butil::atomic<uint64_t> g_total_bytes;
 butil::atomic<uint64_t> g_total_cnt;
+butil::atomic<uint64_t> g_total_error_cnt(0);
 butil::atomic<uint64_t> g_last_time(0);
 
 // 服务器列表 (只读，无需保护)
@@ -331,6 +332,7 @@ public:
         std::unique_ptr<test::PerfTestResponse> response_guard(closure->resp);
         if (closure->cntl->Failed()) {
             LOG(ERROR) << "[Performance] RPC call failed: " << closure->cntl->ErrorText();
+            g_total_error_cnt.fetch_add(1, butil::memory_order_relaxed);
         } else {
             g_latency_recorder << closure->cntl->latency_us();
             if (closure->resp->cpu_usage().size() > 0) {
@@ -402,8 +404,7 @@ static void* GenerateToken(void* arg) {
     int64_t start_time = butil::monotonic_time_ns();
     int64_t accumulative_token = g_token.load(butil::memory_order_relaxed);
     while (!g_stop) {
-//        bthread_usleep(100000);
-        bthread_usleep(10000);
+        bthread_usleep(100000);
         int64_t now = butil::monotonic_time_ns();
         if (accumulative_token * 1000000000 / (now - start_time) < FLAGS_expected_qps) {
             int64_t delta = FLAGS_expected_qps * (now - start_time) / 1000000000 - accumulative_token;
@@ -609,7 +610,8 @@ static int RunPerformanceTest(std::vector<PerformanceTest*>& success_tests) {
         << ", QPS: " << (g_total_cnt.load(butil::memory_order_relaxed) * 1000 * 1000 / (end_time - start_time))
         << ", Server CPU(avg/max): " << g_server_cpu_recorder.latency(10) << "/" << g_server_cpu_recorder.max_latency() << "\%"
         << ", Client CPU(avg/max): " << g_client_cpu_recorder.latency(10) << "/" << g_client_cpu_recorder.max_latency() << "\%"
-        << ", Client Memory(avg/max): " << g_client_memory_recorder.latency(10) << "/" << g_client_memory_recorder.max_latency() << "MB";
+        << ", Client Memory(avg/max): " << g_client_memory_recorder.latency(10) << "/" << g_client_memory_recorder.max_latency() << "MB"
+ 	    << ", Error rate " << (g_total_error_cnt.load(butil::memory_order_relaxed) * 1.0 / g_total_cnt.load(butil::memory_order_relaxed) * 100) << "%";
     std::cout << std::endl;
 
     std::cout << "Total rounds: " << round << std::endl;
