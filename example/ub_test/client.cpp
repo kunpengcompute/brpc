@@ -611,6 +611,7 @@ static int RunPerformanceTest(std::vector<PerformanceTest*>& success_tests) {
         << ", Server CPU(avg/max): " << g_server_cpu_recorder.latency(10) << "/" << g_server_cpu_recorder.max_latency() << "\%"
         << ", Client CPU(avg/max): " << g_client_cpu_recorder.latency(10) << "/" << g_client_cpu_recorder.max_latency() << "\%"
         << ", Client Memory(avg/max): " << g_client_memory_recorder.latency(10) << "/" << g_client_memory_recorder.max_latency() << "MB"
+        << ", Total Requests: " << g_total_cnt.load(butil::memory_order_relaxed)
  	    << ", Error rate " << (g_total_error_cnt.load(butil::memory_order_relaxed) * 1.0 / g_total_cnt.load(butil::memory_order_relaxed) * 100) << "%";
     std::cout << std::endl;
 
