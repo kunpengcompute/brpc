@@ -103,6 +103,7 @@ butil::atomic<int64_t> g_channel_id(0);
 // 原子计数器 (多线程安全)
 butil::atomic<uint64_t> g_total_bytes;
 butil::atomic<uint64_t> g_total_cnt;
+butil::atomic<uint64_t> g_total_error_cnt(0);
 butil::atomic<uint64_t> g_last_time(0);
 
 // 服务器列表 (只读，无需保护)
@@ -194,7 +195,7 @@ public:
     PerformanceTest(int attachment_size, bool echo_attachment)
         : _addr(NULL)
         , _channel(NULL)
-        //, _connect_latency_us(0)
+        , _connect_latency_us(0)
         , _first_rpc_latency_us(0)
         , _first_rpc_memory_mb(0)
         , _init_result(-1)
@@ -217,7 +218,7 @@ public:
         delete _channel;
     }
 
-    //inline int64_t connect_latency_us() const { return _connect_latency_us; }
+    inline int64_t connect_latency_us() const { return _connect_latency_us; }
     inline int64_t first_rpc_latency_us() const { return _first_rpc_latency_us; }
     inline double first_rpc_memory_mb() const { return _first_rpc_memory_mb; }
     inline int init_result() const { return _init_result; }
@@ -245,10 +246,10 @@ public:
         std::string server = g_servers[rr_index.fetch_add(1, butil::memory_order_relaxed) % g_servers.size()];
         _channel = new brpc::Channel();
 
-//        int64_t start_ns = butil::cpuwide_time_ns();
+        int64_t start_ns = butil::cpuwide_time_ns();
         int ret = _channel->Init(server.c_str(), &options);
-//        int64_t end_ns = butil::cpuwide_time_ns();
-//        _connect_latency_us = (end_ns - start_ns) / 1000;
+        int64_t end_ns = butil::cpuwide_time_ns();
+        _connect_latency_us = (end_ns - start_ns) / 1000;
 
         if (ret != 0) {
             LOG(ERROR) << "Fail to initialize channel";
@@ -331,6 +332,7 @@ public:
         std::unique_ptr<test::PerfTestResponse> response_guard(closure->resp);
         if (closure->cntl->Failed()) {
             LOG(ERROR) << "[Performance] RPC call failed: " << closure->cntl->ErrorText();
+            g_total_error_cnt.fetch_add(1, butil::memory_order_relaxed);
         } else {
             g_latency_recorder << closure->cntl->latency_us();
             if (closure->resp->cpu_usage().size() > 0) {
@@ -386,7 +388,7 @@ public:
 private:
     void* _addr;
     brpc::Channel* _channel;
-    //int64_t _connect_latency_us;
+    int64_t _connect_latency_us;
     int64_t _first_rpc_latency_us;
     double _first_rpc_memory_mb;
     int _init_result;
@@ -498,7 +500,7 @@ static int BatchEstablishConnections(
         if (futures[k].get() == 0) {
             total_success++;
             pthread_mutex_lock(&g_latency_mutex);
-            //g_connect_latencies_us.push_back(tests[k]->connect_latency_us());
+            g_connect_latencies_us.push_back(tests[k]->connect_latency_us());
             g_first_rpc_latencies_us.push_back(tests[k]->first_rpc_latency_us());
             g_first_rpc_memory_mbs.push_back(tests[k]->first_rpc_memory_mb());
             pthread_mutex_unlock(&g_latency_mutex);
@@ -515,11 +517,11 @@ static int BatchEstablishConnections(
 // ==================== 首包统计输出 ====================
 static void PrintLatencyStats() {
     LatencyStats connect_stats, first_rpc_stats;
-    //connect_stats.Calculate(g_connect_latencies_us);
+    connect_stats.Calculate(g_connect_latencies_us);
     first_rpc_stats.Calculate(g_first_rpc_latencies_us);
 
-    //connect_stats.Print("Connect-Latency");
-    //std::cout << ", ";
+    connect_stats.Print("Connect-Latency");
+    std::cout << ", ";
     first_rpc_stats.Print("First-RPC-Latency");
 
     if (!g_first_rpc_memory_mbs.empty()) {
@@ -608,7 +610,9 @@ static int RunPerformanceTest(std::vector<PerformanceTest*>& success_tests) {
         << ", QPS: " << (g_total_cnt.load(butil::memory_order_relaxed) * 1000 * 1000 / (end_time - start_time))
         << ", Server CPU(avg/max): " << g_server_cpu_recorder.latency(10) << "/" << g_server_cpu_recorder.max_latency() << "\%"
         << ", Client CPU(avg/max): " << g_client_cpu_recorder.latency(10) << "/" << g_client_cpu_recorder.max_latency() << "\%"
-        << ", Client Memory(avg/max): " << g_client_memory_recorder.latency(10) << "/" << g_client_memory_recorder.max_latency() << "MB";
+        << ", Client Memory(avg/max): " << g_client_memory_recorder.latency(10) << "/" << g_client_memory_recorder.max_latency() << "MB"
+        << ", Total Requests: " << g_total_cnt.load(butil::memory_order_relaxed)
+ 	    << ", Error rate " << (g_total_error_cnt.load(butil::memory_order_relaxed) * 1.0 / g_total_cnt.load(butil::memory_order_relaxed) * 100) << "%";
     std::cout << std::endl;
 
     std::cout << "Total rounds: " << round << std::endl;
@@ -635,7 +639,7 @@ void Test(int thread_num, int attachment_size) {
     // 重置全局计数器
     g_total_bytes.store(0, butil::memory_order_relaxed);
     g_total_cnt.store(0, butil::memory_order_relaxed);
-    //g_connect_latencies_us.clear();
+    g_connect_latencies_us.clear();
     g_first_rpc_latencies_us.clear();
     g_first_rpc_memory_mbs.clear();
 
@@ -656,11 +660,11 @@ void Test(int thread_num, int attachment_size) {
 
     // 阶段2: 统计首包延迟
     if (FLAGS_debug) {
-        //std::cout << "[Debug] Connect-Latencies (" << g_connect_latencies_us.size() << "): ";
-        //for (auto lat : g_connect_latencies_us) {
-        //    std::cout << lat << " ";
-        //}
-        //std::cout << std::endl;
+        std::cout << "[Debug] Connect-Latencies (" << g_connect_latencies_us.size() << "): ";
+        for (auto lat : g_connect_latencies_us) {
+            std::cout << lat << " ";
+        }
+        std::cout << std::endl;
         std::cout << "[Debug] First-RPC-Latencies (" << g_first_rpc_latencies_us.size() << "): ";
         for (auto lat : g_first_rpc_latencies_us) {
             std::cout << lat << " ";
