@@ -730,14 +730,28 @@ ssize_t IOPortal::ub_append_from_file_descriptor(
     vec.iov_base = _block->data + _block->size;
     vec.iov_len = std::min(_block->left_space(), max_count);
 
+ #ifdef BRPC_WITH_URMA
+     PROF_START(BRPC_READV);
+     PROF_START(BRPC_READV_EAGAIN);
+ #endif
     ssize_t nr = ::ubsocket_wrapper_readv(fd, &vec, 1);
     if (nr <= 0) {  // -1 or 0
+ #ifdef BRPC_WITH_URMA
+         if (!((errno == EINTR) || (errno == EAGAIN))) {
+             PROF_END(BRPC_READV, false);
+         } else {
+             PROF_END(BRPC_READV_EAGAIN, true);
+         }
+ #endif
         if (empty()) {
             ubiobuf::release_tls_ub_block(_block);
             _block = NULL;
         }
         return nr;
     }
+#ifdef BRPC_WITH_URMA
+     PROF_END(BRPC_READV, true);
+#endif
 
     size_t total_len = nr;
     while (total_len && _block) {

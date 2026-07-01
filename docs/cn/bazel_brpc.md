@@ -68,7 +68,7 @@ ubsocket通过环境变量进行配置，在bRPC与ubsocket集成的过程中，
 |`ubsocket_probe_batch` | ubsocket 每批次探测的 Socket 数量 | [1, 500] | 10 | 否 |
 |`ubsocket_ub_epoll_enable` | ubsocket 设置是否使用UB Epoll实现处理 | false: 使用原生Epoll，true: 使用UB Epoll | true | 否 |
 |`ubsocket_use_brpc_zcopy` | ubsocket 设置是否使用UB内存池使能免拷贝加速UB传输 | false: 关闭UB内存池加速（关闭后仅支持TCP传输），true: 使用UB内存池免拷贝加速UB传输 | true | 否 |
-|`ubsocket_ub_handshake_mode` | UB通信建链握手模式 | tfo, ub_sock_opt | tfo | 否 |
+|`ubsocket_ub_handshake_mode` | UB通信建链握手模式 | tfo, ub_sock_opt | ub_sock_opt | 否 |
 |`ubsocket_flow_control_enable` | 是否开启流控 | false, true | true | 否 |
 |`ubsocket_prof_enable` | 是否打开profiling打点功能  | false,true | false | 否 |
 |`ubsocket_prof_mode` | 是否打开profiling百分位统计功能，fast：关闭，ext：打开 | [fast, ext] | fast | 否 |
@@ -78,7 +78,7 @@ ubsocket通过环境变量进行配置，在bRPC与ubsocket集成的过程中，
 |`ubsocket_tp_pool_size` | jetty连接池大小 | [1, 1000] | 16 | 否 |
 
 > 注意：
-> 
+>
 > 1. 为最大程度的兼容bPRC及gflags的使用习惯。新增的这些gflags配置项，均在bRPC的源码中指定了默认值。bRPC集成ubsocket的场景中，ubsocket自身的环境变量不再生效，以gflags的默认值或用户指定的gflags值为准。
 > 2. `ubsocket_ub_handshake_mode`参数不同值的使用限制如下:
      >     1. tfo: 需要运行OS使能TFO选项，参考[TFO选项开启配置](#451-tfo选项开启配置可选)

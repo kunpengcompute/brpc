@@ -33,6 +33,7 @@
 #endif // __cplusplus
 
 #include "bthread/id.h"
+
 #ifdef BRPC_WITH_URMA
 extern bthread_key_t ubsocket_trace_rpcid_key;
 extern bthread_key_t ubsocket_trace_call_timestamp;
