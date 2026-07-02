@@ -23,7 +23,9 @@
 #include <sys/epoll.h>
 
 #include <gflags/gflags.h>
+#include <string>
 #include "brpc/event_dispatcher.h"
+#include "butil/reloadable_flags.h"
 #include "brpc/log.h"
 #include "bthread/rwlock.h"
 #include "bthread/bthread.h"
@@ -49,11 +51,12 @@ DEFINE_string(ubsocket_block_type, "tiny", "Minimum fragment of the memory pool 
 DEFINE_string(ubsocket_pool_initial_size, "200", "Total size of IO memory for ubsocket, in MB");
 DEFINE_string(ubsocket_pool_max_size, "2048", "Max size of ubsocket pool, in MB");
 DEFINE_string(ubsocket_buf_pool_depth, "12000", "Depth of ubsocket buffer pool");
+DEFINE_bool(ubsocket_tiny_pool_enable, true, "Whether to enable the UMQ tiny pool for UBIOBuf");
+DEFINE_uint32(ubsocket_tiny_pool_block_size, 1024, "UMQ tiny pool block size (e.g., 512, 1024, 2048, 4096, 8192)");
+DEFINE_string(ubsocket_tiny_buf_pool_depth, "8192", "UMQ tiny pool block count");
 DEFINE_string(ubsocket_schedule_policy, "affinity_priority", "Set the multi-plane load balancing policy (e.g., 'affinity_priority', 'affinity', 'rr')");
 DEFINE_string(ubsocket_readv_unlimited, "true", "Whether to enable the readv reporting limit for ubsocket (e.g., 'false', 'true')");
 DEFINE_string(ubsocket_use_polling, "false", "Whether to enable message processing polling for ubsocket (e.g., 'false', 'true')");
-DEFINE_string(ubsocket_brpc_alloc_sym, "", "The global pointer symbol information of butil::iobuf::blockmem_allocate in the brpc component");
-DEFINE_string(ubsocket_brpc_dealloc_sym, "", "The global pointer symbol information of butil::iobuf::blockmem_deallocate in the brpc component");
 DEFINE_string(ubsocket_adpt_stats, "false", "Count statistics for ubsocket (e.g., 'false', 'true')");
 DEFINE_string(ubsocket_auto_fallback_tcp, "true", "Whether to automatically downgrade TCP when the protocols do not match (e.g., 'false', 'true')");
 DEFINE_string(ubsocket_enable_share_jfr, "true", "Whether to enable share jfr (e.g., 'false', 'true')");
@@ -78,7 +81,6 @@ DEFINE_string(ubsocket_probe_enable, "false", "Enable ubsocket probe (e.g., 'fal
 DEFINE_string(ubsocket_probe_time_ms, "1000", "ubsocket probe interval time, the minimum value is 1, the maximum value is 360000");
 DEFINE_string(ubsocket_probe_batch, "10", "ubsocket number of sock to probe per batch, the minimum value is 1, the maximum value is 500");
 DEFINE_string(ubsocket_ub_epoll_enable, "true", "Whether to enable ub epoll; default: false (optional: false, true)");
-DEFINE_string(ubsocket_use_brpc_zcopy, "true", "Whether to enable ub memory pool to support UB zero copy transportation; default: true (optional: false, true)");
 DEFINE_string(ubsocket_prof_enable, "false", "Enable ubsocket profiling (e.g., 'false', 'true')");
 DEFINE_string(ubsocket_prof_mode, "fast", "Set ubsocket profiling mode; default: fast (optional: fast, ext)");
 DEFINE_string(ubsocket_prof_dump_interval_min, "1", "Set dump ubsocket profiling data output interval(minute), the minimum value is 1, the maximum value is 5");
@@ -90,6 +92,17 @@ DEFINE_string(ubsocket_split_trace_buf_cap, "65535", "Set ubsocket split trace b
 DEFINE_string(ubsocket_split_trace_drain_interval_ms, "10", "Set ubsocket split trace buf log drain interval(ms), the minimum value is 1, the maximum value is 10000");
 DEFINE_string(ubsocket_tp_type, "single", "Ubsocket jetty tranport type; default: single (optional: single, pool)");
 DEFINE_string(ubsocket_tp_pool_size, "16", "Ubsocket jetty tranport pool size; the minimum value is 1, the maximum value is 1000");
+
+static bool validate_ubsocket_tiny_pool_block_size(const char*, uint32_t value)
+{
+    if (value == 512 || value == 1024 || value == 2048 || value == 4096 || value == 8192) {
+        return true;
+    }
+    LOG(ERROR) << "Invalid ubsocket_tiny_pool_block_size=" << value
+               << ", expected one of 512, 1024, 2048, 4096, 8192";
+    return false;
+}
+BUTIL_VALIDATE_GFLAG(ubsocket_tiny_pool_block_size, validate_ubsocket_tiny_pool_block_size);
 
 namespace {
 
@@ -254,6 +267,12 @@ static void SetUBSocketEnv() {
     if (!FLAGS_ubsocket_buf_pool_depth.empty()) {
         ::setenv("UBSOCKET_BUF_POOL_DEPTH", FLAGS_ubsocket_buf_pool_depth.c_str(), 1);
     }
+    ::setenv("UBSOCKET_UMQ_TINY_POOL_ENABLE", FLAGS_ubsocket_tiny_pool_enable ? "true" : "false", 1);
+    const std::string tiny_pool_block_size = std::to_string(FLAGS_ubsocket_tiny_pool_block_size);
+    ::setenv("UBSOCKET_UMQ_TINY_POOL_BLOCK_SIZE", tiny_pool_block_size.c_str(), 1);
+    if (!FLAGS_ubsocket_tiny_buf_pool_depth.empty()) {
+        ::setenv("UBSOCKET_UMQ_TINY_POOL_BLOCK_COUNT", FLAGS_ubsocket_tiny_buf_pool_depth.c_str(), 1);
+    }
     if (!FLAGS_ubsocket_schedule_policy.empty()) {
         ::setenv("UBSOCKET_SCHEDULE_POLICY", FLAGS_ubsocket_schedule_policy.c_str(), 1);
     }
@@ -262,12 +281,6 @@ static void SetUBSocketEnv() {
     }
     if (!FLAGS_ubsocket_use_polling.empty()) {
         ::setenv("UBSOCKET_USE_POLLING", FLAGS_ubsocket_use_polling.c_str(), 1);
-    }
-    if (!FLAGS_ubsocket_brpc_alloc_sym.empty()) {
-        ::setenv("UBSOCKET_BRPC_ALLOC_SYM", FLAGS_ubsocket_brpc_alloc_sym.c_str(), 1);
-    }
-    if (!FLAGS_ubsocket_brpc_dealloc_sym.empty()) {
-        ::setenv("UBSOCKET_BRPC_DEALLOC_SYM", FLAGS_ubsocket_brpc_dealloc_sym.c_str(), 1);
     }
     if (!FLAGS_ubsocket_adpt_stats.empty()) {
         ::setenv("UBSOCKET_STATS_CLI", FLAGS_ubsocket_adpt_stats.c_str(), 1);
@@ -340,9 +353,6 @@ static void SetUBSocketEnv() {
     }
 	if (!FLAGS_ubsocket_ub_epoll_enable.empty()) {
 		::setenv("UBSOCKET_UB_EPOLL_ENABLE", FLAGS_ubsocket_ub_epoll_enable.c_str(), 1);
-	}
-    if (!FLAGS_ubsocket_use_brpc_zcopy.empty()) {
-		::setenv("UBSOCKET_USE_BRPC_ZCOPY", FLAGS_ubsocket_use_brpc_zcopy.c_str(), 1);
 	}
     if (!FLAGS_ubsocket_flow_control_enable.empty()) {
         ::setenv("UBSOCKET_FLOW_CONTROL_ENABLE", FLAGS_ubsocket_flow_control_enable.c_str(), 1);

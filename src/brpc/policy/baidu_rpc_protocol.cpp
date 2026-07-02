@@ -81,16 +81,20 @@ inline void PackRpcHeader(char* rpc_header, uint32_t meta_size, int payload_size
         .pack32(meta_size);
 }
 
+#ifdef BRPC_WITH_URMA
 static inline butil::IOBuf* SelectIOBuf(bool use_ub, butil::IOBuf* buf,
                                  butil::UBIOBuf* ub_buf) {
     return use_ub ? static_cast<butil::IOBuf*>(ub_buf) : buf;
 }
+#endif
 
-static inline bool SerializeToIOBuf(Serializer& serializer, butil::IOBuf* out) {
+static inline bool SerializeToIOBuf(Serializer& serializer, butil::IOBuf* out, uint32_t block_size) {
+#ifdef BRPC_WITH_URMA
     if (out->use_ub()) {
-        butil::UBIOBufAsZeroCopyOutputStream stream(static_cast<butil::UBIOBuf*>(out));
+        butil::UBIOBufAsZeroCopyOutputStream stream(static_cast<butil::UBIOBuf*>(out), block_size);
         return serializer.SerializeTo(&stream);
     }
+#endif
     butil::IOBufAsZeroCopyOutputStream stream(out);
     return serializer.SerializeTo(&stream);
 }
@@ -103,14 +107,29 @@ static inline void SerializeCachedMetaToOutputStream(const RpcMeta& meta,
     CHECK(!coded_out.HadError());
 }
 
-static inline void SerializeCachedMetaToIOBuf(const RpcMeta& meta, butil::IOBuf* out) {
+static inline void SerializeCachedMetaToIOBuf(const RpcMeta& meta, butil::IOBuf* out,
+                                              uint32_t meta_size) {
+#ifdef BRPC_WITH_URMA
     if (out->use_ub()) {
-        butil::UBIOBufAsZeroCopyOutputStream buf_stream(static_cast<butil::UBIOBuf*>(out));
+        butil::UBIOBufAsZeroCopyOutputStream buf_stream(static_cast<butil::UBIOBuf*>(out),
+                                                        meta_size);
         SerializeCachedMetaToOutputStream(meta, &buf_stream);
-    } else {
-        butil::IOBufAsZeroCopyOutputStream buf_stream(out);
-        SerializeCachedMetaToOutputStream(meta, &buf_stream);
+        return;
     }
+#endif
+    butil::IOBufAsZeroCopyOutputStream buf_stream(out);
+    SerializeCachedMetaToOutputStream(meta, &buf_stream);
+}
+
+static inline int AppendRpcHeaderAndMeta(butil::IOBuf* out, const void* data,
+                                         size_t size, uint32_t meta_size) {
+#ifdef BRPC_WITH_URMA
+    if (out->use_ub()) {
+        return static_cast<butil::UBIOBuf*>(out)->append_to_tiny_pool_with_fallback(
+            data, size, meta_size);
+    }
+#endif
+    return out->append(data, size);
 }
 
 static void SerializeRpcHeaderAndMeta(
@@ -123,12 +142,13 @@ static void SerializeRpcHeaderAndMeta(
         ::google::protobuf::io::CodedOutputStream coded_out(&arr_out);
         meta.SerializeWithCachedSizes(&coded_out); // not calling ByteSize again
         CHECK(!coded_out.HadError());
-        CHECK_EQ(0, out->append(header_and_meta, sizeof(header_and_meta)));
+        CHECK_EQ(0, AppendRpcHeaderAndMeta(out, header_and_meta,
+                                           sizeof(header_and_meta), meta_size + payload_size));
     } else {
         char header[12];
         PackRpcHeader(header, meta_size, payload_size);
-        CHECK_EQ(0, out->append(header, sizeof(header)));
-        SerializeCachedMetaToIOBuf(meta, out);
+        CHECK_EQ(0, AppendRpcHeaderAndMeta(out, header, sizeof(header), meta_size + payload_size));
+        SerializeCachedMetaToIOBuf(meta, out, meta_size + payload_size);
     }
 }
 
@@ -179,10 +199,10 @@ bool SerializeRpcMessage(const google::protobuf::Message& message,
                          Controller& cntl, ContentType content_type,
                          CompressType compress_type, ChecksumType checksum_type,
                          butil::IOBuf* buf) {
-    auto serialize = [&](Serializer& serializer) -> bool {
+    auto serialize = [&](Serializer& serializer, uint32_t block_size) -> bool {
         bool ok;
         if (COMPRESS_TYPE_NONE == compress_type) {
-            ok = SerializeToIOBuf(serializer, buf);
+            ok = SerializeToIOBuf(serializer, buf, block_size);
         } else {
             const CompressHandler* handler = FindCompressHandler(compress_type);
             if (NULL == handler) {
@@ -196,10 +216,22 @@ bool SerializeRpcMessage(const google::protobuf::Message& message,
     };
 
     if (CONTENT_TYPE_PB == content_type) {
+#if BRPC_WITH_URMA
+        if (buf->use_ub()) {
+            Serializer serializer([&message](google::protobuf::io::ZeroCopyOutputStream* output) -> bool {
+                ::google::protobuf::io::CodedOutputStream coded_out(output);
+                message.SerializeWithCachedSizes(&coded_out);
+                return !coded_out.HadError();
+            });
+            const size_t message_size = message.ByteSizeLong();
+            const uint32_t block_size = message_size > 0xFFFFFFFFULL ? 0 : (uint32_t)message_size;
+            return serialize(serializer, block_size);
+        }
+#endif
         Serializer serializer([&message](google::protobuf::io::ZeroCopyOutputStream* output) -> bool {
             return message.SerializeToZeroCopyStream(output);
         });
-        return serialize(serializer);
+        return serialize(serializer, 0);
     } else if (CONTENT_TYPE_JSON == content_type) {
         Serializer serializer([&message, &cntl](google::protobuf::io::ZeroCopyOutputStream* output) -> bool {
             json2pb::Pb2JsonOptions options;
@@ -219,7 +251,7 @@ bool SerializeRpcMessage(const google::protobuf::Message& message,
             }
             return ok;
         });
-        return serialize(serializer);
+        return serialize(serializer, 0);
     } else if (CONTENT_TYPE_PROTO_JSON == content_type) {
         Serializer serializer([&message, &cntl](google::protobuf::io::ZeroCopyOutputStream* output) -> bool {
             json2pb::Pb2ProtoJsonOptions options;
@@ -234,12 +266,12 @@ bool SerializeRpcMessage(const google::protobuf::Message& message,
             }
             return ok;
         });
-        return serialize(serializer);
+        return serialize(serializer, 0);
     } else if (CONTENT_TYPE_PROTO_TEXT == content_type) {
         Serializer serializer([&message](google::protobuf::io::ZeroCopyOutputStream* output) -> bool {
             return google::protobuf::TextFormat::Print(message, output);
         });
-        return serialize(serializer);
+        return serialize(serializer, 0);
     }
     return false;
 }
@@ -343,10 +375,14 @@ void SendRpcResponse(int64_t correlation_id, Controller* cntl,
         return;
     }
     bool append_body = false;
-    const bool use_ub = sock->use_ub();
     butil::IOBuf res_body;
+#ifdef BRPC_WITH_URMA
+    const bool use_ub = sock->use_ub();
     butil::UBIOBuf ub_res_body;
     butil::IOBuf* res_body_ptr = SelectIOBuf(use_ub, &res_body, &ub_res_body);
+#else
+    butil::IOBuf* res_body_ptr = &res_body;
+#endif
     // `res' can be NULL here, in which case we don't serialize it
     // If user calls `SetFailed' on Controller, we don't serialize
     // response either
@@ -418,8 +454,12 @@ void SendRpcResponse(int64_t correlation_id, Controller* cntl,
     }
 
     butil::IOBuf res_buf;
+#ifdef BRPC_WITH_URMA
     butil::UBIOBuf ub_res_buf;
     butil::IOBuf* res_buf_ptr = SelectIOBuf(use_ub, &res_buf, &ub_res_buf);
+#else
+    butil::IOBuf* res_buf_ptr = &res_buf;
+#endif
     SerializeRpcHeaderAndMeta(res_buf_ptr, meta, res_size + attached_size);
     if (append_body) {
         res_buf_ptr->append(res_body_ptr->movable());
@@ -936,8 +976,12 @@ bool VerifyRpcRequest(const InputMessageBase* msg_base) {
         response_meta.mutable_response()->mutable_error_text()->append(user_error_text);
     }
     butil::IOBuf res_buf;
+#ifdef BRPC_WITH_URMA
     butil::UBIOBuf ub_res_buf;
     butil::IOBuf* res_buf_ptr = SelectIOBuf(socket->use_ub(), &res_buf, &ub_res_buf);
+#else
+    butil::IOBuf* res_buf_ptr = &res_buf;
+#endif
     SerializeRpcHeaderAndMeta(res_buf_ptr, response_meta, 0);
     Socket::WriteOptions opt;
     opt.ignore_eovercrowded = true;

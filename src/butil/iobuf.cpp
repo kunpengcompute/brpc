@@ -183,7 +183,10 @@ void reset_blockmem_allocate_and_deallocate() {
     remove_tls_block_chain();
     blockmem_allocate = ::malloc;
     blockmem_deallocate = ::free;
+#if BRPC_WITH_URMA
     ubiobuf::remove_tls_ub_block_chain();
+    ubiobuf::remove_tls_tiny_pool_block_chain();
+#endif
 }
 
 butil::static_atomic<size_t> g_nblock = BUTIL_STATIC_ATOMIC_INIT(0);

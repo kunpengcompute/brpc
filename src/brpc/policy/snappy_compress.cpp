@@ -30,10 +30,12 @@ namespace {
 
 bool SnappyCompressToIOBuf(const butil::IOBuf& in, butil::IOBuf* out) {
     butil::IOBufAsSnappySource source(in);
+#if BRPC_WITH_URMA
     if (out->use_ub()) {
         butil::UBIOBufAsSnappySink sink(*static_cast<butil::UBIOBuf*>(out));
         return butil::snappy::Compress(&source, &sink);
     }
+#endif
     butil::IOBufAsSnappySink sink(*out);
     return butil::snappy::Compress(&source, &sink);
 }

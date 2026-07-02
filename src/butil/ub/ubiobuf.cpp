@@ -15,23 +15,42 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#if BRPC_WITH_URMA
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
-#include <stdexcept>                       // std::invalid_argument
 #include "butil/logging.h"
 #include "butil/ub/ubiobuf.h"
 #include "butil/fd_guard.h"                 // butil::fd_guard
-#ifdef BRPC_WITH_URMA
-#include "include/ubsocket_def.h"
-#include "include/ubsocket.h"
-#endif
+#include "butil/reloadable_flags.h"
+#include "ubsocket.h"
 
 namespace brpc {
     DECLARE_string(ubsocket_block_type);
+    DECLARE_bool(ubsocket_tiny_pool_enable);
+    DECLARE_uint32(ubsocket_tiny_pool_block_size);
 } // namespace brpc
 
 namespace butil {
-using brpc::FLAGS_ubsocket_block_type;   
+
+static const size_t DEFAULT_TINY_POOL_BLOCK_SIZE = 1024;
+static const size_t DEFAULT_TINY_POOL_BLOCK_PAYLOAD_CAP = DEFAULT_TINY_POOL_BLOCK_SIZE - sizeof(IOBuf::Block);
+static const uint32_t MAX_TINY_POOL_THRESHOLD = 8192;
+
+static bool validate_ubiobuf_tiny_pool_threshold(const char*, uint32_t value) {
+    if (value > MAX_TINY_POOL_THRESHOLD) {
+        LOG(ERROR) << "Invalid ubiobuf_tiny_pool_threshold=" << value
+                   << ", must be <= " << MAX_TINY_POOL_THRESHOLD;
+        return false;
+    }
+    return true;
+}
+
+DEFINE_bool(ubiobuf_select_tiny_pool_on_append, true,
+            "Select tiny pool during append instead of normalize. Disabled by default to keep current behavior.");
+DEFINE_uint32(ubiobuf_tiny_pool_threshold, DEFAULT_TINY_POOL_BLOCK_PAYLOAD_CAP,
+              "Buf size not greater than threshold will use buf of tiny pool.");
+BUTIL_VALIDATE_GFLAG(ubiobuf_tiny_pool_threshold, validate_ubiobuf_tiny_pool_threshold);
 
 const UBIOBuf::Area UBIOBuf::INVALID_AREA;
 
@@ -55,36 +74,57 @@ struct TLSData {
 };
 
 static __thread TLSData g_ub_data = { NULL, 0, false };
+static __thread TLSData g_tiny_pool_data = { NULL, 0, false };
 
 void* ub_blockmem_allocate(size_t size) {
-#if BRPC_WITH_URMA
-    return ubsocket_iobuf_allocate(size);
-#else
-    (void)size;
-    return NULL;
-#endif
+    ubs_iobuf_alloc_option_t option = {};
+    option.flag = UBS_IOBUF_ALLOC_FLAG_POOL_TYPE;
+    option.pool_type = UBS_IOBUF_POOL_NORMAL;
+    return ubsocket_iobuf_allocate(size, &option);
 }
 
 void ub_blockmem_deallocate(void* p) {
-#if BRPC_WITH_URMA
     ubsocket_iobuf_deallocate(p);
-#else
-    (void)p;
-#endif
+}
+
+void* default_escape_blockmem_allocate(size_t size) {
+    return malloc(size);
+}
+
+void default_escape_blockmem_deallocate(void* p) {
+    free(p);
+}
+
+void* default_tiny_pool_blockmem_allocate(size_t size) {
+    ubs_iobuf_alloc_option_t option = {};
+    option.flag = UBS_IOBUF_ALLOC_FLAG_POOL_TYPE;
+    option.pool_type = UBS_IOBUF_POOL_TINY;
+    return ubsocket_iobuf_allocate(size, &option);
+}
+
+void default_tiny_pool_blockmem_deallocate(void* p) {
+    ubsocket_iobuf_deallocate(p);
 }
 
 void* (*blockmem_allocate)(size_t) = ub_blockmem_allocate;
 void (*blockmem_deallocate)(void*) = ub_blockmem_deallocate;
+void* (*escape_blockmem_allocate)(size_t) = default_escape_blockmem_allocate;
+void (*escape_blockmem_deallocate)(void*) = default_escape_blockmem_deallocate;
+void* (*tiny_pool_blockmem_allocate)(size_t) = default_tiny_pool_blockmem_allocate;
+void (*tiny_pool_blockmem_deallocate)(void*) = default_tiny_pool_blockmem_deallocate;
 
 static butil::static_atomic<size_t> g_ub_nblock = BUTIL_STATIC_ATOMIC_INIT(0);
 static butil::static_atomic<size_t> g_ub_blockmem = BUTIL_STATIC_ATOMIC_INIT(0);
 static butil::static_atomic<size_t> g_num_hit_ub_threshold = BUTIL_STATIC_ATOMIC_INIT(0);
 
 void remove_tls_ub_block_chain();
+void remove_tls_tiny_pool_block_chain();
 
 TLSData* get_g_ub_data() { return &g_ub_data; }
 IOBuf::Block* get_ub_block_head() { return g_ub_data.block_head; }
 int get_ub_block_count() { return g_ub_data.num_blocks; }
+IOBuf::Block* get_tiny_pool_block_head() { return g_tiny_pool_data.block_head; }
+int get_tiny_pool_block_count() { return g_tiny_pool_data.num_blocks; }
 
 void inc_g_nblock() {
     g_ub_nblock.fetch_add(1, butil::memory_order_relaxed);
@@ -127,22 +167,43 @@ size_t num_hit_ub_threshold() {
     return g_num_hit_ub_threshold.load(butil::memory_order_relaxed);
 }
 
-IOBuf::Block* create_ub_block(const size_t block_size) {
+IOBuf::Block* create_ub_block(const size_t block_size, bool use_tiny_pool, bool allow_escape) {
     if (block_size > 0xFFFFFFFFULL) {
         LOG(FATAL) << "block_size=" << block_size << " is too large";
         return NULL;
     }
-    char* mem = (char*)blockmem_allocate(block_size);
+    uint16_t flags = IOBUF_BLOCK_FLAGS_UB;
+    char* mem = NULL;
+    if (use_tiny_pool) {
+        mem = (char*)tiny_pool_blockmem_allocate(block_size);
+        flags |= IOBUF_BLOCK_FLAGS_UB_TINY_POOL;
+    } else {
+        mem = (char*)blockmem_allocate(block_size);
+    }
+    if (mem == NULL && allow_escape) {
+        mem = (char*)escape_blockmem_allocate(block_size);
+        flags = IOBUF_BLOCK_FLAGS_UB | IOBUF_BLOCK_FLAGS_UB_ESCAPE;
+    }
     if (mem == NULL) {
         return NULL;
     }
     return new (mem) IOBuf::Block(mem + sizeof(IOBuf::Block),
                                   block_size - sizeof(IOBuf::Block),
-                                  IOBUF_BLOCK_FLAGS_UB);
+                                  flags);
 }
 
-IOBuf::Block* create_ub_block() {
-    return create_ub_block(UBIOBuf::get_block_size());
+IOBuf::Block* create_ub_block_with_fallback() {
+    return create_ub_block(UBIOBuf::get_block_size(), false, true);
+}
+
+IOBuf::Block* create_tiny_ub_block() {
+    return create_ub_block(brpc::FLAGS_ubsocket_tiny_pool_block_size, true, false);
+}
+
+IOBuf::Block* create_tiny_ub_block_with_fallback() {
+    IOBuf::Block* b = create_tiny_ub_block();
+    // tiny block will fallback to normal or escape buf if b == NULL
+    return b ? b : create_ub_block_with_fallback();
 }
 
 void release_tls_ub_block(IOBuf::Block* b) {
@@ -166,8 +227,47 @@ void release_tls_ub_block(IOBuf::Block* b) {
     }
 }
 
+void release_tls_tiny_pool_block(IOBuf::Block* b) {
+    if (!b) {
+        return;
+    }
+    TLSData& ub_data = g_tiny_pool_data;
+    if (b->full()) {
+        b->dec_ref();
+    } else if (ub_data.num_blocks >= max_blocks_per_thread()) {
+        b->dec_ref();
+        inc_g_num_hit_ub_threshold();
+    } else {
+        b->u.portal_next = ub_data.block_head;
+        ub_data.block_head = b;
+        ++ub_data.num_blocks;
+        if (!ub_data.registered) {
+            ub_data.registered = true;
+            butil::thread_atexit(remove_tls_tiny_pool_block_chain);
+        }
+    }
+}
+
 void remove_tls_ub_block_chain() {
     TLSData& ub_data = g_ub_data;
+    IOBuf::Block* b = ub_data.block_head;
+    if (!b) {
+        return;
+    }
+    ub_data.block_head = NULL;
+    int n = 0;
+    do {
+        IOBuf::Block* const saved_next = b->u.portal_next;
+        b->dec_ref();
+        b = saved_next;
+        ++n;
+    } while (b);
+    CHECK_EQ(n, ub_data.num_blocks);
+    ub_data.num_blocks = 0;
+}
+
+void remove_tls_tiny_pool_block_chain() {
+    TLSData& ub_data = g_tiny_pool_data;
     IOBuf::Block* b = ub_data.block_head;
     if (!b) {
         return;
@@ -204,7 +304,64 @@ IOBuf::Block* share_tls_ub_block() {
         butil::thread_atexit(remove_tls_ub_block_chain);
     }
     if (!new_block) {
-        new_block = create_ub_block();
+        new_block = create_ub_block_with_fallback();
+        if (new_block) {
+            ++ub_data.num_blocks;
+        }
+    }
+    ub_data.block_head = new_block;
+    return new_block;
+}
+
+static inline bool is_escape_ub_block(IOBuf::Block* b) {
+    return b && (b->flags & IOBUF_BLOCK_FLAGS_UB_ESCAPE);
+}
+
+IOBuf::Block* share_tls_registered_ub_block() {
+    TLSData& ub_data = g_ub_data;
+    IOBuf::Block* new_block = ub_data.block_head;
+    while (new_block && (new_block->full() || is_escape_ub_block(new_block))) {
+        IOBuf::Block* const saved_next = new_block->u.portal_next;
+        new_block->u.portal_next = NULL;
+        new_block->dec_ref();
+        --ub_data.num_blocks;
+        new_block = saved_next;
+    }
+    if (!new_block && !ub_data.registered) {
+        ub_data.registered = true;
+        butil::thread_atexit(remove_tls_ub_block_chain);
+    }
+    if (!new_block) {
+        new_block = create_ub_block(UBIOBuf::get_block_size(), false, false);
+        if (new_block) {
+            ++ub_data.num_blocks;
+        }
+    }
+    ub_data.block_head = new_block;
+    return new_block;
+}
+
+IOBuf::Block* share_tls_tiny_pool_block() {
+    TLSData& ub_data = g_tiny_pool_data;
+    IOBuf::Block* const b = ub_data.block_head;
+    if (b != NULL && !b->full()) {
+        return b;
+    }
+    IOBuf::Block* new_block = NULL;
+    if (b) {
+        new_block = b;
+        while (new_block && new_block->full()) {
+            IOBuf::Block* const saved_next = new_block->u.portal_next;
+            new_block->dec_ref();
+            --ub_data.num_blocks;
+            new_block = saved_next;
+        }
+    } else if (!ub_data.registered) {
+        ub_data.registered = true;
+        butil::thread_atexit(remove_tls_tiny_pool_block_chain);
+    }
+    if (!new_block) {
+        new_block = create_tiny_ub_block();
         if (new_block) {
             ++ub_data.num_blocks;
         }
@@ -247,11 +404,46 @@ void release_tls_ub_block_chain(IOBuf::Block* b) {
     }
 }
 
+void release_tls_tiny_pool_block_chain(IOBuf::Block* b) {
+    TLSData& ub_data = g_tiny_pool_data;
+    size_t n = 0;
+    if (ub_data.num_blocks >= max_blocks_per_thread()) {
+        do {
+            ++n;
+            IOBuf::Block* const saved_next = b->u.portal_next;
+            b->dec_ref();
+            b = saved_next;
+        } while (b);
+        inc_g_num_hit_ub_threshold();
+        return;
+    }
+    IOBuf::Block* first_b = b;
+    IOBuf::Block* last_b = NULL;
+    do {
+        ++n;
+        CHECK(!b->full());
+        CHECK((b->flags & (IOBUF_BLOCK_FLAGS_UB | IOBUF_BLOCK_FLAGS_UB_TINY_POOL)) ==
+              (IOBUF_BLOCK_FLAGS_UB | IOBUF_BLOCK_FLAGS_UB_TINY_POOL));
+        if (b->u.portal_next == NULL) {
+            last_b = b;
+            break;
+        }
+        b = b->u.portal_next;
+    } while (true);
+    last_b->u.portal_next = ub_data.block_head;
+    ub_data.block_head = first_b;
+    ub_data.num_blocks += n;
+    if (!ub_data.registered) {
+        ub_data.registered = true;
+        butil::thread_atexit(remove_tls_tiny_pool_block_chain);
+    }
+}
+
 IOBuf::Block* acquire_tls_ub_block() {
     TLSData& ub_data = g_ub_data;
     IOBuf::Block* b = ub_data.block_head;
     if (!b) {
-        return create_ub_block();
+        return create_ub_block_with_fallback();
     }
     while (b->full()) {
         IOBuf::Block* const saved_next = b->u.portal_next;
@@ -260,7 +452,29 @@ IOBuf::Block* acquire_tls_ub_block() {
         --ub_data.num_blocks;
         b = saved_next;
         if (!b) {
-            return create_ub_block();
+            return create_ub_block_with_fallback();
+        }
+    }
+    ub_data.block_head = b->u.portal_next;
+    --ub_data.num_blocks;
+    b->u.portal_next = NULL;
+    return b;
+}
+
+IOBuf::Block* acquire_tls_tiny_ub_block() {
+    TLSData& ub_data = g_tiny_pool_data;
+    IOBuf::Block* b = ub_data.block_head;
+    if (!b) {
+        return create_tiny_ub_block_with_fallback();
+    }
+    while (b->full()) {
+        IOBuf::Block* const saved_next = b->u.portal_next;
+        b->dec_ref();
+        ub_data.block_head = saved_next;
+        --ub_data.num_blocks;
+        b = saved_next;
+        if (!b) {
+            return create_tiny_ub_block_with_fallback();
         }
     }
     ub_data.block_head = b->u.portal_next;
@@ -272,6 +486,23 @@ IOBuf::Block* acquire_tls_ub_block() {
 static inline void* cp(void *__restrict dest, const void *__restrict src, size_t n) {
     // memcpy in gcc 4.8 seems to be faster enough.
     return memcpy(dest, src, n);
+}
+
+static inline bool select_tiny_pool(size_t count)
+{
+    return brpc::FLAGS_ubsocket_tiny_pool_enable &&
+           FLAGS_ubiobuf_select_tiny_pool_on_append &&
+           count <= FLAGS_ubiobuf_tiny_pool_threshold;
+}
+
+static inline IOBuf::Block* share_tls_append_block_with_fallback(size_t count)
+{
+    if (!select_tiny_pool(count)) {
+        return share_tls_ub_block();
+    }
+    IOBuf::Block* b = share_tls_tiny_pool_block();
+    // tiny block will fallback to normal or escape buf if b == NULL
+    return b ? b : share_tls_ub_block();
 }
 
 }  // namespace ubiobuf
@@ -299,6 +530,86 @@ inline UBIOBuf::Area make_ub_area(uint32_t ref_index, uint32_t ref_offset,
 }
 
 }  // namespace
+
+int UBIOBuf::append_to_tiny_pool(UBIOBuf* out, const void* data, size_t count) {
+    if (BAIDU_UNLIKELY(!data)) {
+        return -1;
+    }
+    size_t total_nc = 0;
+    while (total_nc < count) {
+        IOBuf::Block* b = ubiobuf::share_tls_tiny_pool_block();
+        if (BAIDU_UNLIKELY(!b)) {
+            return -1;
+        }
+        const size_t nc = std::min(count - total_nc, b->left_space());
+        ubiobuf::cp(b->data + b->size, (char*)data + total_nc, nc);
+
+        const IOBuf::BlockRef r = { (uint32_t)b->size, (uint32_t)nc, b };
+        out->_push_back_ref(r);
+        b->size += nc;
+        total_nc += nc;
+    }
+    return 0;
+}
+
+int UBIOBuf::append_to_registered_ub_pool(UBIOBuf* out, const void* data, size_t count, bool use_tiny_pool) {
+    if (BAIDU_UNLIKELY(!data)) {
+        return -1;
+    }
+    size_t total_nc = 0;
+    while (total_nc < count) {
+        IOBuf::Block* b = use_tiny_pool ?
+                          ubiobuf::share_tls_tiny_pool_block() :
+                          ubiobuf::share_tls_registered_ub_block();
+        if (BAIDU_UNLIKELY(!b)) {
+            return -1;
+        }
+        const size_t nc = std::min(count - total_nc, b->left_space());
+        ubiobuf::cp(b->data + b->size, (char*)data + total_nc, nc);
+
+        const IOBuf::BlockRef r = { (uint32_t)b->size, (uint32_t)nc, b };
+        out->_push_back_ref(r);
+        b->size += nc;
+        total_nc += nc;
+    }
+    return 0;
+}
+
+static bool ref_is_tiny_pool(const IOBuf::BlockRef& r) {
+    return (r.block->flags & (IOBUF_BLOCK_FLAGS_UB | IOBUF_BLOCK_FLAGS_UB_TINY_POOL)) ==
+           (IOBUF_BLOCK_FLAGS_UB | IOBUF_BLOCK_FLAGS_UB_TINY_POOL);
+}
+
+static bool ref_is_registered_ub(const IOBuf::BlockRef& r) {
+    if ((r.block->flags & IOBUF_BLOCK_FLAGS_UB) == 0) {
+        return false;
+    }
+    return (r.block->flags & IOBUF_BLOCK_FLAGS_UB_ESCAPE) == 0;
+}
+
+int UBIOBuf::normalize_to_tiny_pool(IOBuf* buf) {
+    int copied_blocks = 0;
+    const size_t nref = buf->_ref_num();
+    for (size_t i = 0; i < nref; ++i) {
+        const IOBuf::BlockRef& r = buf->_ref_at(i);
+        if (!ref_is_tiny_pool(r)) {
+            ++copied_blocks;
+        }
+    }
+    if (copied_blocks == 0) {
+        return 0;
+    }
+
+    UBIOBuf normalized;
+    for (size_t i = 0; i < nref; ++i) {
+        const IOBuf::BlockRef& r = buf->_ref_at(i);
+        if (append_to_tiny_pool(&normalized, r.block->data + r.offset, r.length) != 0) {
+            return -1;
+        }
+    }
+    buf->swap(normalized);
+    return copied_blocks;
+}
 
 void UBIOBuf::operator=(const IOBuf& rhs) {
     if (this == &rhs) {
@@ -376,6 +687,27 @@ int UBIOBuf::append(void const* data, size_t count) {
     size_t total_nc = 0;
     while (total_nc < count) {
         Block* b = ubiobuf::share_tls_ub_block();
+        if (BAIDU_UNLIKELY(!b)) {
+            return -1;
+        }
+        const size_t nc = std::min(count - total_nc, b->left_space());
+        ubiobuf::cp(b->data + b->size, (char*)data + total_nc, nc);
+
+        const BlockRef r = { (uint32_t)b->size, (uint32_t)nc, b };
+        _push_back_ref(r);
+        b->size += nc;
+        total_nc += nc;
+    }
+    return 0;
+}
+
+int UBIOBuf::append_to_tiny_pool_with_fallback(void const* data, size_t count, size_t block_size) {
+    if (BAIDU_UNLIKELY(!data)) {
+        return -1;
+    }
+    size_t total_nc = 0;
+    while (total_nc < count) {
+        Block* b = ubiobuf::share_tls_append_block_with_fallback(block_size);
         if (BAIDU_UNLIKELY(!b)) {
             return -1;
         }
@@ -501,28 +833,31 @@ int UBIOBuf::normalize(IOBuf* buf) {
         return 0;
     }
 
+    if (brpc::FLAGS_ubsocket_tiny_pool_enable && !FLAGS_ubiobuf_select_tiny_pool_on_append &&
+        buf->length() <= FLAGS_ubiobuf_tiny_pool_threshold) {
+        return normalize_to_tiny_pool(buf);
+    }
+
     int copied_blocks = 0;
     const size_t nref = buf->_ref_num();
     for (size_t i = 0; i < nref; ++i) {
         const BlockRef& r = buf->_ref_at(i);
-        if (!(r.block->flags & IOBUF_BLOCK_FLAGS_UB)) {
+        if (!ref_is_registered_ub(r)) {
             ++copied_blocks;
         }
     }
     if (copied_blocks == 0) {
         return 0;
     }
-    LOG_EVERY_SECOND(WARNING)
-        << "Non-UB IOBuf block is written through UB socket, copied_blocks="
-        << copied_blocks << " data_size=" << buf->size();
 
     UBIOBuf normalized;
+    const bool use_tiny_pool = ubiobuf::select_tiny_pool(buf->length());
     for (size_t i = 0; i < nref; ++i) {
         const BlockRef& r = buf->_ref_at(i);
-        if (r.block->flags & IOBUF_BLOCK_FLAGS_UB) {
+        if (ref_is_registered_ub(r)) {
             normalized._push_back_ref(r);
         } else {
-            if (normalized.append(r.block->data + r.offset, r.length) != 0) {
+            if (append_to_registered_ub_pool(&normalized, r.block->data + r.offset, r.length, use_tiny_pool) != 0) {
                 return -1;
             }
         }
@@ -546,7 +881,6 @@ bool UBIOBuf::has_ub_block(const IOBuf* buf) {
 }
 
 size_t UBIOBuf::get_block_size() {
-#ifdef BRPC_WITH_URMA
     if (brpc::FLAGS_ubsocket_block_type == "tiny") {
         return 4UL * 1024;
     } else if (brpc::FLAGS_ubsocket_block_type == "default") {
@@ -557,13 +891,9 @@ size_t UBIOBuf::get_block_size() {
         return 32UL * 1024;
     } else if (brpc::FLAGS_ubsocket_block_type == "large") {
         return 64UL * 1024;
-    } else {
-        LOG(WARNING) << "Unknown ubsocket_block_type: " << brpc::FLAGS_ubsocket_block_type << ", use the default IOBuf BLOCK_SIZE";
-        return UBIOBuf::DEFAULT_BLOCK_SIZE;
     }
-#else
+    LOG(WARNING) << "Unknown ubsocket_block_type: " << brpc::FLAGS_ubsocket_block_type << ", use the default IOBuf BLOCK_SIZE";
     return UBIOBuf::DEFAULT_BLOCK_SIZE;
-#endif
 }
 
 UBIOBufAsZeroCopyOutputStream::UBIOBufAsZeroCopyOutputStream(UBIOBuf* buf)
@@ -579,9 +909,6 @@ UBIOBufAsZeroCopyOutputStream::UBIOBufAsZeroCopyOutputStream(
     , _block_size(block_size)
     , _cur_block(NULL)
     , _byte_count(0) {
-    if (_block_size <= offsetof(IOBuf::Block, data)) {
-        throw std::invalid_argument("block_size is too small");
-    }
 }
 
 UBIOBufAsZeroCopyOutputStream::~UBIOBufAsZeroCopyOutputStream() {
@@ -592,7 +919,10 @@ bool UBIOBufAsZeroCopyOutputStream::Next(void** data, int* size) {
     if (_cur_block == NULL || _cur_block->full()) {
         _release_block();
         if (_block_size > 0) {
-            _cur_block = ubiobuf::create_ub_block(_block_size);
+            const bool use_tiny_pool = ubiobuf::select_tiny_pool(_block_size);
+            _cur_block = use_tiny_pool ?
+                         ubiobuf::acquire_tls_tiny_ub_block() :
+                         ubiobuf::acquire_tls_ub_block();
         } else {
             _cur_block = ubiobuf::acquire_tls_ub_block();
         }
@@ -648,10 +978,7 @@ void UBIOBufAsZeroCopyOutputStream::BackUp(int count) {
             }
             _cur_block->size -= count;
             _byte_count -= count;
-            if (_block_size == 0) {
-                ubiobuf::release_tls_ub_block(_cur_block);
-                _cur_block = NULL;
-            }
+            _release_block();
             return;
         }
         _cur_block->size -= r.length;
@@ -671,10 +998,11 @@ int64_t UBIOBufAsZeroCopyOutputStream::ByteCount() const {
 }
 
 void UBIOBufAsZeroCopyOutputStream::_release_block() {
-    if (_block_size > 0) {
-        if (_cur_block) {
-            _cur_block->dec_ref();
-        }
+    if (_cur_block == NULL) {
+        return;
+    }
+    if (_cur_block->flags & IOBUF_BLOCK_FLAGS_UB_TINY_POOL) {
+        ubiobuf::release_tls_tiny_pool_block(_cur_block);
     } else {
         ubiobuf::release_tls_ub_block(_cur_block);
     }
@@ -779,3 +1107,4 @@ ssize_t IOPortal::ub_append_from_file_descriptor(
 }
 
 }  // namespace butil
+#endif

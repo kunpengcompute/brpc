@@ -206,7 +206,17 @@ public:
         if (attachment_size > 0) {
             _addr = malloc(attachment_size);
             butil::fast_rand_bytes(_addr, attachment_size);
-            _attachment.append(_addr, attachment_size);
+#ifdef BRPC_WITH_URMA
+            if (FLAGS_use_ub) {
+                butil::UBIOBuf attachment;
+                attachment.append(_addr, attachment_size);
+                _attachment.append(attachment.movable());
+            } else {
+#endif
+                _attachment.append(_addr, attachment_size);
+#ifdef BRPC_WITH_URMA
+            }
+#endif
         }
         _echo_attachment = echo_attachment;
     }

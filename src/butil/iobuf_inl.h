@@ -44,6 +44,8 @@ void SubmitIOBufSample(IOBuf::Block* block, int64_t ref);
 const uint16_t IOBUF_BLOCK_FLAGS_USER_DATA = 1 << 0;
 const uint16_t IOBUF_BLOCK_FLAGS_SAMPLED = 1 << 1;
 const uint16_t IOBUF_BLOCK_FLAGS_UB = 1 << 2;
+const uint16_t IOBUF_BLOCK_FLAGS_UB_TINY_POOL = 1 << 3;
+const uint16_t IOBUF_BLOCK_FLAGS_UB_ESCAPE = 1 << 4;
 
 inline ssize_t IOBuf::cut_into_file_descriptor(int fd, size_t size_hint) {
     return pcut_into_file_descriptor(fd, -1, size_hint);
@@ -478,6 +480,10 @@ void dec_g_blockmem();
 
 extern void* (*blockmem_allocate)(size_t);
 extern void  (*blockmem_deallocate)(void*);
+extern void* (*escape_blockmem_allocate)(size_t);
+extern void  (*escape_blockmem_deallocate)(void*);
+extern void* (*tiny_pool_blockmem_allocate)(size_t);
+extern void  (*tiny_pool_blockmem_deallocate)(void*);
 
 } // namespace ubiobuf
 
@@ -579,13 +585,23 @@ struct IOBuf::Block {
         if (nshared.fetch_sub(1, butil::memory_order_release) == 1) {
             butil::atomic_thread_fence(butil::memory_order_acquire);
             if (!is_user_data()) {
+#if BRPC_WITH_URMA
                 if (flags & IOBUF_BLOCK_FLAGS_UB) {
+                    const bool is_tiny_pool = (flags & IOBUF_BLOCK_FLAGS_UB_TINY_POOL);
+                    const bool is_escape = (flags & IOBUF_BLOCK_FLAGS_UB_ESCAPE);
                     ubiobuf::dec_g_nblock();
                     ubiobuf::dec_g_blockmem();
                     this->~Block();
-                    ubiobuf::blockmem_deallocate(this);
+                    if (is_tiny_pool) {
+                        ubiobuf::tiny_pool_blockmem_deallocate(this);
+                    } else if (is_escape) {
+                        ubiobuf::escape_blockmem_deallocate(this);
+                    } else {
+                        ubiobuf::blockmem_deallocate(this);
+                    }
                     return;
                 }
+#endif
                 iobuf::dec_g_nblock();
                 iobuf::dec_g_blockmem();
                 this->~Block();
