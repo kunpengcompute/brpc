@@ -1206,9 +1206,13 @@ void Controller::IssueRPC(int64_t start_realtime_us) {
     }
     // Make request
     butil::IOBuf packet;
+#ifdef BRPC_WITH_URMA
     butil::UBIOBuf ub_packet;
     butil::IOBuf* packet_ptr = _current_call.sending_sock->use_ub() ?
         static_cast<butil::IOBuf*>(&ub_packet) : &packet;
+#else
+    butil::IOBuf* packet_ptr = &packet;
+#endif
     SocketMessage* user_packet = NULL;
     _pack_request(packet_ptr, &user_packet, cid.value, _method, this,
                   _request_buf, using_auth);

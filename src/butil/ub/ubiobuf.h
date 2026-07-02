@@ -18,6 +18,8 @@
 #ifndef BUTIL_UBIOBUF_H
 #define BUTIL_UBIOBUF_H
 
+#ifdef BRPC_WITH_URMA
+
 #include "butil/iobuf.h"
 
 namespace butil {
@@ -41,6 +43,7 @@ public:
     void append(const Movable& other) override;
     int push_back(char c) override;
     int append(void const* data, size_t count) override;
+    int append_to_tiny_pool_with_fallback(void const* data, size_t count, size_t block_size);
     int appendv(const const_iovec vec[], size_t n) override;
     int appendv(const iovec* vec, size_t n) override
     { return appendv((const const_iovec*)vec, n); }
@@ -60,6 +63,11 @@ public:
     static int normalize(IOBuf* buf);
     static bool has_ub_block(const IOBuf* buf);
     static size_t get_block_size();
+
+private:
+    static int append_to_tiny_pool(UBIOBuf* out, const void* data, size_t len);
+    static int append_to_registered_ub_pool(UBIOBuf* out, const void* data, size_t len, bool use_tiny_pool);
+    static int normalize_to_tiny_pool(IOBuf* buf);
 };
 
 class UBIOBufAsZeroCopyOutputStream
@@ -108,10 +116,14 @@ size_t block_memory();
 size_t num_hit_ub_threshold();
 IOBuf::Block* get_ub_block_head();
 int get_ub_block_count();
+IOBuf::Block* get_tiny_pool_block_head();
+int get_tiny_pool_block_count();
 void remove_tls_ub_block_chain();
+void remove_tls_tiny_pool_block_chain();
 
 }  // namespace ubiobuf
 
 }  // namespace butil
 
+#endif
 #endif  // BUTIL_UBIOBUF_H

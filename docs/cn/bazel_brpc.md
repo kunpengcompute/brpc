@@ -44,6 +44,9 @@ ubsocket通过环境变量进行配置，在bRPC与ubsocket集成的过程中，
 |ubsocket_pool_initial_size|IO内存的总大小，单位MB|应用按需配置|200|否|
 |ubsocket_pool_max_size|单bRPC进程UB通信内存占用弹性扩容最大值，单位MB| [ubsocket_pool_initial_size + 64, 6144], 单次最小扩容大小为 64M，因此 ubsocket_pool_max_size - ubsocket_pool_initial_size >= 64M |2048|否|
 |ubsocket_buf_pool_depth|单bRPC进程线程内存池深度|应用按需配置|12000|否|
+|`ubsocket_tiny_pool_enable`|是否启用UMQ tiny pool|false, true|true|否|
+|`ubsocket_tiny_pool_block_size`|UMQ tiny pool块大小|512, 1024, 2048, 4096, 8192|1024|否|
+|`ubsocket_tiny_buf_pool_depth`|UMQ tiny pool块数量|正整数|8192|否|
 |ubsocket_schedule_policy|设置多平面负载分担策略|affinity_priority, affinity，rr|affinity_priority|否|
 |ubsocket_auto_fallback_tcp|	协议不匹配时是否自动降级为TCP|false：协议不匹配时不降级为TCP true：协议不匹配时自动降级为TCP|true|否|
 |ubsocket_trace_enable | 是否打开trace统计|false, true | true |否|
@@ -67,7 +70,6 @@ ubsocket通过环境变量进行配置，在bRPC与ubsocket集成的过程中，
 |`ubsocket_probe_time_ms` | ubsocket 探测间隔时间（毫秒） | [1, 360000] | 1000 | 否 |
 |`ubsocket_probe_batch` | ubsocket 每批次探测的 Socket 数量 | [1, 500] | 10 | 否 |
 |`ubsocket_ub_epoll_enable` | ubsocket 设置是否使用UB Epoll实现处理 | false: 使用原生Epoll，true: 使用UB Epoll | true | 否 |
-|`ubsocket_use_brpc_zcopy` | ubsocket 设置是否使用UB内存池使能免拷贝加速UB传输 | false: 关闭UB内存池加速（关闭后仅支持TCP传输），true: 使用UB内存池免拷贝加速UB传输 | true | 否 |
 |`ubsocket_ub_handshake_mode` | UB通信建链握手模式 | tfo, ub_sock_opt | ub_sock_opt | 否 |
 |`ubsocket_flow_control_enable` | 是否开启流控 | false, true | true | 否 |
 |`ubsocket_prof_enable` | 是否打开profiling打点功能  | false,true | false | 否 |
@@ -80,7 +82,8 @@ ubsocket通过环境变量进行配置，在bRPC与ubsocket集成的过程中，
 > 注意：
 >
 > 1. 为最大程度的兼容bPRC及gflags的使用习惯。新增的这些gflags配置项，均在bRPC的源码中指定了默认值。bRPC集成ubsocket的场景中，ubsocket自身的环境变量不再生效，以gflags的默认值或用户指定的gflags值为准。
-> 2. `ubsocket_ub_handshake_mode`参数不同值的使用限制如下:
+> 2. brpc保留`ubiobuf_tiny_pool_threshold`用于选择tiny pool，小包可由多个tiny block承载。brpc normal UB block申请失败时使用brpc侧malloc作为escape block，发送前由`UBIOBuf::normalize()`拷贝回已注册内存。UMQ tiny TLS深度不再作为brpc对外参数暴露。
+> 3. `ubsocket_ub_handshake_mode`参数不同值的使用限制如下:
      >     1. tfo: 需要运行OS使能TFO选项，参考[TFO选项开启配置](#451-tfo选项开启配置可选)
      >     2. ub_sock_opt: 需要内核支持，查询指令：`cat /boot/{当前内核版本} | grep "CONFIG_UB_SOCKET_HANDSHAKE=y"`
 

@@ -579,7 +579,6 @@ void Channel::CallMethod(const google::protobuf::MethodDescriptor* method,
     bool request_failed = false;
 #ifdef BRPC_WITH_URMA
     PROF_START(BRPC_SERIALIZE);
-#endif
     if (_options.use_ub) {
         butil::UBIOBuf request_buf;
         _serialize_request(&request_buf, cntl, request);
@@ -588,11 +587,11 @@ void Channel::CallMethod(const google::protobuf::MethodDescriptor* method,
             cntl->_request_buf.swap(request_buf);
         }
     } else {
+#endif
         _serialize_request(&cntl->_request_buf, cntl, request);
         request_failed = cntl->FailedInline();
-    }
-
 #ifdef BRPC_WITH_URMA
+    }
  	PROF_END(BRPC_SERIALIZE, true);
 #endif
     if (request_failed) {

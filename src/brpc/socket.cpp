@@ -27,6 +27,7 @@
 #endif
 #include <netinet/tcp.h>                         // getsockopt
 #include <gflags/gflags.h>
+#include "bthread/bthread.h"                     // bthread_usleep
 #include "bthread/unstable.h"                    // bthread_timer_del
 #include "butil/fd_utility.h"                     // make_non_blocking
 #include "butil/fd_guard.h"                       // fd_guard
@@ -310,12 +311,22 @@ bool Socket::CreatedByConnect() const {
 SocketMessage* const DUMMY_USER_MESSAGE = (SocketMessage*)0x1;
 const uint32_t MAX_PIPELINED_COUNT = 16384;
 
-static butil::Status NormalizeUbWriteData(butil::IOBuf* data) {
-    if (butil::UBIOBuf::normalize(data) < 0) {
-        return butil::Status(ENOMEM, "Fail to normalize write data to UBIOBuf");
+#if BRPC_WITH_URMA
+static butil::Status NormalizeUbWriteData(butil::IOBuf* data,
+                                          const timespec* abstime) {
+    const int64_t abstime_us = abstime == NULL ?
+        -1 : butil::timespec_to_microseconds(*abstime);
+    while (true) {
+        if (butil::UBIOBuf::normalize(data) >= 0) {
+            return butil::Status::OK();
+        }
+        if (abstime_us < 0 || butil::gettimeofday_us() >= abstime_us) {
+            return butil::Status(ENOMEM, "Fail to normalize write data to UBIOBuf");
+        }
+        bthread_usleep(1);
     }
-    return butil::Status::OK();
 }
+#endif
 
 static void WarnIfUbBlockOnTcpWrite(const Socket* s, const butil::IOBuf* data) {
     if (butil::UBIOBuf::has_ub_block(data)) {
@@ -379,6 +390,12 @@ struct BAIDU_CACHELINE_ALIGNMENT Socket::WriteRequest {
         }
         _pc_and_udmsg.set_ptr_and_extra(msg, pc);
     }
+#if BRPC_WITH_URMA
+    void set_normalize_abstime(const timespec* abstime) {
+        _normalize_abstime_us = abstime == NULL ?
+            -1 : butil::timespec_to_microseconds(*abstime);
+    }
+#endif
 
     bool reset_pipelined_count_and_user_message() {
         SocketMessage* msg = user_message();
@@ -403,6 +420,9 @@ private:
     PackedPtr<Socket> _socket_and_control_bits;
     // User message pointer, pipelined count auth flag.
     PackedPtr<SocketMessage> _pc_and_udmsg;
+#if BRPC_WITH_URMA
+    int64_t _normalize_abstime_us;
+#endif
 };
 
 void Socket::WriteRequest::Setup(Socket* s) {
@@ -418,8 +438,15 @@ void Socket::WriteRequest::Setup(Socket* s) {
                 return;
             }
         }
+#if BRPC_WITH_URMA
         if (s->_use_ub && msg != DUMMY_USER_MESSAGE) {
-            butil::Status st = NormalizeUbWriteData(&data);
+            timespec normalize_abstime;
+            const timespec* normalize_abstime_ptr = NULL;
+            if (_normalize_abstime_us >= 0) {
+                normalize_abstime = butil::microseconds_to_timespec(_normalize_abstime_us);
+                normalize_abstime_ptr = &normalize_abstime;
+            }
+            butil::Status st = NormalizeUbWriteData(&data, normalize_abstime_ptr);
             if (!st.ok()) {
                 data.clear();
                 bthread_id_error2(id_wait, st.error_code(), st.error_cstr());
@@ -428,6 +455,7 @@ void Socket::WriteRequest::Setup(Socket* s) {
         } else if (msg != DUMMY_USER_MESSAGE) {
             WarnIfUbBlockOnTcpWrite(s, &data);
         }
+#endif
         const int64_t before_write =
             s->_unwritten_bytes.fetch_add(data.size(), butil::memory_order_relaxed);
         if (before_write + (int64_t)data.size() >= FLAGS_socket_max_unwritten_bytes) {
@@ -1680,8 +1708,9 @@ int Socket::Write(butil::IOBuf* data, const WriteOptions* options_in) {
     }
 
     req->data.swap(*data);
+#if BRPC_WITH_URMA
     if (_use_ub) {
-        butil::Status st = NormalizeUbWriteData(&req->data);
+        butil::Status st = NormalizeUbWriteData(&req->data, opt.abstime);
         if (!st.ok()) {
             req->data.clear();
             butil::return_object(req);
@@ -1690,6 +1719,7 @@ int Socket::Write(butil::IOBuf* data, const WriteOptions* options_in) {
     } else {
         WarnIfUbBlockOnTcpWrite(this, &req->data);
     }
+#endif
     // Set `req->next' to UNCONNECTED so that the KeepWrite thread will
     // wait until it points to a valid WriteRequest or NULL.
     req->next = WriteRequest::UNCONNECTED;
@@ -1731,6 +1761,11 @@ int Socket::Write(SocketMessagePtr<>& msg, const WriteOptions* options_in) {
     // wait until it points to a valid WriteRequest or NULL.
     req->next = WriteRequest::UNCONNECTED;
     req->id_wait = opt.id_wait;
+#if BRPC_WITH_URMA
+    if (_use_ub) {
+        req->set_normalize_abstime(opt.abstime);
+    }
+#endif
     req->clear_and_set_control_bits(opt.notify_on_success, opt.shutdown_write);
     req->set_pipelined_count_and_user_message(
         opt.pipelined_count, msg.release(), opt.auth_flags);
@@ -2180,9 +2215,11 @@ ssize_t Socket::DoRead(size_t size_hint) {
             return -1;
         }
         CHECK(_rdma_state == RDMA_OFF);
+#if BRPC_WITH_URMA
         if (_use_ub) {
             return _read_buf.ub_append_from_file_descriptor(fd(), size_hint);
         }
+#endif
         return _read_buf.append_from_file_descriptor(fd(), size_hint);
     }
 
