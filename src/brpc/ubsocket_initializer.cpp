@@ -90,6 +90,7 @@ DEFINE_string(ubsocket_flow_control_enable, "true", "Whether to enable flow cont
 DEFINE_string(ubsocket_split_trace_enable, "false", "Enable ubsocket split trace (e.g., 'false', 'true')");
 DEFINE_string(ubsocket_split_trace_buf_cap, "65535", "Set ubsocket split trace buf capacity; default: 65535, the minimum value is 16384, the maximum value is 65536");
 DEFINE_string(ubsocket_split_trace_drain_interval_ms, "10", "Set ubsocket split trace buf log drain interval(ms), the minimum value is 1, the maximum value is 10000");
+DEFINE_string(ubsocket_split_trace_level, "all", "Set ubsocket split trace level, default: all, can set to 'ubsocket' 'umq' or 'ubsocket,umq'");
 DEFINE_string(ubsocket_tp_type, "single", "Ubsocket jetty tranport type; default: single (optional: single, pool)");
 DEFINE_string(ubsocket_tp_pool_size, "16", "Ubsocket jetty tranport pool size; the minimum value is 1, the maximum value is 1000");
 
@@ -377,6 +378,9 @@ static void SetUBSocketEnv() {
     }
     if (!FLAGS_ubsocket_split_trace_drain_interval_ms.empty()) {
         ::setenv("UBSOCKET_SPLIT_TRACE_DRAIN_INTERVAL_MS", FLAGS_ubsocket_split_trace_drain_interval_ms.c_str(), 1);
+    }
+    if (!FLAGS_ubsocket_split_trace_level.empty()) {
+        ::setenv("UBSOCKET_SPLIT_TRACE_LEVEL", FLAGS_ubsocket_split_trace_level.c_str(), 1);
     }
     if (!FLAGS_ubsocket_prof_dump_path.empty()) {
         ::setenv("UBSOCKET_PROF_DUMP_PATH", FLAGS_ubsocket_prof_dump_path.c_str(), 1);
