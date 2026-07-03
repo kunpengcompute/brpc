@@ -46,8 +46,6 @@ static bool validate_ubiobuf_tiny_pool_threshold(const char*, uint32_t value) {
     return true;
 }
 
-DEFINE_bool(ubiobuf_select_tiny_pool_on_append, true,
-            "Select tiny pool during append instead of normalize. Disabled by default to keep current behavior.");
 DEFINE_uint32(ubiobuf_tiny_pool_threshold, DEFAULT_TINY_POOL_BLOCK_PAYLOAD_CAP,
               "Buf size not greater than threshold will use buf of tiny pool.");
 BUTIL_VALIDATE_GFLAG(ubiobuf_tiny_pool_threshold, validate_ubiobuf_tiny_pool_threshold);
@@ -491,7 +489,6 @@ static inline void* cp(void *__restrict dest, const void *__restrict src, size_t
 static inline bool select_tiny_pool(size_t count)
 {
     return brpc::FLAGS_ubsocket_tiny_pool_enable &&
-           FLAGS_ubiobuf_select_tiny_pool_on_append &&
            count <= FLAGS_ubiobuf_tiny_pool_threshold;
 }
 
@@ -833,7 +830,7 @@ int UBIOBuf::normalize(IOBuf* buf) {
         return 0;
     }
 
-    if (brpc::FLAGS_ubsocket_tiny_pool_enable && !FLAGS_ubiobuf_select_tiny_pool_on_append &&
+    if (brpc::FLAGS_ubsocket_tiny_pool_enable &&
         buf->length() <= FLAGS_ubiobuf_tiny_pool_threshold) {
         return normalize_to_tiny_pool(buf);
     }

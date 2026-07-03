@@ -326,7 +326,6 @@ static butil::Status NormalizeUbWriteData(butil::IOBuf* data,
         bthread_usleep(1);
     }
 }
-#endif
 
 static void WarnIfUbBlockOnTcpWrite(const Socket* s, const butil::IOBuf* data) {
     if (butil::UBIOBuf::has_ub_block(data)) {
@@ -336,6 +335,7 @@ static void WarnIfUbBlockOnTcpWrite(const Socket* s, const butil::IOBuf* data) {
             << " data_size=" << data->size();
     }
 }
+#endif
 
 struct BAIDU_CACHELINE_ALIGNMENT Socket::WriteRequest {
     static WriteRequest* const UNCONNECTED;

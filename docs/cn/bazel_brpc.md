@@ -83,7 +83,8 @@ ubsocket通过环境变量进行配置，在bRPC与ubsocket集成的过程中，
 >
 > 1. 为最大程度的兼容bPRC及gflags的使用习惯。新增的这些gflags配置项，均在bRPC的源码中指定了默认值。bRPC集成ubsocket的场景中，ubsocket自身的环境变量不再生效，以gflags的默认值或用户指定的gflags值为准。
 > 2. brpc保留`ubiobuf_tiny_pool_threshold`用于选择tiny pool，小包可由多个tiny block承载。brpc normal UB block申请失败时使用brpc侧malloc作为escape block，发送前由`UBIOBuf::normalize()`拷贝回已注册内存。UMQ tiny TLS深度不再作为brpc对外参数暴露。
-> 3. `ubsocket_ub_handshake_mode`参数不同值的使用限制如下:
+> 3. `ubiobuf_tiny_pool_threshold`参数设定值应当小于等于`ubsocket_tiny_pool_block_size`，否则会导致额外tiny block分片，增大性能开销。
+> 4. `ubsocket_ub_handshake_mode`参数不同值的使用限制如下:
      >     1. tfo: 需要运行OS使能TFO选项，参考[TFO选项开启配置](#451-tfo选项开启配置可选)
      >     2. ub_sock_opt: 需要内核支持，查询指令：`cat /boot/{当前内核版本} | grep "CONFIG_UB_SOCKET_HANDSHAKE=y"`
 
