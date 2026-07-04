@@ -93,6 +93,7 @@ DEFINE_string(ubsocket_split_trace_drain_interval_ms, "10", "Set ubsocket split 
 DEFINE_string(ubsocket_split_trace_level, "all", "Set ubsocket split trace level, default: all, can set to 'ubsocket' 'umq' or 'ubsocket,umq'");
 DEFINE_string(ubsocket_tp_type, "single", "Ubsocket jetty tranport type; default: single (optional: single, pool)");
 DEFINE_string(ubsocket_tp_pool_size, "16", "Ubsocket jetty tranport pool size; the minimum value is 1, the maximum value is 1000");
+DEFINE_bool(ubsocket_reg_poller, false, "Whether to register brpc poller");
 
 static bool validate_ubsocket_tiny_pool_block_size(const char*, uint32_t value)
 {
@@ -722,7 +723,9 @@ int InitializeUBSocket()
     options.rw_lock_ops = &brpc_rw_lock_ops;
     options.sem_ops = &brpc_semaphore_ops;
     options.rpc_id_ops = &brpc_rpc_id_ops;
-    options.poller_ops = &brpc_poller_ops;
+    if (FLAGS_ubsocket_reg_poller) {
+        options.poller_ops = &brpc_poller_ops;
+    }
     /* init ubsocket */
     if (ubsocket_init(&options) != 0) {
         LOG(ERROR) << "Inner error: ubsocket_init failed";
