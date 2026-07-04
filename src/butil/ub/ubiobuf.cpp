@@ -505,7 +505,7 @@ static inline IOBuf::Block* share_tls_append_block_with_fallback(size_t count)
 }  // namespace ubiobuf
 
 namespace {
-
+const int UB_MAX_APPEND_IOVEC = 16;
 static const int REF_INDEX_BITS = 19;
 static const int REF_OFFSET_BITS = 15;
 static const int AREA_SIZE_BITS = 30;
@@ -1043,33 +1043,55 @@ ssize_t IOPortal::ub_append_from_file_descriptor(
     if (max_count == 0) {
         return 0;
     }
-    if (_block == NULL) {
-        _block = ubiobuf::acquire_tls_ub_block();
-        if (BAIDU_UNLIKELY(!_block)) {
-            errno = ENOMEM;
-            return -1;
+    iovec vec[UB_MAX_APPEND_IOVEC];
+    int nvec = 0;
+    size_t space = 0;
+    Block *prev_p = NULL;
+    Block *p = _block;
+    do {
+        if (p == NULL) {
+            p = ubiobuf::acquire_tls_ub_block();
+            if (BAIDU_UNLIKELY(!p)) {
+                errno = ENOMEM;
+                return -1;
+            }
+            if (prev_p != NULL) {
+                prev_p->u.portal_next = p;
+            } else {
+                _block = p;
+            }
         }
-    }
+        const size_t len = std::min(p->left_space(), max_count - space);
+        if (len == 0) {
+            break;
+        }
+        vec[nvec].iov_base = p->data + p->size;
+        vec[nvec].iov_len = len;
+        space += len;
+        ++nvec;
+        if (space >= max_count || nvec >= UB_MAX_APPEND_IOVEC) {
+            break;
+        }
+        prev_p = p;
+        p = p->u.portal_next;
+    } while (true);
 
-    iovec vec;
-    vec.iov_base = _block->data + _block->size;
-    vec.iov_len = std::min(_block->left_space(), max_count);
+#ifdef BRPC_WITH_URMA
+    PROF_START(BRPC_READV);
+    PROF_START(BRPC_READV_EAGAIN);
+#endif
+    ssize_t nr = ::ubsocket_wrapper_readv(fd, vec, nvec);
 
- #ifdef BRPC_WITH_URMA
-     PROF_START(BRPC_READV);
-     PROF_START(BRPC_READV_EAGAIN);
- #endif
-    ssize_t nr = ::ubsocket_wrapper_readv(fd, &vec, 1);
-    if (nr <= 0) {  // -1 or 0
- #ifdef BRPC_WITH_URMA
-         if (!((errno == EINTR) || (errno == EAGAIN))) {
-             PROF_END(BRPC_READV, false);
-         } else {
-             PROF_END(BRPC_READV_EAGAIN, true);
-         }
- #endif
-        if (empty()) {
-            ubiobuf::release_tls_ub_block(_block);
+    if (nr <= 0) { // -1 or 0
+#ifdef BRPC_WITH_URMA
+        if (!((errno == EINTR) || (errno == EAGAIN))) {
+            PROF_END(BRPC_READV, false);
+        } else {
+            PROF_END(BRPC_READV_EAGAIN, true);
+        }
+#endif
+        if (empty() && _block) {
+            ubiobuf::release_tls_ub_block_chain(_block);
             _block = NULL;
         }
         return nr;
