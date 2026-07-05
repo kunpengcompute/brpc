@@ -3001,6 +3001,7 @@ int Socket::GetShortSocket(SocketUniquePtr* short_socket) {
     opt.keytable_pool = _keytable_pool;
     opt.app_connect = _app_connect;
     opt.use_rdma =  (_rdma_ep) ? true : false;
+    opt.use_ub = _use_ub;
     if (get_client_side_messenger()->Create(opt, &id) != 0 ||
         Socket::Address(id, short_socket) != 0) {
         return -1;
