@@ -78,6 +78,9 @@ ubsocket通过环境变量进行配置，在bRPC与ubsocket集成的过程中，
 |`ubsocket_prof_dump_path` | profiling打点数据输出路径 | [1, 512] | /tmp/ubsocket/profiling | 否 |
 |`ubsocket_tp_type` | jetty连接复用方式 | single,pool | single | 否 |
 |`ubsocket_tp_pool_size` | jetty连接池大小 | [1, 1000] | 16 | 否 |
+|`ubsocket_initial_credit` | 首次流控请求所申请的信用个数, 单个 WR 消耗 1 个信用 | [1, 1024] | 128 | 否 |
+|`ubsocket_max_credit_per_request` | 流控信用被耗尽后会在前一次的申请个数基础上翻倍申请<br>例如第1次如果申请 128, 被耗尽后会申请 256 信令。但是最多不会超过此值 | [1, 1024] | 1024 | 否 |
+|`ubsocket_min_reserved_credit` | 单个连接最小保留的的流控信用。如果连接所持有的流控信用小于此值，这些信用不会因连接无活动而归还给上层 | [100, 1024] | 100 | 否 |
 
 > 注意：
 >
