@@ -312,19 +312,11 @@ SocketMessage* const DUMMY_USER_MESSAGE = (SocketMessage*)0x1;
 const uint32_t MAX_PIPELINED_COUNT = 16384;
 
 #if BRPC_WITH_URMA
-static butil::Status NormalizeUbWriteData(butil::IOBuf* data,
-                                          const timespec* abstime) {
-    const int64_t abstime_us = abstime == NULL ?
-        -1 : butil::timespec_to_microseconds(*abstime);
-    while (true) {
-        if (butil::UBIOBuf::normalize(data) >= 0) {
-            return butil::Status::OK();
-        }
-        if (abstime_us < 0 || butil::gettimeofday_us() >= abstime_us) {
-            return butil::Status(ENOMEM, "Fail to normalize write data to UBIOBuf");
-        }
-        bthread_usleep(1);
+static butil::Status NormalizeUbWriteData(butil::IOBuf* data) {
+    if (butil::UBIOBuf::normalize(data) < 0) {
+        return butil::Status(ENOMEM, "Fail to normalize write data to UBIOBuf");
     }
+    return butil::Status::OK();
 }
 
 static void WarnIfUbBlockOnTcpWrite(const Socket* s, const butil::IOBuf* data) {
@@ -390,12 +382,6 @@ struct BAIDU_CACHELINE_ALIGNMENT Socket::WriteRequest {
         }
         _pc_and_udmsg.set_ptr_and_extra(msg, pc);
     }
-#if BRPC_WITH_URMA
-    void set_normalize_abstime(const timespec* abstime) {
-        _normalize_abstime_us = abstime == NULL ?
-            -1 : butil::timespec_to_microseconds(*abstime);
-    }
-#endif
 
     bool reset_pipelined_count_and_user_message() {
         SocketMessage* msg = user_message();
@@ -420,9 +406,6 @@ private:
     PackedPtr<Socket> _socket_and_control_bits;
     // User message pointer, pipelined count auth flag.
     PackedPtr<SocketMessage> _pc_and_udmsg;
-#if BRPC_WITH_URMA
-    int64_t _normalize_abstime_us;
-#endif
 };
 
 void Socket::WriteRequest::Setup(Socket* s) {
@@ -440,13 +423,7 @@ void Socket::WriteRequest::Setup(Socket* s) {
         }
 #if BRPC_WITH_URMA
         if (s->_use_ub && msg != DUMMY_USER_MESSAGE) {
-            timespec normalize_abstime;
-            const timespec* normalize_abstime_ptr = NULL;
-            if (_normalize_abstime_us >= 0) {
-                normalize_abstime = butil::microseconds_to_timespec(_normalize_abstime_us);
-                normalize_abstime_ptr = &normalize_abstime;
-            }
-            butil::Status st = NormalizeUbWriteData(&data, normalize_abstime_ptr);
+            butil::Status st = NormalizeUbWriteData(&data);
             if (!st.ok()) {
                 data.clear();
                 bthread_id_error2(id_wait, st.error_code(), st.error_cstr());
@@ -1710,7 +1687,7 @@ int Socket::Write(butil::IOBuf* data, const WriteOptions* options_in) {
     req->data.swap(*data);
 #if BRPC_WITH_URMA
     if (_use_ub) {
-        butil::Status st = NormalizeUbWriteData(&req->data, opt.abstime);
+        butil::Status st = NormalizeUbWriteData(&req->data);
         if (!st.ok()) {
             req->data.clear();
             butil::return_object(req);
@@ -1761,11 +1738,6 @@ int Socket::Write(SocketMessagePtr<>& msg, const WriteOptions* options_in) {
     // wait until it points to a valid WriteRequest or NULL.
     req->next = WriteRequest::UNCONNECTED;
     req->id_wait = opt.id_wait;
-#if BRPC_WITH_URMA
-    if (_use_ub) {
-        req->set_normalize_abstime(opt.abstime);
-    }
-#endif
     req->clear_and_set_control_bits(opt.notify_on_success, opt.shutdown_write);
     req->set_pipelined_count_and_user_message(
         opt.pipelined_count, msg.release(), opt.auth_flags);
