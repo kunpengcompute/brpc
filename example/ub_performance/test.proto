@@ -1,35 +1,37 @@
-// Licensed to the Apache Software Foundation (ASF) under one
-// or more contributor license agreements.  See the NOTICE file
-// distributed with this work for additional information
-// regarding copyright ownership.  The ASF licenses this file
-// to you under the Apache License, Version 2.0 (the
-// "License"); you may not use this file except in compliance
-// with the License.  You may obtain a copy of the License at
-//
-//   http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing,
-// software distributed under the License is distributed on an
-// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-// KIND, either express or implied.  See the License for the
-// specific language governing permissions and limitations
-// under the License.
-
-syntax="proto2";
-option cc_generic_services = true;
-
+syntax = "proto3";
 package test;
 
-message PerfTestRequest {
-      required bool echo_attachment = 1;
-      required bytes name = 2;
-};
+option cc_enable_arenas = true;
+option cc_generic_services = true;
 
-message PerfTestResponse {
-      required string cpu_usage = 1;
-      required bytes name = 2;
-};
+message Request {
+    ValueMap common_feat = 1;
+    repeated ValueMap ad_feat = 2;
+    repeated ValueMap labels = 3;
+}
+
+message Value {
+    message StringList { repeated string value = 1; }
+    message DoubleList { repeated double value = 1; }
+    message IntList { repeated int64 value = 1; }
+    message ByteList { repeated bytes value = 1; }
+
+    oneof value {
+        string s_value = 1;
+        double d_value = 2;
+        int64 i_value = 3;
+        bytes b_value = 4;
+        StringList s_list = 5;
+        DoubleList d_list = 6;
+        IntList i_list = 7;
+        ByteList b_list = 8;
+    }
+}
+
+message ValueMap {
+    map<string, Value> value_map = 1;
+}
 
 service PerfTestService {
-      rpc Test(PerfTestRequest) returns (PerfTestResponse);
-};
+    rpc Test(Request) returns (Request);
+}
