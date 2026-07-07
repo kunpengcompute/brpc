@@ -17,7 +17,12 @@
 
 
 #include <gflags/gflags.h>
+#include <atomic>
+#include <cstdio>
+#include <cstdlib>
+#include <limits>
 #include "butil/atomicops.h"
+#include "butil/iobuf.h"
 #include "butil/logging.h"
 #include "butil/time.h"
 #include "brpc/server.h"
@@ -35,8 +40,26 @@ DEFINE_int32(max_concurrency, 128, "max concurrency");
 DEFINE_int32(server_bthread_concurrency, 5, "server bthread concurrency");
 DEFINE_int32(stats_timeout_seconds, 20, "Timeout in seconds before collecting statistics. (default 20)");
 DEFINE_bool(echo_attachment, false, "Echo request attachment to response. Set on server side directly.");
+DEFINE_bool(sort, false, "sort");
 
 butil::atomic<uint64_t> g_total_cnt(0);
+#if BRPC_ENABLE_TRACE_SCOPE
+static const int64_t kMaxRpcIoNum = BRPC_TRACE_MAX_RPC_IO_NUM;
+int64_t g_step_capacity = 0;
+
+static int64_t EstimateStepCapacity() {
+    if (kMaxRpcIoNum <= 0) {
+        return 0;
+    }
+    const int64_t split_factor = 16;
+    const int64_t guard = 2048;
+    const int64_t max_mul = (std::numeric_limits<int64_t>::max() - guard) / split_factor;
+    if (kMaxRpcIoNum > max_mul) {
+        return kMaxRpcIoNum;
+    }
+    return kMaxRpcIoNum * split_factor + guard;
+}
+#endif
 
 static void* StatsPrinter(void* arg) {
     std::cout << "timing for " << FLAGS_stats_timeout_seconds << " seconds" << std::endl;
@@ -77,6 +100,28 @@ namespace bthread {
 
 int main(int argc, char* argv[]) {
     GFLAGS_NAMESPACE::ParseCommandLineFlags(&argc, &argv, true);
+#if BRPC_ENABLE_TRACE_SCOPE
+    g_step_capacity = EstimateStepCapacity();
+    std::cout << "Step record capacity: " << g_step_capacity << std::endl;
+    g_brpc_step_latency = (int64_t **)malloc(BRPC_STEP_COUNT * sizeof(int64_t *));
+    if (g_brpc_step_latency == nullptr) {
+        fprintf(stderr, "malloc g_brpc_step_latency rows failed\n");
+        return 1;
+    }
+    for (uint32_t i = 0; i < BRPC_STEP_COUNT; ++i) {
+        g_brpc_step_latency[i] = (int64_t *)calloc(g_step_capacity, sizeof(int64_t));
+        if (g_brpc_step_latency[i] == nullptr) {
+            fprintf(stderr, "malloc g_brpc_step_latency cols failed\n");
+            return 1;
+        }
+    }
+    BrpcTraceInitMarkerStorage(g_step_capacity);
+    for (uint32_t i = 0; i < BRPC_NOCNTL_STEP_COUNT; ++i) {
+        for (uint32_t j = 0; j < BRPC_IDX_COUNT; ++j) {
+            g_brpc_step_latency_nocntl[i][j].store(0);
+        }
+    }
+#endif
     bthread::FLAGS_bthread_concurrency = FLAGS_server_bthread_concurrency;
 
     brpc::Server server;
@@ -103,5 +148,18 @@ int main(int argc, char* argv[]) {
     }
 
     server.RunUntilAskedToQuit();
+#if BRPC_ENABLE_TRACE_SCOPE
+    printf("=========== start ===========\n");
+    std::cout << "IONum: " << g_total_cnt.load(butil::memory_order_relaxed) << std::endl;
+    if (FLAGS_sort) {
+        std::cout << "No use to use FLAGS_sort because data is sorted before percentile output." << std::endl;
+    }
+    BrpcTracePrintFrameworkStepStats(g_step_capacity);
+    std::cout << "BRPC_STEP_COUNT: " << BRPC_STEP_COUNT << std::endl;
+    BrpcTracePrintAllStepStats(g_step_capacity);
+    printf("=========== end ===========\n");
+#else
+    std::cout << "BRPC_ENABLE_TRACE_SCOPE is off; trace stats are disabled." << std::endl;
+#endif
     return 0;
 }

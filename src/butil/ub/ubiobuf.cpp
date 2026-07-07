@@ -1076,13 +1076,83 @@ ssize_t IOPortal::ub_append_from_file_descriptor(
         p = p->u.portal_next;
     } while (true);
 
+#if BRPC_ENABLE_TRACE_SCOPE
+    static const int64_t kTraceTimestampThresholdNs = 1000000000000LL;
+    const int64_t start_latency_time = butil::cpuwide_time_ns();
+    const int64_t readv_idx =
+        g_brpc_step_latency_nocntl[BRPC_READV_COUNT][BRPC_LATENCY_CNT]
+            .load(butil::memory_order_relaxed) + 1;
+    const int64_t marker =
+        BrpcTraceTakeStepMarker(BRPC_ON_NEW_MSG_LOOP_IN_TO_UB_READV_IN, readv_idx);
+    if (marker > kTraceTimestampThresholdNs && start_latency_time > marker) {
+        BrpcTraceRecordStepSample(BRPC_ON_NEW_MSG_LOOP_IN_TO_UB_READV_IN,
+                                  start_latency_time - marker);
+    }
+#endif
 #ifdef BRPC_WITH_URMA
     PROF_START(BRPC_READV);
     PROF_START(BRPC_READV_EAGAIN);
 #endif
     ssize_t nr = ::ubsocket_wrapper_readv(fd, vec, nvec);
+#if BRPC_ENABLE_TRACE_SCOPE
+    const int saved_errno = errno;
+    const int64_t end_latency_time = butil::cpuwide_time_ns();
+    g_brpc_step_latency_nocntl[BRPC_READV_COUNT][BRPC_LATENCY_CNT]
+        .fetch_add(1, butil::memory_order_relaxed);
+    const int64_t readv_latency = end_latency_time - start_latency_time;
+    BrpcTraceRecordStepSample(BRPC_UB_READV, readv_latency);
+    if (nr > 0) {
+        BrpcTraceRecordStepSample(BRPC_UB_READV_OK, readv_latency);
+    } else if (nr < 0 && saved_errno == EAGAIN) {
+        BrpcTraceRecordStepSample(BRPC_UB_READV_EAGAIN, readv_latency);
+    }
 
-    if (nr <= 0) { // -1 or 0
+    if (nr > 0 &&
+        g_brpc_step_latency_nocntl[BRPC_CALL_COUNT][BRPC_LATENCY_CNT]
+            .load(butil::memory_order_relaxed) == 0) {
+        int64_t read_out_count =
+            g_brpc_step_latency_nocntl[BRPC_UB_READ_OUT_TO_PROCESS_COUNT][BRPC_LATENCY_CNT]
+                .load(butil::memory_order_relaxed);
+        if (read_out_count == 0 ||
+            BrpcTraceGetStepMarker(BRPC_UB_READ_OUT_TO_PROCESS_IN, read_out_count) == 0) {
+            read_out_count =
+                g_brpc_step_latency_nocntl[BRPC_UB_READ_OUT_TO_PROCESS_COUNT][BRPC_LATENCY_CNT]
+                    .fetch_add(1, butil::memory_order_relaxed) + 1;
+            BrpcTraceSetStepMarker(
+                BRPC_UB_READ_OUT_TO_PROCESS_IN, read_out_count, end_latency_time);
+            BrpcTraceSetStepMarker(
+                BRPC_UB_READ_OUT_TO_DESERIALIZE_IN, read_out_count, end_latency_time);
+            BrpcTraceSetStepMarker(
+                BRPC_STEP3_SERVER_FRAMEWORK, read_out_count, end_latency_time);
+        }
+    }
+
+    const int64_t rpc_count =
+        g_brpc_step_latency_nocntl[BRPC_RPC_COUNT][BRPC_LATENCY_CNT]
+            .load(butil::memory_order_relaxed);
+    if (g_brpc_step_latency_nocntl[BRPC_CALL_COUNT][BRPC_LATENCY_CNT]
+            .load(butil::memory_order_relaxed) != 0) {
+        if (nr > 0) {
+            BrpcTraceSetStepMarker(
+                BRPC_CLIENT_UB_READ_OUT_TO_DESERIALIZE_IN,
+                rpc_count,
+                end_latency_time);
+            BrpcTraceSetStepMarker(
+                BRPC_STEP5_CLIENT_FRAMEWORK,
+                rpc_count,
+                end_latency_time);
+        }
+        const int64_t write_marker =
+            BrpcTraceTakeStepMarker(BRPC_WRITE_IN_TO_READ_OUT, rpc_count);
+        if (write_marker > kTraceTimestampThresholdNs &&
+            end_latency_time > write_marker) {
+            BrpcTraceRecordStepSample(
+                BRPC_WRITE_IN_TO_READ_OUT, end_latency_time - write_marker);
+        }
+    }
+#endif
+
+    if (nr <= 0) {  // -1 or 0
 #ifdef BRPC_WITH_URMA
         if (!((errno == EINTR) || (errno == EAGAIN))) {
             PROF_END(BRPC_READV, false);

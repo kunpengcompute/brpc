@@ -460,6 +460,7 @@ void Channel::CallMethod(const google::protobuf::MethodDescriptor* method,
                          const google::protobuf::Message* request,
                          google::protobuf::Message* response,
                          google::protobuf::Closure* done) {
+    const int64_t call_start_latency = butil::cpuwide_time_ns();
 #ifdef BRPC_WITH_URMA
     uint64_t timestamp = butil::cpuwide_time_ns();
     g_brpc_ubs_step_latency[BRPC_CLIENT_CALL] = timestamp;
@@ -468,6 +469,19 @@ void Channel::CallMethod(const google::protobuf::MethodDescriptor* method,
     const int64_t start_send_real_us = butil::gettimeofday_us();
     Controller* cntl = static_cast<Controller*>(controller_base);
     cntl->OnRPCBegin(start_send_real_us);
+    cntl->latency_start = call_start_latency;
+#if BRPC_ENABLE_TRACE_SCOPE
+    const int64_t count =
+        g_brpc_step_latency_nocntl[BRPC_CALL_COUNT][BRPC_LATENCY_CNT]
+            .fetch_add(1, butil::memory_order_relaxed);
+    BrpcTraceSetStepMarker(BRPC_CALL_IN_TO_SOCKET_SPLIT, count, call_start_latency);
+    BrpcTraceSetStepMarker(BRPC_STEP1_CLIENT_FRAMEWORK, count, call_start_latency);
+    BrpcTraceSetStepMarker(
+        BRPC_CALL_IN_TO_RPC_OUT,
+        g_brpc_step_latency_nocntl[BRPC_RPC_COUNT][BRPC_LATENCY_CNT]
+            .load(butil::memory_order_relaxed),
+        start_send_real_us);
+#endif
     // Override max_retry first to reset the range of correlation_id
     if (cntl->max_retry() == UNSET_MAGIC_NUM) {
         cntl->set_max_retry(_options.max_retry);
@@ -577,6 +591,13 @@ void Channel::CallMethod(const google::protobuf::MethodDescriptor* method,
     // possible executions, including:
     //   HandleSendFailed => OnVersionedRPCReturned => IssueRPC(pack_request)
     bool request_failed = false;
+#if BRPC_ENABLE_TRACE_SCOPE
+    const int64_t start_latency_time = butil::cpuwide_time_ns();
+    BrpcTraceRecordStepLatency(
+        BRPC_CLIENT_CALL_OUT_TO_SERIALIZE_IN,
+        cntl->log_id(),
+        start_latency_time - call_start_latency);
+#endif
 #ifdef BRPC_WITH_URMA
     PROF_START(BRPC_SERIALIZE);
     if (_options.use_ub) {
@@ -593,6 +614,10 @@ void Channel::CallMethod(const google::protobuf::MethodDescriptor* method,
 #ifdef BRPC_WITH_URMA
     }
  	PROF_END(BRPC_SERIALIZE, true);
+#endif
+#if BRPC_ENABLE_TRACE_SCOPE
+    BrpcTraceRecordStepLatency(
+        BRPC_SERIALIZE_STEP, cntl->log_id(), butil::cpuwide_time_ns() - start_latency_time);
 #endif
     if (request_failed) {
         // Handle failures caused by serialize_request, and these error_codes
