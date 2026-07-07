@@ -43,5 +43,5 @@ build --action_env=CXX
 build --action_env=LLVM_CONFIG
 build --action_env=PATH
 
-build --cxxopt=-march=armv8.1-a+lse
-build --conlyopt=-march=armv8.1-a+lse
+build:arm64 --cxxopt=-march=armv8.1-a+lse
+build:arm64 --conlyopt=-march=armv8.1-a+lse
