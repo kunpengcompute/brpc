@@ -358,6 +358,7 @@ cc_binary(
     name = "ub_performance_client",
     srcs = [
         "ub_performance/client.cpp",
+        "ub_performance/data_generator.h",
     ],
     includes = [
         "ub_performance",
@@ -373,6 +374,7 @@ cc_binary(
     name = "ub_performance_server",
     srcs = [
         "ub_performance/server.cpp",
+        "ub_performance/data_generator.h",
     ],
     includes = [
         "ub_performance",
