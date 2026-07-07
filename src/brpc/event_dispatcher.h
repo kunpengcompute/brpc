@@ -188,6 +188,11 @@ private:
 
 EventDispatcher& GetGlobalEventDispatcher(int fd, bthread_tag_t tag);
 
+// Epoll wait trace context of current input callback invocation.
+int64_t GetCurrentInputEpollWaitLatencyNs();
+int64_t GetCurrentInputEpollWaitEndNs();
+void SetCurrentInputEpollWaitTrace(int64_t wait_latency_ns, int64_t wait_end_ns);
+
 // IOEvent class manages the IO events of a file descriptor conveniently.
 template <typename T>
 class IOEvent {

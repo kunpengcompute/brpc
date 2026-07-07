@@ -101,6 +101,10 @@ DEFINE_int32(max_connection_pool_size, 100,
              "Max number of pooled connections to a single endpoint");
 BRPC_VALIDATE_GFLAG(max_connection_pool_size, PassValidate);
 
+bool Socket::use_rdma() const {
+    return _rdma_state != RDMA_OFF;
+}
+
 DEFINE_int32(connect_timeout_as_unreachable, 3,
              "If the socket failed to connect due to ETIMEDOUT for so many "
              "times *continuously*, the error is changed to ENETUNREACH which "
@@ -500,6 +504,8 @@ Socket::Socket(Forbidden f)
     , _last_msg_size(0)
     , _avg_msg_size(0)
     , _last_readtime_us(0)
+    , _input_epoll_wait_latency_ns(0)
+    , _input_epoll_wait_end_ns(0)
     , _parsing_context(NULL)
     , _correlation_id(0)
     , _health_check_interval_s(-1)
@@ -538,6 +544,20 @@ Socket::Socket(Forbidden f)
 Socket::~Socket() {
     pthread_mutex_destroy(&_id_wait_list_mutex);
     bthread::butex_destroy(_epollout_butex);
+}
+
+void Socket::SetInputEpollTrace(int64_t wait_latency_ns, int64_t wait_end_ns) {
+    _input_epoll_wait_latency_ns.store(wait_latency_ns, butil::memory_order_relaxed);
+    _input_epoll_wait_end_ns.store(wait_end_ns, butil::memory_order_relaxed);
+}
+
+void Socket::ConsumeInputEpollTrace(int64_t* wait_latency_ns, int64_t* wait_end_ns) {
+    if (wait_latency_ns) {
+        *wait_latency_ns = _input_epoll_wait_latency_ns.exchange(0, butil::memory_order_relaxed);
+    }
+    if (wait_end_ns) {
+        *wait_end_ns = _input_epoll_wait_end_ns.exchange(0, butil::memory_order_relaxed);
+    }
 }
 
 void Socket::ReturnSuccessfulWriteRequest(Socket::WriteRequest* p) {
@@ -1744,6 +1764,54 @@ int Socket::Write(SocketMessagePtr<>& msg, const WriteOptions* options_in) {
     return StartWrite(req, opt);
 }
 
+#if BRPC_ENABLE_TRACE_SCOPE
+static inline void RecordClientSocketSplitStart(bool rdma_path, bool ub_path) {
+    const int64_t call_count =
+        g_brpc_step_latency_nocntl[BRPC_CALL_COUNT][BRPC_LATENCY_CNT]
+            .load(butil::memory_order_relaxed);
+    if (call_count == 0) {
+        return;
+    }
+
+    const int64_t count = call_count - 1;
+    const int64_t split_start = butil::cpuwide_time_ns();
+    const int64_t marker = BrpcTraceTakeStepMarker(BRPC_CALL_IN_TO_SOCKET_SPLIT, count);
+    if (marker > 1000000000000LL && split_start > marker) {
+        BrpcTraceRecordStepSample(BRPC_CALL_IN_TO_SOCKET_SPLIT, split_start - marker);
+    }
+    const BRPC_STEP split_step = rdma_path ? BRPC_SOCKET_SPLIT_TO_RDMA_WRITE_IN :
+        (ub_path ? BRPC_SOCKET_SPLIT_TO_UB_WRITE_IN : BRPC_SOCKET_SPLIT_TO_TCP_WRITE_IN);
+    BrpcTraceSetStepMarker(split_step, count, split_start);
+}
+
+static inline void RecordServerConnSplitStart(bool rdma_path, bool ub_path) {
+    if (g_brpc_step_latency_nocntl[BRPC_CALL_COUNT][BRPC_LATENCY_CNT]
+            .load(butil::memory_order_relaxed) != 0) {
+        return;
+    }
+
+    const int64_t count = rdma_path
+        ? g_brpc_step_latency_nocntl[BRPC_RDMA_READ_OUT_TO_PROCESS_COUNT][BRPC_LATENCY_CNT]
+              .load(butil::memory_order_relaxed)
+        : (ub_path
+            ? g_brpc_step_latency_nocntl[BRPC_UB_READ_OUT_TO_PROCESS_COUNT][BRPC_LATENCY_CNT]
+                  .load(butil::memory_order_relaxed)
+            : g_brpc_step_latency_nocntl[BRPC_READ_OUT_TO_PROCESS_COUNT][BRPC_LATENCY_CNT]
+                  .load(butil::memory_order_relaxed));
+    const int64_t split_ts = butil::cpuwide_time_ns();
+    const int64_t marker = BrpcTraceTakeStepMarker(BRPC_PROCESS_IN_TO_TRANSPORT_SPLIT, count);
+    if (marker > 1000000000000LL) {
+        if (split_ts > marker) {
+            BrpcTraceRecordStepSample(BRPC_PROCESS_IN_TO_TRANSPORT_SPLIT, split_ts - marker);
+        }
+        const BRPC_STEP transport_step = rdma_path ? BRPC_TRANSPORT_SPLIT_TO_RDMA_WRITEV_IN :
+            (ub_path ? BRPC_TRANSPORT_SPLIT_TO_UB_WRITEV_IN :
+                       BRPC_TRANSPORT_SPLIT_TO_TCP_WRITEV_IN);
+        BrpcTraceSetStepMarker(transport_step, count, split_ts);
+    }
+}
+#endif
+
 int Socket::StartWrite(WriteRequest* req, const WriteOptions& opt) {
     // Release fence makes sure the thread getting request sees *req
     WriteRequest* const prev_head =
@@ -1763,7 +1831,10 @@ int Socket::StartWrite(WriteRequest* req, const WriteOptions& opt) {
     SocketUniquePtr ptr_for_keep_write;
     ssize_t nw = 0;
     int ret = 0;
-
+#if BRPC_ENABLE_TRACE_SCOPE
+    bool rdma_path = false;
+    bool ub_path = false;
+#endif
     // We've got the right to write.
     req->next = NULL;
 
@@ -1798,6 +1869,14 @@ int Socket::StartWrite(WriteRequest* req, const WriteOptions& opt) {
     
     // Write once in the calling thread. If the write is not complete,
     // continue it in KeepWrite thread.
+#if BRPC_ENABLE_TRACE_SCOPE
+#if BRPC_WITH_RDMA
+    rdma_path = (_conn == NULL && _rdma_ep && _rdma_state != RDMA_OFF);
+#endif
+    ub_path = !rdma_path && _use_ub;
+    RecordClientSocketSplitStart(rdma_path, ub_path);
+    RecordServerConnSplitStart(rdma_path, ub_path);
+#endif
     if (_conn) {
         butil::IOBuf* data_arr[1] = { &req->data };
         nw = _conn->CutMessageIntoFileDescriptor(fd(), data_arr, 1);
@@ -1830,6 +1909,10 @@ int Socket::StartWrite(WriteRequest* req, const WriteOptions& opt) {
         ReturnSuccessfulWriteRequest(req);
         return 0;
     }
+#if BRPC_ENABLE_TRACE_SCOPE
+    g_brpc_step_latency_nocntl[BRPC_SOCKET_WRITE_COUNT][BRPC_LATENCY_CNT]
+        .fetch_add(1, butil::memory_order_relaxed);
+#endif
 
 KEEPWRITE_IN_BACKGROUND:
     ReAddress(&ptr_for_keep_write);
@@ -1987,6 +2070,15 @@ ssize_t Socket::DoWrite(WriteRequest* req) {
     }
 
     if (ssl_state() == SSL_OFF) {
+#if BRPC_ENABLE_TRACE_SCOPE
+        bool rdma_path = false;
+#if BRPC_WITH_RDMA
+        rdma_path = (_conn == NULL && _rdma_ep && _rdma_state != RDMA_OFF);
+#endif
+        const bool ub_path = !rdma_path && _use_ub;
+        RecordClientSocketSplitStart(rdma_path, ub_path);
+        RecordServerConnSplitStart(rdma_path, ub_path);
+#endif
         // Write IOBuf in the batch array into the fd.
         if (_conn) {
             return _conn->CutMessageIntoFileDescriptor(fd(), data_list, ndata);
@@ -2313,6 +2405,8 @@ int Socket::OnInputEvent(void* user_data, uint32_t events,
     // Passing e[i].events causes complex visibility issues and
     // requires stronger memory fences, since reading the fd returns
     // error as well, we don't pass the events.
+    s->SetInputEpollTrace(GetCurrentInputEpollWaitLatencyNs(),
+                          GetCurrentInputEpollWaitEndNs());
     if (s->_nevent.fetch_add(1, butil::memory_order_acq_rel) == 0) {
         // According to the stats, above fetch_add is very effective. In a
         // server processing 1 million requests per second, this counter

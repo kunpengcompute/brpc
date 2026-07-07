@@ -204,6 +204,7 @@ void EventDispatcher::Run() {
         epoll_event e[32];
 #endif
 
+        const int64_t epoll_wait_start_ns = butil::cpuwide_time_ns();
 #ifdef BRPC_ADDITIONAL_EPOLL
         // Performance downgrades in examples.
         int n = epoll_wait(_event_dispatcher_fd, e, ARRAY_SIZE(e), 0);
@@ -213,6 +214,8 @@ void EventDispatcher::Run() {
 #else
         const int n = ::ubsocket_wrapper_epoll_wait(_event_dispatcher_fd, e, ARRAY_SIZE(e), -1);
 #endif
+        const int64_t epoll_wait_end_ns = butil::cpuwide_time_ns();
+        const int64_t epoll_wait_latency_ns = epoll_wait_end_ns - epoll_wait_start_ns;
         if (_stop) {
             // epoll_ctl/epoll_wait should have some sort of memory fencing
             // guaranteeing that we(after epoll_wait) see _stop set before
@@ -234,6 +237,7 @@ void EventDispatcher::Run() {
 #endif
                 ) {
                 int64_t start_ns = butil::cpuwide_time_ns();
+                SetCurrentInputEpollWaitTrace(epoll_wait_latency_ns, epoll_wait_end_ns);
                 // We don't care about the return value.
                 CallInputEventCallback(e[i].data.u64, e[i].events, _thread_attr);
                 (*g_edisp_read_lantency) << (butil::cpuwide_time_ns() - start_ns);

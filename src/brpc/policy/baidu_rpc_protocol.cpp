@@ -21,6 +21,8 @@
 #include <google/protobuf/io/zero_copy_stream_impl_lite.h>
 #include <google/protobuf/io/coded_stream.h>
 #include <google/protobuf/text_format.h>
+#include <atomic>
+#include <memory>
 #include "butil/logging.h"                       // LOG()
 #include "butil/iobuf.h"                         // butil::IOBuf
 #include "butil/ub/ubiobuf.h"                       // butil::UBIOBuf
@@ -330,6 +332,20 @@ struct BaiduProxyPBMessages : public RpcPBMessages {
 };
 }
 
+namespace {
+#if BRPC_ENABLE_TRACE_SCOPE
+void RecordServerReadOutToDeserializeIn(
+    Socket* socket, int64_t deserialize_start);
+void RecordClientReadOutToDeserializeIn(
+    Socket* socket, int64_t deserialize_start);
+void RecordServerCallMethodEndToSerializeIn(
+    Controller* cntl, int64_t serialize_start);
+void SetServerSerializeOutToWritevIn(
+    Socket* socket, int64_t serialize_end);
+void SetClientDeserializeOutToEndRpcIn(int64_t deserialize_end);
+#endif
+}
+
 // Used by UT, can't be static.
 void SendRpcResponse(int64_t correlation_id, Controller* cntl,
                      RpcPBMessages* messages, const Server* server,
@@ -387,12 +403,27 @@ void SendRpcResponse(int64_t correlation_id, Controller* cntl,
     // If user calls `SetFailed' on Controller, we don't serialize
     // response either
     if (res != NULL && !cntl->Failed()) {
+#if BRPC_ENABLE_TRACE_SCOPE
+        const int64_t start_latency_time = butil::cpuwide_time_ns();
+        RecordServerCallMethodEndToSerializeIn(cntl, start_latency_time);
+#endif
 #ifdef BRPC_WITH_URMA
         PROF_START(BRPC_SERIALIZE);
 #endif
         append_body = SerializeResponse(*res, *cntl, *res_body_ptr);
 #ifdef BRPC_WITH_URMA
         PROF_END(BRPC_SERIALIZE, true);
+#endif
+#if BRPC_ENABLE_TRACE_SCOPE
+        const int64_t serialize_end = butil::cpuwide_time_ns();
+        BrpcTraceRecordStepLatency(
+            BRPC_SERIALIZE_STEP, cntl->log_id(), serialize_end - start_latency_time);
+        SetServerSerializeOutToWritevIn(sock, serialize_end);
+#endif
+    } else {
+#if BRPC_ENABLE_TRACE_SCOPE
+        BrpcTraceEraseStepMarker(
+            BRPC_SERVER_CALL_OUT_TO_SERIALIZE_IN, cntl->log_id());
 #endif
     }
 
@@ -539,6 +570,179 @@ void SendRpcResponse(int64_t correlation_id, Controller* cntl,
 }
 
 namespace {
+#if BRPC_ENABLE_TRACE_SCOPE
+const int64_t kTraceTimestampThresholdNs = 1000000000000LL;
+
+static int64_t ServerReadTraceCount(const Socket* socket) {
+    if (socket != NULL && socket->use_rdma()) {
+        return g_brpc_step_latency_nocntl[BRPC_RDMA_READ_OUT_TO_PROCESS_COUNT][BRPC_LATENCY_CNT]
+            .load(butil::memory_order_relaxed);
+    }
+    if (socket != NULL && socket->use_ub()) {
+        return g_brpc_step_latency_nocntl[BRPC_UB_READ_OUT_TO_PROCESS_COUNT][BRPC_LATENCY_CNT]
+            .load(butil::memory_order_relaxed);
+    }
+    return g_brpc_step_latency_nocntl[BRPC_READ_OUT_TO_PROCESS_COUNT][BRPC_LATENCY_CNT]
+        .load(butil::memory_order_relaxed);
+}
+
+static BRPC_STEP ServerReadOutToDeserializeStep(const Socket* socket) {
+    if (socket != NULL && socket->use_rdma()) {
+        return BRPC_RDMA_READ_OUT_TO_DESERIALIZE_IN;
+    }
+    if (socket != NULL && socket->use_ub()) {
+        return BRPC_UB_READ_OUT_TO_DESERIALIZE_IN;
+    }
+    return BRPC_READ_OUT_TO_DESERIALIZE_IN;
+}
+
+static BRPC_STEP ServerSerializeOutToWritevStep(const Socket* socket) {
+    if (socket != NULL && socket->use_rdma()) {
+        return BRPC_SERIALIZE_OUT_TO_RDMA_WRITEV_IN;
+    }
+    if (socket != NULL && socket->use_ub()) {
+        return BRPC_SERIALIZE_OUT_TO_UB_WRITEV_IN;
+    }
+    return BRPC_SERIALIZE_OUT_TO_TCP_WRITEV_IN;
+}
+
+static BRPC_STEP ClientReadOutToDeserializeStep(const Socket* socket) {
+    if (socket != NULL && socket->use_rdma()) {
+        return BRPC_CLIENT_RDMA_READ_OUT_TO_DESERIALIZE_IN;
+    }
+    if (socket != NULL && socket->use_ub()) {
+        return BRPC_CLIENT_UB_READ_OUT_TO_DESERIALIZE_IN;
+    }
+    return BRPC_CLIENT_READ_OUT_TO_DESERIALIZE_IN;
+}
+
+void RecordServerReadOutToDeserializeIn(
+    Socket* socket, int64_t deserialize_start) {
+    const int64_t count = ServerReadTraceCount(socket);
+    const int64_t marker = BrpcTraceTakeStepMarker(
+        ServerReadOutToDeserializeStep(socket), count);
+    if (marker > kTraceTimestampThresholdNs && deserialize_start > marker) {
+        BrpcTraceRecordStepSample(
+            ServerReadOutToDeserializeStep(socket), deserialize_start - marker);
+    }
+}
+
+void RecordClientReadOutToDeserializeIn(
+    Socket* socket, int64_t deserialize_start) {
+    const int64_t count =
+        g_brpc_step_latency_nocntl[BRPC_RPC_COUNT][BRPC_LATENCY_CNT]
+            .load(butil::memory_order_relaxed);
+    const BRPC_STEP step = ClientReadOutToDeserializeStep(socket);
+    const int64_t marker = BrpcTraceTakeStepMarker(step, count);
+    if (marker > kTraceTimestampThresholdNs && deserialize_start > marker) {
+        BrpcTraceRecordStepSample(step, deserialize_start - marker);
+    }
+}
+
+void SetServerSerializeOutToWritevIn(
+    Socket* socket, int64_t serialize_end) {
+    const int64_t count = ServerReadTraceCount(socket);
+    BrpcTraceSetStepMarker(
+        ServerSerializeOutToWritevStep(socket), count, serialize_end);
+}
+
+void SetClientDeserializeOutToEndRpcIn(int64_t deserialize_end) {
+    const int64_t count =
+        g_brpc_step_latency_nocntl[BRPC_RPC_COUNT][BRPC_LATENCY_CNT]
+            .load(butil::memory_order_relaxed);
+    BrpcTraceSetStepMarker(
+        BRPC_CLIENT_DESERIALIZE_OUT_TO_ENDRPC_IN, count, deserialize_end);
+}
+
+class ServerCallMethodTraceDone : public google::protobuf::Closure {
+public:
+    ServerCallMethodTraceDone(
+        google::protobuf::Closure* done,
+        const std::shared_ptr<std::atomic<bool> >& done_run,
+        int64_t log_id)
+        : _done(done)
+        , _done_run(done_run)
+        , _log_id(log_id) {}
+
+    void Run() override {
+        _done_run->store(true);
+        if (BrpcTraceGetStepMarker(
+                BRPC_SERVER_CALL_OUT_TO_SERIALIZE_IN, _log_id) == 0) {
+            BrpcTraceSetStepMarker(
+                BRPC_SERVER_CALL_OUT_TO_SERIALIZE_IN,
+                _log_id, butil::cpuwide_time_ns());
+        }
+        google::protobuf::Closure* done = _done;
+        _done = NULL;
+        if (done != NULL) {
+            done->Run();
+        }
+        delete this;
+    }
+
+private:
+    google::protobuf::Closure* _done;
+    std::shared_ptr<std::atomic<bool> > _done_run;
+    int64_t _log_id;
+};
+
+void CallMethodAndTrace(
+    google::protobuf::Service* service,
+    const google::protobuf::MethodDescriptor* method,
+    google::protobuf::RpcController* controller,
+    const google::protobuf::Message* request,
+    google::protobuf::Message* response,
+    google::protobuf::Closure* done) {
+    Controller* cntl = static_cast<Controller*>(controller);
+    const int64_t log_id = cntl == NULL ? 0 : cntl->log_id();
+    if (g_brpc_step_latency == NULL || log_id <= 0) {
+        service->CallMethod(method, controller, request, response, done);
+        return;
+    }
+
+    google::protobuf::Closure* traced_done = done;
+    std::shared_ptr<std::atomic<bool> > done_run;
+    if (done != NULL) {
+        done_run.reset(new std::atomic<bool>(false));
+        traced_done = new ServerCallMethodTraceDone(done, done_run, log_id);
+    }
+
+    const int64_t call_start = butil::cpuwide_time_ns();
+    service->CallMethod(method, controller, request, response, traced_done);
+    const int64_t call_end = butil::cpuwide_time_ns();
+    BrpcTraceRecordStepLatency(
+        BRPC_SERVER_CALL_METHOD_STEP, log_id, call_end - call_start);
+    if (done_run && !done_run->load()) {
+        BrpcTraceSetStepMarker(
+            BRPC_SERVER_CALL_OUT_TO_SERIALIZE_IN, log_id, call_end);
+    }
+}
+
+void RecordServerCallMethodEndToSerializeIn(
+    Controller* cntl, int64_t serialize_start) {
+    if (cntl == NULL) {
+        return;
+    }
+    const int64_t marker = BrpcTraceTakeStepMarker(
+        BRPC_SERVER_CALL_OUT_TO_SERIALIZE_IN, cntl->log_id());
+    if (marker > 0 && serialize_start > marker) {
+        BrpcTraceRecordStepLatency(
+            BRPC_SERVER_CALL_OUT_TO_SERIALIZE_IN,
+            cntl->log_id(), serialize_start - marker);
+    }
+}
+#else
+void CallMethodAndTrace(
+    google::protobuf::Service* service,
+    const google::protobuf::MethodDescriptor* method,
+    google::protobuf::RpcController* controller,
+    const google::protobuf::Message* request,
+    google::protobuf::Message* response,
+    google::protobuf::Closure* done) {
+    service->CallMethod(method, controller, request, response, done);
+}
+#endif
+
 struct CallMethodInBackupThreadArgs {
     ::google::protobuf::Service* service;
     const ::google::protobuf::MethodDescriptor* method;
@@ -551,8 +755,8 @@ struct CallMethodInBackupThreadArgs {
 
 static void CallMethodInBackupThread(void* void_args) {
     CallMethodInBackupThreadArgs* args = (CallMethodInBackupThreadArgs*)void_args;
-    args->service->CallMethod(args->method, args->controller, args->request,
-                              args->response, args->done);
+    CallMethodAndTrace(args->service, args->method, args->controller,
+                       args->request, args->response, args->done);
     delete args;
 }
 
@@ -653,6 +857,10 @@ void ProcessRpcRequest(InputMessageBase* msg_base) {
     ScopedNonServiceError non_service_error(server);
 
     RpcMeta meta;
+#if BRPC_ENABLE_TRACE_SCOPE
+    const int64_t start_latency_time = butil::cpuwide_time_ns();
+    RecordServerReadOutToDeserializeIn(socket, start_latency_time);
+#endif
     if (!ParsePbFromIOBuf(&meta, msg->meta)) {
         LOG(WARNING) << "Fail to parse RpcMeta from " << *socket;
         socket->SetFailed(EREQUEST, "Fail to parse RpcMeta from %s",
@@ -660,6 +868,9 @@ void ProcessRpcRequest(InputMessageBase* msg_base) {
         return;
     }
     const RpcRequestMeta &request_meta = meta.request();
+#if BRPC_ENABLE_TRACE_SCOPE
+    const int64_t end_latency_time = butil::cpuwide_time_ns();
+#endif
 
     SampledRequest* sample = AskToBeSampled();
     if (sample) {
@@ -688,6 +899,10 @@ void ProcessRpcRequest(InputMessageBase* msg_base) {
     if (request_meta.has_log_id()) {
         cntl->set_log_id(request_meta.log_id());
     }
+#if BRPC_ENABLE_TRACE_SCOPE
+    BrpcTraceRecordStepLatency(
+        BRPC_DESERIALIZE_META_STEP, cntl->log_id(), end_latency_time - start_latency_time);
+#endif
     if (request_meta.has_request_id()) {
         cntl->set_request_id(request_meta.request_id());
     }
@@ -887,6 +1102,9 @@ void ProcessRpcRequest(InputMessageBase* msg_base) {
                 static_cast<ChecksumType>(meta.checksum_type());
             messages =
                 server->options().rpc_pb_message_factory->Get(*svc, *method);
+#if BRPC_ENABLE_TRACE_SCOPE
+            const int64_t start_msg_latency_time = butil::cpuwide_time_ns();
+#endif
             if (!DeserializeRpcMessage(req_buf, *cntl, content_type,
                                        compress_type, checksum_type,
                                        messages->Request())) {
@@ -900,6 +1118,12 @@ void ProcessRpcRequest(InputMessageBase* msg_base) {
                     ChecksumTypeToCStr(checksum_type), req_size);
                 break;
             }
+#if BRPC_ENABLE_TRACE_SCOPE
+            BrpcTraceRecordStepLatency(
+                BRPC_DESERIALIZE_MSG_STEP,
+                cntl->log_id(),
+                butil::cpuwide_time_ns() - start_msg_latency_time);
+#endif
             req_buf.clear();
         }
 
@@ -918,14 +1142,15 @@ void ProcessRpcRequest(InputMessageBase* msg_base) {
             span->AsParent();
         }
         if (!FLAGS_usercode_in_pthread) {
-            return svc->CallMethod(method, cntl.release(), 
-                                   messages->Request(),
-                                   messages->Response(), done);
+            CallMethodAndTrace(svc, method, cntl.release(),
+                               messages->Request(),
+                               messages->Response(), done);
+            return;
         }
         if (BeginRunningUserCode()) {
-            svc->CallMethod(method, cntl.release(), 
-                            messages->Request(),
-                            messages->Response(), done);
+            CallMethodAndTrace(svc, method, cntl.release(),
+                               messages->Request(),
+                               messages->Response(), done);
             return EndRunningUserCodeInPlace();
         } else {
             return EndRunningCallMethodInPool(
@@ -996,10 +1221,17 @@ void ProcessRpcResponse(InputMessageBase* msg_base) {
     const int64_t start_parse_us = butil::cpuwide_time_us();
     DestroyingPtr<MostCommonMessage> msg(static_cast<MostCommonMessage*>(msg_base));
     RpcMeta meta;
+#if BRPC_ENABLE_TRACE_SCOPE
+    const int64_t start_latency_time = butil::cpuwide_time_ns();
+    RecordClientReadOutToDeserializeIn(msg->socket(), start_latency_time);
+#endif
     if (!ParsePbFromIOBuf(&meta, msg->meta)) {
         LOG(WARNING) << "Fail to parse from response meta";
         return;
     }
+#if BRPC_ENABLE_TRACE_SCOPE
+    const int64_t end_latency_time = butil::cpuwide_time_ns();
+#endif
 
     const bthread_id_t cid = { static_cast<uint64_t>(meta.correlation_id()) };
     Controller* cntl = NULL;
@@ -1031,6 +1263,11 @@ void ProcessRpcResponse(InputMessageBase* msg_base) {
             (*cntl->response_user_fields())[it.first] = it.second;
         }
     }
+
+#if BRPC_ENABLE_TRACE_SCOPE
+    BrpcTraceRecordStepLatency(
+        BRPC_DESERIALIZE_META_STEP, cntl->log_id(), end_latency_time - start_latency_time);
+#endif
 
     cntl->set_rpc_received_us(msg->received_us());
     Span* span = accessor.span();
@@ -1078,6 +1315,9 @@ void ProcessRpcResponse(InputMessageBase* msg_base) {
                 ((SerializedResponse*)cntl->response())->
                     serialized_data().append(*res_buf_ptr);
             } else {
+#if BRPC_ENABLE_TRACE_SCOPE
+                const int64_t start_msg_latency_time = butil::cpuwide_time_ns();
+#endif
 #ifdef BRPC_WITH_URMA
                 PROF_START(BRPC_DESERIALIZE);
 #endif
@@ -1086,6 +1326,12 @@ void ProcessRpcResponse(InputMessageBase* msg_base) {
                                               cntl->response());
 #ifdef BRPC_WITH_URMA
                 PROF_END(BRPC_DESERIALIZE, true);
+#endif
+#if BRPC_ENABLE_TRACE_SCOPE
+                BrpcTraceRecordStepLatency(
+                    BRPC_DESERIALIZE_MSG_STEP,
+                    cntl->log_id(),
+                    butil::cpuwide_time_ns() - start_msg_latency_time);
 #endif
                 if (!ret) {
                     cntl->SetFailed(
@@ -1102,6 +1348,9 @@ void ProcessRpcResponse(InputMessageBase* msg_base) {
     } while (0);
     // Unlocks correlation_id inside. Revert controller's
     // error code if it version check of `cid' fails
+#if BRPC_ENABLE_TRACE_SCOPE
+    SetClientDeserializeOutToEndRpcIn(butil::cpuwide_time_ns());
+#endif
     msg.reset();  // optional, just release resource ASAP
     accessor.OnResponse(cid, saved_error);
 }
