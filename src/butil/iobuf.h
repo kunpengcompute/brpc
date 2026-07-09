@@ -23,7 +23,9 @@
 #define BUTIL_IOBUF_H
 
 #include <sys/uio.h>                             // iovec
+#include <stddef.h>                              // size_t
 #include <stdint.h>                              // uint32_t, int64_t
+#include <atomic>
 #include <functional>
 #include <string>                                // std::string
 #include <ostream>                               // std::ostream
@@ -34,6 +36,149 @@
 #include "butil/macros.h"
 #include "butil/reader_writer.h"
 #include "butil/binary_printer.h"
+
+#ifndef BRPC_ENABLE_TRACE_SCOPE
+#define BRPC_ENABLE_TRACE_SCOPE 0
+#elif (BRPC_ENABLE_TRACE_SCOPE + 0)
+#undef BRPC_ENABLE_TRACE_SCOPE
+#define BRPC_ENABLE_TRACE_SCOPE 1
+#else
+#undef BRPC_ENABLE_TRACE_SCOPE
+#define BRPC_ENABLE_TRACE_SCOPE 0
+#endif
+
+#ifndef BRPC_TRACE_MAX_RPC_IO_NUM
+#define BRPC_TRACE_MAX_RPC_IO_NUM 2000000
+#endif
+
+#ifdef BRPC_WITH_URMA
+#include "iobuf/ubsocket_zcopy_adapter.h"
+#include "profiling/ubsocket_prof.h"
+extern std::atomic<int64_t> g_brpc_ubs_step_latency[20];
+#endif
+
+enum BRPC_STEP {
+    BRPC_END2END_STEP = 0,
+    BRPC_CALL_IN_TO_SOCKET_SPLIT,
+    BRPC_SOCKET_SPLIT_TO_TCP_WRITE_IN,
+    BRPC_SOCKET_SPLIT_TO_RDMA_WRITE_IN,
+    BRPC_SOCKET_SPLIT_TO_UB_WRITE_IN,
+    BRPC_READ_OUT_TO_PROCESS_IN,
+    BRPC_RDMA_READ_OUT_TO_PROCESS_IN,
+    BRPC_UB_READ_OUT_TO_PROCESS_IN,
+    BRPC_PROCESS_IN_TO_TRANSPORT_SPLIT,
+    BRPC_TRANSPORT_SPLIT_TO_TCP_WRITEV_IN,
+    BRPC_TRANSPORT_SPLIT_TO_RDMA_WRITEV_IN,
+    BRPC_TRANSPORT_SPLIT_TO_UB_WRITEV_IN,
+    BRPC_READ_OUT_TO_RPC_OUT,
+    BRPC_WRITE_IN_TO_READ_OUT,
+    BRPC_TCP_WRITEV,
+    BRPC_RDMA_WRITEV,
+    BRPC_RDMA_WRITE_LOOP,
+    BRPC_UB_WRITEV,
+    BRPC_TCP_READV,
+    BRPC_TCP_READV_OK,
+    BRPC_TCP_READV_EAGAIN,
+    BRPC_RDMA_READV,
+    BRPC_UB_READV,
+    BRPC_UB_READV_OK,
+    BRPC_UB_READV_EAGAIN,
+    BRPC_EPOLL_WAIT,
+    BRPC_EPOLL_WAIT_OUT_TO_ON_NEW_MSG_IN,
+    BRPC_ON_NEW_MSG_LOOP_IN_TO_TCP_READV_IN,
+    BRPC_ON_NEW_MSG_LOOP_IN_TO_UB_READV_IN,
+    BRPC_RDMA_EPOLL_WAIT,
+    BRPC_RDMA_EPOLL_WAIT_OUT_TO_POLL_CQ_IN,
+    BRPC_POLL_CQ_LOOP_IN_TO_RDMA_READV_IN,
+    BRPC_CALL_IN_TO_RPC_OUT,
+    BRPC_SERIALIZE_STEP,
+    BRPC_PACK_STEP,
+    BRPC_DESERIALIZE_META_STEP,
+    BRPC_DESERIALIZE_MSG_STEP,
+    BRPC_SERVER_CALL_METHOD_STEP,
+    BRPC_SERVER_CALL_OUT_TO_SERIALIZE_IN,
+    BRPC_READ_OUT_TO_DESERIALIZE_IN,
+    BRPC_RDMA_READ_OUT_TO_DESERIALIZE_IN,
+    BRPC_UB_READ_OUT_TO_DESERIALIZE_IN,
+    BRPC_SERIALIZE_OUT_TO_TCP_WRITEV_IN,
+    BRPC_SERIALIZE_OUT_TO_RDMA_WRITEV_IN,
+    BRPC_SERIALIZE_OUT_TO_UB_WRITEV_IN,
+    BRPC_CLIENT_CALL_OUT_TO_SERIALIZE_IN,
+    BRPC_CLIENT_SERIALIZE_PACK_OUT_TO_TCP_WRITEV_IN,
+    BRPC_CLIENT_SERIALIZE_PACK_OUT_TO_RDMA_WRITEV_IN,
+    BRPC_CLIENT_SERIALIZE_PACK_OUT_TO_UB_WRITEV_IN,
+    BRPC_CLIENT_READ_OUT_TO_DESERIALIZE_IN,
+    BRPC_CLIENT_RDMA_READ_OUT_TO_DESERIALIZE_IN,
+    BRPC_CLIENT_UB_READ_OUT_TO_DESERIALIZE_IN,
+    BRPC_CLIENT_DESERIALIZE_OUT_TO_ENDRPC_IN,
+    BRPC_STEP1_CLIENT_FRAMEWORK,
+    BRPC_STEP3_SERVER_FRAMEWORK,
+    BRPC_STEP5_CLIENT_FRAMEWORK,
+    BRPC_STEP_COUNT,
+};
+
+enum BRPC_NOCNTL_STEP {
+    BRPC_CALL_COUNT = 0,
+    BRPC_READV_COUNT,
+    BRPC_WRITEV_COUNT,
+    BRPC_RPC_COUNT,
+    BRPC_READ_OUT_TO_PROCESS_COUNT,
+    BRPC_RDMA_READ_OUT_TO_PROCESS_COUNT,
+    BRPC_UB_READ_OUT_TO_PROCESS_COUNT,
+    BRPC_SOCKET_WRITE_COUNT,
+    BRPC_NOCNTL_STEP_COUNT,
+};
+
+enum BRPC_LATENCY_IDX {
+    BRPC_LATENCY_SUM = 0,
+    BRPC_LATENCY_CNT,
+    BRPC_IDX_COUNT,
+};
+
+#if BRPC_ENABLE_TRACE_SCOPE
+extern int64_t **g_brpc_step_latency;
+extern std::atomic<int64_t> g_brpc_step_latency_nocntl[BRPC_NOCNTL_STEP_COUNT][BRPC_IDX_COUNT];
+extern std::atomic<int64_t> g_brpc_step_sample_count[BRPC_STEP_COUNT];
+extern std::string g_latency_name[BRPC_STEP_COUNT];
+
+int64_t BrpcTraceNextStepSampleIdx(BRPC_STEP step);
+void BrpcTraceRecordStepSample(BRPC_STEP step, int64_t latency_ns);
+void BrpcTraceRecordStepLatency(BRPC_STEP step, int64_t key, int64_t latency_ns);
+void BrpcTraceInitMarkerStorage(int64_t capacity);
+void BrpcTraceSetStepMarker(BRPC_STEP step, int64_t key, int64_t start_ts);
+int64_t BrpcTraceGetStepMarker(BRPC_STEP step, int64_t key);
+int64_t BrpcTraceTakeStepMarker(BRPC_STEP step, int64_t key);
+void BrpcTraceEraseStepMarker(BRPC_STEP step, int64_t key);
+
+struct BrpcTraceStepStats {
+    int64_t sum;
+    int64_t count;
+    double avg;
+    int64_t p50;
+    int64_t p90;
+    int64_t p99;
+};
+
+bool BrpcTraceGetStepStats(BRPC_STEP step, int64_t capacity,
+                           BrpcTraceStepStats* stats);
+void BrpcTracePrintStepStats(const BRPC_STEP* steps, size_t step_count,
+                             int64_t capacity);
+void BrpcTracePrintAllStepStats(int64_t capacity);
+void BrpcTracePrintFrameworkStepStats(int64_t capacity);
+#else
+#define BrpcTraceNextStepSampleIdx(step) (0)
+#define BrpcTraceRecordStepSample(step, latency_ns) ((void)0)
+#define BrpcTraceRecordStepLatency(step, key, latency_ns) ((void)0)
+#define BrpcTraceInitMarkerStorage(capacity) ((void)0)
+#define BrpcTraceSetStepMarker(step, key, start_ts) ((void)0)
+#define BrpcTraceGetStepMarker(step, key) (0)
+#define BrpcTraceTakeStepMarker(step, key) (0)
+#define BrpcTraceEraseStepMarker(step, key) ((void)0)
+#define BrpcTraceGetStepStats(step, capacity, stats) (false)
+#define BrpcTracePrintStepStats(steps, step_count, capacity) ((void)0)
+#define BrpcTracePrintAllStepStats(capacity) ((void)0)
+#define BrpcTracePrintFrameworkStepStats(capacity) ((void)0)
+#endif
 
 // For IOBuf::appendv(const const_iovec*, size_t). The only difference of this
 // struct from iovec (defined in sys/uio.h) is that iov_base is `const void*'

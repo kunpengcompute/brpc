@@ -19,6 +19,7 @@
 
 #include <gflags/gflags.h>
 #include "butil/fd_utility.h"
+#include "butil/iobuf.h"
 #include "butil/logging.h"                   // CHECK, LOG
 #include "butil/sys_byteorder.h"             // HostToNet,NetToHost
 #include "bthread/bthread.h"
@@ -98,6 +99,9 @@ static const uint16_t MIN_QP_SIZE = 16;
 static const uint16_t MAX_QP_SIZE = 4096;
 static const uint16_t MIN_BLOCK_SIZE = 1024;
 static const uint32_t ACK_MSG_RDMA_OK = 0x1;
+#if BRPC_ENABLE_TRACE_SCOPE
+static const int64_t BRPC_TIMESTAMP_NS_THRESHOLD = 1000000000000LL;
+#endif
 
 static butil::Mutex* g_rdma_resource_mutex = NULL;
 static RdmaResource* g_rdma_resource_list = NULL;
@@ -784,9 +788,36 @@ ssize_t RdmaEndpoint::CutFromIOBufList(butil::IOBuf** from, size_t ndata) {
     CHECK(from != NULL);
     CHECK(ndata > 0);
 
+#if BRPC_ENABLE_TRACE_SCOPE
+    const int64_t call_count =
+        g_brpc_step_latency_nocntl[BRPC_CALL_COUNT][BRPC_LATENCY_CNT]
+            .load(butil::memory_order_relaxed);
+    const bool is_client = (call_count != 0);
+    const int64_t call_idx = is_client ? (call_count - 1) : -1;
+    int64_t rpc_idx = -1;
+    if (is_client) {
+        rpc_idx = g_brpc_step_latency_nocntl[BRPC_RPC_COUNT][BRPC_LATENCY_CNT]
+            .load(butil::memory_order_relaxed);
+    }
+    const int64_t server_transport_idx =
+        g_brpc_step_latency_nocntl[BRPC_RDMA_READ_OUT_TO_PROCESS_COUNT][BRPC_LATENCY_CNT]
+            .load(butil::memory_order_relaxed);
+    bool client_socket_split_pending = is_client && call_idx >= 0 &&
+        BrpcTraceGetStepMarker(BRPC_SOCKET_SPLIT_TO_RDMA_WRITE_IN, call_idx) >
+            BRPC_TIMESTAMP_NS_THRESHOLD;
+    bool server_transport_split_pending = !is_client &&
+        BrpcTraceGetStepMarker(BRPC_TRANSPORT_SPLIT_TO_RDMA_WRITEV_IN, server_transport_idx) >
+            BRPC_TIMESTAMP_NS_THRESHOLD;
+    int64_t write_in_start_at_split_end = 0;
+#endif
+
     size_t total_len = 0;
     size_t current = 0;
     uint32_t window = 0;
+#if BRPC_ENABLE_TRACE_SCOPE
+    const int64_t rdma_write_loop_start = butil::cpuwide_time_ns();
+    int64_t rdma_write_loop_end = 0;
+#endif
     ibv_send_wr wr;
     int max_sge = GetRdmaMaxSge();
     ibv_sge sglist[max_sge];
@@ -878,7 +909,67 @@ ssize_t RdmaEndpoint::CutFromIOBufList(butil::IOBuf** from, size_t ndata) {
         }
 
         ibv_send_wr* bad = NULL;
+#if BRPC_ENABLE_TRACE_SCOPE
+        const int64_t start_latency_time = butil::cpuwide_time_ns();
+        if (client_socket_split_pending) {
+            const int64_t marker =
+                BrpcTraceTakeStepMarker(BRPC_SOCKET_SPLIT_TO_RDMA_WRITE_IN, call_idx);
+            if (marker > BRPC_TIMESTAMP_NS_THRESHOLD && start_latency_time > marker) {
+                BrpcTraceRecordStepSample(BRPC_SOCKET_SPLIT_TO_RDMA_WRITE_IN,
+                                          start_latency_time - marker);
+            }
+            const int64_t pack_out_marker =
+                BrpcTraceTakeStepMarker(
+                    BRPC_CLIENT_SERIALIZE_PACK_OUT_TO_RDMA_WRITEV_IN, call_idx);
+            if (pack_out_marker > BRPC_TIMESTAMP_NS_THRESHOLD &&
+                start_latency_time > pack_out_marker) {
+                BrpcTraceRecordStepSample(
+                    BRPC_CLIENT_SERIALIZE_PACK_OUT_TO_RDMA_WRITEV_IN,
+                    start_latency_time - pack_out_marker);
+            }
+            const int64_t framework_marker =
+                BrpcTraceTakeStepMarker(BRPC_STEP1_CLIENT_FRAMEWORK, call_idx);
+            if (framework_marker > BRPC_TIMESTAMP_NS_THRESHOLD &&
+                start_latency_time > framework_marker) {
+                BrpcTraceRecordStepSample(
+                    BRPC_STEP1_CLIENT_FRAMEWORK,
+                    start_latency_time - framework_marker);
+            }
+            client_socket_split_pending = false;
+            write_in_start_at_split_end = start_latency_time;
+        }
+        if (server_transport_split_pending) {
+            const int64_t marker =
+                BrpcTraceTakeStepMarker(BRPC_TRANSPORT_SPLIT_TO_RDMA_WRITEV_IN,
+                                        server_transport_idx);
+            if (marker > BRPC_TIMESTAMP_NS_THRESHOLD && start_latency_time > marker) {
+                BrpcTraceRecordStepSample(BRPC_TRANSPORT_SPLIT_TO_RDMA_WRITEV_IN,
+                                          start_latency_time - marker);
+            }
+            const int64_t serialize_marker =
+                BrpcTraceTakeStepMarker(BRPC_SERIALIZE_OUT_TO_RDMA_WRITEV_IN,
+                                        server_transport_idx);
+            if (serialize_marker > BRPC_TIMESTAMP_NS_THRESHOLD &&
+                start_latency_time > serialize_marker) {
+                BrpcTraceRecordStepSample(BRPC_SERIALIZE_OUT_TO_RDMA_WRITEV_IN,
+                                          start_latency_time - serialize_marker);
+            }
+            const int64_t framework_marker =
+                BrpcTraceTakeStepMarker(
+                    BRPC_STEP3_SERVER_FRAMEWORK, server_transport_idx);
+            if (framework_marker > BRPC_TIMESTAMP_NS_THRESHOLD &&
+                start_latency_time > framework_marker) {
+                BrpcTraceRecordStepSample(
+                    BRPC_STEP3_SERVER_FRAMEWORK,
+                    start_latency_time - framework_marker);
+            }
+            server_transport_split_pending = false;
+        }
+#endif
         int err = ibv_post_send(_resource->qp, &wr, &bad);
+#if BRPC_ENABLE_TRACE_SCOPE
+        const int64_t end_latency_time = butil::cpuwide_time_ns();
+#endif
         if (err != 0) {
             // We use other way to guarantee the Send Queue is not full.
             // So we just consider this error as an unrecoverable error.
@@ -899,7 +990,26 @@ ssize_t RdmaEndpoint::CutFromIOBufList(butil::IOBuf** from, size_t ndata) {
         // Socket, and the other thread of HandleCompletion can only add this
         // counter.
         _window_size.fetch_sub(1, butil::memory_order_relaxed);
+
+#if BRPC_ENABLE_TRACE_SCOPE
+        BrpcTraceRecordStepSample(BRPC_RDMA_WRITEV, end_latency_time - start_latency_time);
+        g_brpc_step_latency_nocntl[BRPC_WRITEV_COUNT][BRPC_LATENCY_CNT]
+            .fetch_add(1, butil::memory_order_relaxed);
+        rdma_write_loop_end = end_latency_time;
+#endif
     }
+
+#if BRPC_ENABLE_TRACE_SCOPE
+    if (is_client && rpc_idx >= 0 &&
+        write_in_start_at_split_end != 0 &&
+        BrpcTraceGetStepMarker(BRPC_WRITE_IN_TO_READ_OUT, rpc_idx) == 0) {
+        BrpcTraceSetStepMarker(BRPC_WRITE_IN_TO_READ_OUT, rpc_idx, write_in_start_at_split_end);
+    }
+    if (rdma_write_loop_end > rdma_write_loop_start) {
+        BrpcTraceRecordStepSample(
+            BRPC_RDMA_WRITE_LOOP, rdma_write_loop_end - rdma_write_loop_start);
+    }
+#endif
 
     return total_len;
 }
@@ -1373,6 +1483,18 @@ void RdmaEndpoint::PollCq(Socket* m) {
     }
     CHECK(ep == s->_rdma_ep);
 
+#if BRPC_ENABLE_TRACE_SCOPE
+    int64_t epoll_wait_latency_ns = 0;
+    int64_t epoll_wait_end_ns = 0;
+    int64_t poll_cq_enter_ns = 0;
+    bool need_record_epoll_trace = false;
+    if (!FLAGS_rdma_use_polling) {
+        m->ConsumeInputEpollTrace(&epoll_wait_latency_ns, &epoll_wait_end_ns);
+        poll_cq_enter_ns = butil::cpuwide_time_ns();
+        need_record_epoll_trace = true;
+    }
+#endif
+
     if (!FLAGS_rdma_use_polling) {
         if (ep->GetAndAckEvents() < 0) {
             const int saved_errno = errno;
@@ -1388,6 +1510,10 @@ void RdmaEndpoint::PollCq(Socket* m) {
     InputMessenger::InputMessageClosure last_msg;
     ibv_wc wc[FLAGS_rdma_cqe_poll_once];
     while (true) {
+#if BRPC_ENABLE_TRACE_SCOPE
+        const int64_t poll_cq_loop_enter_ns = butil::cpuwide_time_ns();
+        const int64_t start_latency_time = butil::cpuwide_time_ns();
+#endif
         int cnt = ibv_poll_cq(ep->_resource->cq, FLAGS_rdma_cqe_poll_once, wc);
         if (cnt < 0) {
             const int saved_errno = errno;
@@ -1430,7 +1556,20 @@ void RdmaEndpoint::PollCq(Socket* m) {
         }
         notified = false;
 
+#if BRPC_ENABLE_TRACE_SCOPE
+        bool has_recv_wc = false;
+        for (int i = 0; i < cnt; ++i) {
+            if (wc[i].opcode == IBV_WC_RECV) {
+                has_recv_wc = true;
+                break;
+            }
+        }
+#endif
+
         ssize_t bytes = 0;
+#if BRPC_ENABLE_TRACE_SCOPE
+        bool has_recv_payload = false;
+#endif
         for (int i = 0; i < cnt; ++i) {
             if (s->Failed()) {
                 continue;
@@ -1452,8 +1591,80 @@ void RdmaEndpoint::PollCq(Socket* m) {
                         s->description().c_str(), berror(saved_errno));
             } else if (nr > 0) {
                 bytes += nr;
+#if BRPC_ENABLE_TRACE_SCOPE
+                has_recv_payload = true;
+#endif
             }
         }
+
+#if BRPC_ENABLE_TRACE_SCOPE
+        if (has_recv_wc) {
+            if (need_record_epoll_trace) {
+                if (epoll_wait_latency_ns > 0) {
+                    BrpcTraceRecordStepSample(BRPC_RDMA_EPOLL_WAIT, epoll_wait_latency_ns);
+                }
+                if (epoll_wait_end_ns > BRPC_TIMESTAMP_NS_THRESHOLD &&
+                    poll_cq_enter_ns > epoll_wait_end_ns) {
+                    BrpcTraceRecordStepSample(BRPC_RDMA_EPOLL_WAIT_OUT_TO_POLL_CQ_IN,
+                                              poll_cq_enter_ns - epoll_wait_end_ns);
+                }
+                if (start_latency_time > poll_cq_loop_enter_ns) {
+                    BrpcTraceRecordStepSample(BRPC_POLL_CQ_LOOP_IN_TO_RDMA_READV_IN,
+                                              start_latency_time - poll_cq_loop_enter_ns);
+                }
+                need_record_epoll_trace = false;
+            }
+
+            const int64_t end_latency_time = butil::cpuwide_time_ns();
+            g_brpc_step_latency_nocntl[BRPC_READV_COUNT][BRPC_LATENCY_CNT]
+                .fetch_add(1, butil::memory_order_relaxed);
+            BrpcTraceRecordStepSample(BRPC_RDMA_READV, end_latency_time - start_latency_time);
+
+            const int64_t count =
+                g_brpc_step_latency_nocntl[BRPC_RPC_COUNT][BRPC_LATENCY_CNT]
+                    .load(butil::memory_order_relaxed);
+            if (g_brpc_step_latency_nocntl[BRPC_CALL_COUNT][BRPC_LATENCY_CNT]
+                    .load(butil::memory_order_relaxed) != 0) {
+                if (has_recv_payload) {
+                    BrpcTraceSetStepMarker(
+                        BRPC_CLIENT_RDMA_READ_OUT_TO_DESERIALIZE_IN,
+                        count,
+                        end_latency_time);
+                    BrpcTraceSetStepMarker(
+                        BRPC_STEP5_CLIENT_FRAMEWORK,
+                        count,
+                        end_latency_time);
+                }
+                const int64_t marker =
+                    BrpcTraceTakeStepMarker(BRPC_WRITE_IN_TO_READ_OUT, count);
+                if (marker > BRPC_TIMESTAMP_NS_THRESHOLD && end_latency_time > marker) {
+                    BrpcTraceRecordStepSample(
+                        BRPC_WRITE_IN_TO_READ_OUT, end_latency_time - marker);
+                }
+            }
+        }
+
+        if (has_recv_payload &&
+            g_brpc_step_latency_nocntl[BRPC_CALL_COUNT][BRPC_LATENCY_CNT]
+                .load(butil::memory_order_relaxed) == 0) {
+            int64_t count =
+                g_brpc_step_latency_nocntl[BRPC_RDMA_READ_OUT_TO_PROCESS_COUNT][BRPC_LATENCY_CNT]
+                    .load(butil::memory_order_relaxed);
+            if (count == 0 ||
+                BrpcTraceGetStepMarker(BRPC_RDMA_READ_OUT_TO_PROCESS_IN, count) == 0) {
+                count =
+                    g_brpc_step_latency_nocntl[BRPC_RDMA_READ_OUT_TO_PROCESS_COUNT][BRPC_LATENCY_CNT]
+                        .fetch_add(1, butil::memory_order_relaxed) + 1;
+                const int64_t read_out_ts = butil::cpuwide_time_ns();
+                BrpcTraceSetStepMarker(
+                    BRPC_RDMA_READ_OUT_TO_PROCESS_IN, count, read_out_ts);
+                BrpcTraceSetStepMarker(
+                    BRPC_RDMA_READ_OUT_TO_DESERIALIZE_IN, count, read_out_ts);
+                BrpcTraceSetStepMarker(
+                    BRPC_STEP3_SERVER_FRAMEWORK, count, read_out_ts);
+            }
+        }
+#endif
 
         // Just call PrcessNewMessage once for all of these CQEs.
         // Otherwise it may call too many bthread_flush to affect performance.

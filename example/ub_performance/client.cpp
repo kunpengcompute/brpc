@@ -17,6 +17,9 @@
 
 #include <stdlib.h>
 #include <unistd.h>
+#include <atomic>
+#include <cstdio>
+#include <limits>
 #include <vector>
 #include <gflags/gflags.h>
 #include <random>
@@ -24,6 +27,7 @@
 #include <chrono>
 #include "butil/atomicops.h"
 #include "butil/fast_rand.h"
+#include "butil/iobuf.h"
 #include "butil/logging.h"
 #ifdef WITH_RDMA
 #include "brpc/rdma/rdma_helper.h"
@@ -56,6 +60,7 @@ DEFINE_int64(req_size, 0, "request size");
 DEFINE_bool(client_ignore_oc, false, "Client ignore eovercrowded, false by default");
 DEFINE_int32(max_retry, 3, "max retry times (0-1000)");
 DEFINE_int32(connect_retry_interval, 200, "connect retry interval(ms)");
+DEFINE_bool(sort, false, "sort");
 
 bvar::LatencyRecorder g_latency_recorder("client");
 bvar::LatencyRecorder g_server_cpu_recorder("server_cpu");
@@ -71,6 +76,25 @@ volatile bool g_stop = false;
 
 butil::atomic<int64_t> g_token(10000);
 std::string g_name;
+std::atomic<int64_t> g_totalSendNum(0);
+uint64_t g_test_duration = 0;
+static const int64_t kMaxRpcIoNum = BRPC_TRACE_MAX_RPC_IO_NUM;
+#if BRPC_ENABLE_TRACE_SCOPE
+int64_t g_step_capacity = 0;
+
+static int64_t EstimateStepCapacity() {
+    if (kMaxRpcIoNum <= 0) {
+        return 0;
+    }
+    const int64_t split_factor = 16;
+    const int64_t guard = 2048;
+    const int64_t max_mul = (std::numeric_limits<int64_t>::max() - guard) / split_factor;
+    if (kMaxRpcIoNum > max_mul) {
+        return kMaxRpcIoNum;
+    }
+    return kMaxRpcIoNum * split_factor + guard;
+}
+#endif
 
 static void* GenerateToken(void* arg) {
     int64_t start_time = butil::monotonic_time_ns();
@@ -183,10 +207,21 @@ public:
             }
             g_token.fetch_sub(1, butil::memory_order_relaxed);
         }
+        int64_t log_id = -1;
+        if (kMaxRpcIoNum > 0) {
+            log_id = g_totalSendNum.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (log_id > kMaxRpcIoNum) {
+                _stop = true;
+                return;
+            }
+        }
         RespClosure* closure = new RespClosure;
         test::PerfTestRequest request;
         closure->resp = new test::PerfTestResponse();
         closure->cntl = new brpc::Controller();
+#if BRPC_ENABLE_TRACE_SCOPE
+        closure->cntl->set_log_id(log_id);
+#endif
         if (FLAGS_client_ignore_oc) {
             closure->cntl->ignore_eovercrowded();
         }
@@ -221,6 +256,31 @@ public:
         }
 
         g_total_cnt.fetch_add(1, butil::memory_order_relaxed);
+
+#if BRPC_ENABLE_TRACE_SCOPE
+        const int64_t rpc_count =
+            g_brpc_step_latency_nocntl[BRPC_RPC_COUNT][BRPC_LATENCY_CNT]
+                .load(butil::memory_order_relaxed);
+        if (rpc_count != 0 && (rpc_count % 50000) == 0) {
+            std::cout << "===============================" << std::endl;
+            std::cout
+                << "Call Count: "
+                << g_brpc_step_latency_nocntl[BRPC_CALL_COUNT][BRPC_LATENCY_CNT]
+                       .load(butil::memory_order_relaxed)
+                << "\nWriteV Count: "
+                << g_brpc_step_latency_nocntl[BRPC_WRITEV_COUNT][BRPC_LATENCY_CNT]
+                       .load(butil::memory_order_relaxed)
+                << "\nReadV Count: "
+                << g_brpc_step_latency_nocntl[BRPC_READV_COUNT][BRPC_LATENCY_CNT]
+                       .load(butil::memory_order_relaxed)
+                << "\nRPC Count: " << rpc_count
+                << "\nClient Count: " << g_total_cnt.load(butil::memory_order_relaxed)
+                << "\nController Log id: " << closure->cntl->log_id()
+                << "\nClient Latency: " << closure->cntl->latency_us()
+                << "\nClient Record End.\n";
+            std::cout << "===============================" << std::endl;
+        }
+#endif
 
         cntl_guard.reset(NULL);
         response_guard.reset(NULL);
@@ -301,19 +361,32 @@ void Test(int thread_num, int attachment_size) {
         }
     }
     uint64_t end_time = butil::gettimeofday_us();
-    double throughput = g_total_bytes / 1.048576 / (end_time - start_time);
+    g_test_duration = end_time - start_time;
+    double throughput = g_total_bytes / 1.048576 / g_test_duration;
     if (FLAGS_test_iterations == 0) {
         std::cout << "Avg-Latency: " << g_latency_recorder.latency(10)
             << ", 90th-Latency: " << g_latency_recorder.latency_percentile(0.9)
             << ", 99th-Latency: " << g_latency_recorder.latency_percentile(0.99)
             << ", 99.9th-Latency: " << g_latency_recorder.latency_percentile(0.999)
             << ", Throughput: " << throughput << "MB/s"
-            << ", QPS: " << (g_total_cnt.load(butil::memory_order_relaxed) * 1000 * 1000 / (end_time - start_time))
+            << ", QPS: " << (g_total_cnt.load(butil::memory_order_relaxed) * 1000 * 1000 / g_test_duration)
             << ", Server CPU-utilization: " << g_server_cpu_recorder.latency(10) << "\%"
             << ", Client CPU-utilization: " << g_client_cpu_recorder.latency(10) << "\%"
             << ", Connect-Latency: " << g_connect_latency_us.load(butil::memory_order_relaxed) << "us"
             << ", First-RPC-Latency: " << g_first_rpc_latency_us.load(butil::memory_order_relaxed) << "us"
+            << ", Test duration: " << g_test_duration
+            << ", Total Count: " << g_total_cnt.load(butil::memory_order_relaxed)
             << std::endl;
+#if BRPC_ENABLE_TRACE_SCOPE
+        if (FLAGS_sort) {
+            std::cout << "No use to use FLAGS_sort because data is sorted before percentile output." << std::endl;
+        }
+        BrpcTracePrintFrameworkStepStats(g_step_capacity);
+        std::cout << "BRPC_STEP_COUNT: " << BRPC_STEP_COUNT << std::endl;
+        BrpcTracePrintAllStepStats(g_step_capacity);
+#else
+        std::cout << "BRPC_ENABLE_TRACE_SCOPE is off; trace stats are disabled." << std::endl;
+#endif
     } else {
         std::cout << " Throughput: " << throughput << "MB/s" << std::endl;
     }
@@ -322,6 +395,28 @@ void Test(int thread_num, int attachment_size) {
 
 int main(int argc, char* argv[]) {
     GFLAGS_NAMESPACE::ParseCommandLineFlags(&argc, &argv, true);
+#if BRPC_ENABLE_TRACE_SCOPE
+    g_step_capacity = EstimateStepCapacity();
+    std::cout << "Step record capacity: " << g_step_capacity << std::endl;
+    g_brpc_step_latency = (int64_t **)malloc(BRPC_STEP_COUNT * sizeof(int64_t *));
+    if (g_brpc_step_latency == nullptr) {
+        fprintf(stderr, "malloc g_brpc_step_latency rows failed\n");
+        return 1;
+    }
+    for (uint32_t i = 0; i < BRPC_STEP_COUNT; ++i) {
+        g_brpc_step_latency[i] = (int64_t *)calloc(g_step_capacity, sizeof(int64_t));
+        if (g_brpc_step_latency[i] == nullptr) {
+            fprintf(stderr, "malloc g_brpc_step_latency cols failed\n");
+            return 1;
+        }
+    }
+    BrpcTraceInitMarkerStorage(g_step_capacity);
+    for (uint32_t i = 0; i < BRPC_NOCNTL_STEP_COUNT; ++i) {
+        for (uint32_t j = 0; j < BRPC_IDX_COUNT; ++j) {
+            g_brpc_step_latency_nocntl[i][j].store(0);
+        }
+    }
+#endif
     g_name.resize(FLAGS_req_size, 'r');
 
     g_token.store(FLAGS_initial_tokens);

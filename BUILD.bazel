@@ -61,6 +61,11 @@ COPTS = [
     "//conditions:default": [""],
 })
 
+TRACE_SCOPE_DEFINES = select({
+    "//bazel/config:brpc_enable_trace_scope": ["BRPC_ENABLE_TRACE_SCOPE=1"],
+    "//conditions:default": ["BRPC_ENABLE_TRACE_SCOPE=0"],
+})
+
 LINKOPTS = [
     "-pthread",
     "-ldl",
@@ -341,6 +346,7 @@ cc_library(
         ],
         "//conditions:default": [],
     }),
+    defines = TRACE_SCOPE_DEFINES,
     includes = [
         "src/",
     ],
