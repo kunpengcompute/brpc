@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-#include "test.pb.h"
+#include "press.pb.h"
 
 namespace data_gen {
 
