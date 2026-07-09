@@ -37,7 +37,8 @@
 #include "bthread/bthread.h"
 #include "bvar/latency_recorder.h"
 #include "bvar/variable.h"
-#include "test.pb.h"
+#include "press.pb.h"
+#include "data_generator.h"
 
 DEFINE_int32(thread_num, 1, "How many threads are used");
 DEFINE_int32(queue_depth, 1, "How many requests can be pending in the queue");
@@ -45,7 +46,6 @@ DEFINE_int32(expected_qps, 0, "The expected QPS");
 DEFINE_int64(initial_tokens, 10000, "The initial number of tokens");
 DEFINE_int32(max_thread_num, 16, "The max number of threads are used");
 DEFINE_int32(attachment_size, 0, "Attachment size is used (in Bytes)");
-DEFINE_bool(echo_attachment, false, "Select whether attachment should be echo");
 DEFINE_string(connection_type, "single", "Connection type of the channel");
 DEFINE_string(protocol, "baidu_std", "Protocol type.");
 DEFINE_string(servers, "0.0.0.0:8002+0.0.0.0:8002", "IP Address of servers");
@@ -56,14 +56,17 @@ DEFINE_int32(test_seconds, 20, "Test running time");
 DEFINE_int32(test_iterations, 0, "Test iterations");
 DEFINE_int32(dummy_port, 8001, "Dummy server port number");
 DEFINE_int32(connect_timeout_ms, 2000, "connect timeout");
-DEFINE_int64(req_size, 0, "request size");
 DEFINE_bool(client_ignore_oc, false, "Client ignore eovercrowded, false by default");
 DEFINE_int32(max_retry, 3, "max retry times (0-1000)");
 DEFINE_int32(connect_retry_interval, 200, "connect retry interval(ms)");
+DEFINE_int32(num_datasets, 500, "Number of random dataset specs to generate");
+DEFINE_int32(seed, 1, "Random seed for dataset generation");
+DEFINE_int32(min_size, 1024, "Minimum business payload target bytes");
+DEFINE_int32(max_size, 1048576, "Maximum business payload target bytes");
+DEFINE_int64(fixed_size, 0, "Fixed target payload size in bytes. 0 = random distribution");
 DEFINE_bool(sort, false, "sort");
 
 bvar::LatencyRecorder g_latency_recorder("client");
-bvar::LatencyRecorder g_server_cpu_recorder("server_cpu");
 bvar::LatencyRecorder g_client_cpu_recorder("client_cpu");
 butil::atomic<int64_t> g_connect_latency_us(0);
 butil::atomic<int64_t> g_first_rpc_latency_us(0);
@@ -75,7 +78,9 @@ int rr_index = 0;
 volatile bool g_stop = false;
 
 butil::atomic<int64_t> g_token(10000);
-std::string g_name;
+std::vector<press::Request> g_request_pool;
+std::vector<size_t> g_request_pb_sizes;
+butil::atomic<size_t> g_pool_idx(0);
 std::atomic<int64_t> g_totalSendNum(0);
 uint64_t g_test_duration = 0;
 static const int64_t kMaxRpcIoNum = BRPC_TRACE_MAX_RPC_IO_NUM;
@@ -113,7 +118,7 @@ static void* GenerateToken(void* arg) {
 
 class PerformanceTest {
 public:
-    PerformanceTest(int attachment_size, bool echo_attachment)
+    PerformanceTest(int attachment_size)
         : _addr(NULL)
         , _channel(NULL)
         , _start_time(0)
@@ -125,7 +130,6 @@ public:
             butil::fast_rand_bytes(_addr, attachment_size);
             _attachment.append(_addr, attachment_size);
         }
-        _echo_attachment = echo_attachment;
     }
 
     ~PerformanceTest() {
@@ -160,17 +164,17 @@ public:
             LOG(ERROR) << "Fail to initialize channel";
             return -1;
         }
-        test::PerfTestRequest request;
-        request.set_echo_attachment(_echo_attachment);
-        request.set_name(g_name);
-        test::PerfTestService_Stub stub(_channel);
+        press::PerfTestService_Stub stub(_channel);
 
         int connect_retry_times = 0;
         while (connect_retry_times < FLAGS_max_retry) {
             brpc::Controller cntl;
-            test::PerfTestResponse response;
+            press::Request response;
+            size_t idx = g_pool_idx.fetch_add(1, butil::memory_order_relaxed);
+            const press::Request& warmup_request =
+                g_request_pool[idx % g_request_pool.size()];
             int64_t rpc_start_ns = butil::cpuwide_time_ns();
-            stub.Test(&cntl, &request, &response, NULL);
+            stub.Test(&cntl, &warmup_request, &response, NULL);
             int64_t rpc_end_ns = butil::cpuwide_time_ns();
             if (cntl.Failed()) {
                 LOG(WARNING) << connect_retry_times << "th, RPC call failed: " << cntl.ErrorText() << ", retrying";
@@ -196,8 +200,9 @@ public:
 
     struct RespClosure {
         brpc::Controller* cntl;
-        test::PerfTestResponse* resp;
+        press::Request* resp;
         PerformanceTest* test;
+        size_t request_size;
     };
 
     void SendRequest() {
@@ -216,8 +221,7 @@ public:
             }
         }
         RespClosure* closure = new RespClosure;
-        test::PerfTestRequest request;
-        closure->resp = new test::PerfTestResponse();
+        closure->resp = new press::Request();
         closure->cntl = new brpc::Controller();
 #if BRPC_ENABLE_TRACE_SCOPE
         closure->cntl->set_log_id(log_id);
@@ -225,18 +229,22 @@ public:
         if (FLAGS_client_ignore_oc) {
             closure->cntl->ignore_eovercrowded();
         }
-        request.set_echo_attachment(_echo_attachment);
-        request.set_name(g_name);
+
+        size_t idx = g_pool_idx.fetch_add(1, butil::memory_order_relaxed);
+        size_t pool_idx = idx % g_request_pool.size();
+        const press::Request& request = g_request_pool[pool_idx];
+        closure->request_size = g_request_pb_sizes[pool_idx];
+
         closure->cntl->request_attachment().append(_attachment);
         closure->test = this;
         google::protobuf::Closure* done = brpc::NewCallback(&HandleResponse, closure);
-        test::PerfTestService_Stub stub(_channel);
+        press::PerfTestService_Stub stub(_channel);
         stub.Test(closure->cntl, &request, closure->resp, done);
     }
 
     static void HandleResponse(RespClosure* closure) {
         std::unique_ptr<brpc::Controller> cntl_guard(closure->cntl);
-        std::unique_ptr<test::PerfTestResponse> response_guard(closure->resp);
+        std::unique_ptr<press::Request> response_guard(closure->resp);
         if (closure->cntl->Failed()) {
             LOG(ERROR) << "RPC call failed: " << closure->cntl->ErrorText();
             closure->test->_stop = true;
@@ -244,16 +252,10 @@ public:
         }
 
         g_latency_recorder << closure->cntl->latency_us();
-        if (closure->resp->cpu_usage().size() > 0) {
-            g_server_cpu_recorder << atof(closure->resp->cpu_usage().c_str()) * 100;
-        }
 
-        // 如果使用name字段request填充至指定长度，则计算name长度; 否则计算attachment长度
-        if (FLAGS_req_size != 0) {
-            g_total_bytes.fetch_add(closure->resp->name().size(), butil::memory_order_relaxed);
-        } else {
-            g_total_bytes.fetch_add(closure->cntl->request_attachment().size(), butil::memory_order_relaxed);
-        }
+        g_total_bytes.fetch_add(closure->request_size +
+                                closure->cntl->request_attachment().size(),
+                                butil::memory_order_relaxed);
 
         g_total_cnt.fetch_add(1, butil::memory_order_relaxed);
 
@@ -324,22 +326,22 @@ private:
     uint32_t _iterations;
     volatile bool _stop;
     butil::IOBuf _attachment;
-    bool _echo_attachment;
 };
 
 void Test(int thread_num, int attachment_size) {
     std::cout << "[Threads: " << thread_num
         << ", Depth: " << FLAGS_queue_depth
         << ", Attachment: " << attachment_size << "B"
-        << ", string size: " << g_name.size() << "B"
+        << ", Pool: " << g_request_pool.size()
         << ", RDMA: " << (FLAGS_use_rdma ? "yes" : "no")
-        << ", Echo: " << (FLAGS_echo_attachment ? "yes]" : "no]")
+        << "]"
         << std::endl;
     g_total_bytes.store(0, butil::memory_order_relaxed);
     g_total_cnt.store(0, butil::memory_order_relaxed);
+    g_pool_idx.store(0, butil::memory_order_relaxed);
     std::vector<PerformanceTest*> tests;
     for (int k = 0; k < thread_num; ++k) {
-        PerformanceTest* t = new PerformanceTest(attachment_size, FLAGS_echo_attachment);
+        PerformanceTest* t = new PerformanceTest(attachment_size);
         if (t->Init() < 0) {
             exit(1);
         }
@@ -370,7 +372,6 @@ void Test(int thread_num, int attachment_size) {
             << ", 99.9th-Latency: " << g_latency_recorder.latency_percentile(0.999)
             << ", Throughput: " << throughput << "MB/s"
             << ", QPS: " << (g_total_cnt.load(butil::memory_order_relaxed) * 1000 * 1000 / g_test_duration)
-            << ", Server CPU-utilization: " << g_server_cpu_recorder.latency(10) << "\%"
             << ", Client CPU-utilization: " << g_client_cpu_recorder.latency(10) << "\%"
             << ", Connect-Latency: " << g_connect_latency_us.load(butil::memory_order_relaxed) << "us"
             << ", First-RPC-Latency: " << g_first_rpc_latency_us.load(butil::memory_order_relaxed) << "us"
@@ -417,7 +418,42 @@ int main(int argc, char* argv[]) {
         }
     }
 #endif
-    g_name.resize(FLAGS_req_size, 'r');
+
+    std::vector<data_gen::DatasetSpec> specs;
+    if (FLAGS_fixed_size > 0) {
+        specs.reserve(FLAGS_num_datasets);
+        for (int i = 0; i < FLAGS_num_datasets; ++i) {
+            specs.push_back(data_gen::EmitDatasetSpec(i, "fixed", FLAGS_fixed_size));
+        }
+    } else {
+        specs = data_gen::GenerateDatasetSpecs(
+            FLAGS_num_datasets, FLAGS_seed, FLAGS_min_size, FLAGS_max_size);
+    }
+    if (specs.empty()) {
+        LOG(ERROR) << "Failed to generate dataset specs";
+        return -1;
+    }
+    g_request_pool.clear();
+    g_request_pool.reserve(specs.size());
+    g_request_pb_sizes.clear();
+    g_request_pb_sizes.reserve(specs.size());
+    for (const auto& spec : specs) {
+        press::Request req;
+        data_gen::FillRequest(&req, spec);
+        g_request_pb_sizes.push_back(req.ByteSizeLong());
+        g_request_pool.push_back(std::move(req));
+    }
+    if (FLAGS_fixed_size > 0) {
+        LOG(INFO) << "Pre-generated " << g_request_pool.size() << " requests"
+                  << " fixed_size=" << FLAGS_fixed_size
+                  << " avg_pb_size=" << (g_request_pb_sizes.empty() ? 0 :
+                     g_request_pb_sizes[0]);
+    } else {
+        LOG(INFO) << "Pre-generated " << g_request_pool.size() << " requests"
+                  << " seed=" << FLAGS_seed
+                  << " min_size=" << FLAGS_min_size
+                  << " max_size=" << FLAGS_max_size;
+    }
 
     g_token.store(FLAGS_initial_tokens);
 

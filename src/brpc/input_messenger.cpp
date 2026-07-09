@@ -18,6 +18,7 @@
 
 #include <gflags/gflags.h>
 #include "butil/fd_guard.h"                      // fd_guard
+#include "butil/iobuf.h"
 #include "butil/logging.h"                       // CHECK
 #include "butil/time.h"                          // cpuwide_time_us
 #include "butil/fd_utility.h"                    // make_non_blocking
@@ -252,6 +253,41 @@ int InputMessenger::ProcessNewMessage(
         ParseResult pr = CutInputMessage(m, &index, read_eof);
         if (!pr.is_ok()) {
             if (pr.error() == PARSE_ERROR_NOT_ENOUGH_DATA) {
+#if BRPC_ENABLE_TRACE_SCOPE
+                if (g_brpc_step_latency_nocntl[BRPC_CALL_COUNT][BRPC_LATENCY_CNT]
+                        .load(butil::memory_order_relaxed) == 0) {
+                    const int64_t tcp_count =
+                        g_brpc_step_latency_nocntl[BRPC_READ_OUT_TO_PROCESS_COUNT][BRPC_LATENCY_CNT]
+                            .load(butil::memory_order_relaxed);
+                    const int64_t rdma_count =
+                        g_brpc_step_latency_nocntl[BRPC_RDMA_READ_OUT_TO_PROCESS_COUNT][BRPC_LATENCY_CNT]
+                            .load(butil::memory_order_relaxed);
+                    const int64_t ub_count =
+                        g_brpc_step_latency_nocntl[BRPC_UB_READ_OUT_TO_PROCESS_COUNT][BRPC_LATENCY_CNT]
+                            .load(butil::memory_order_relaxed);
+                    // Message is still incomplete in current read batch.
+                    // Drop tentative read-out timestamp so that next read batch
+                    // can re-mark a closer "fully-read" boundary.
+                    if (tcp_count > 0 &&
+                        BrpcTraceGetStepMarker(BRPC_READ_OUT_TO_PROCESS_IN, tcp_count) > 1000000000000LL) {
+                        BrpcTraceEraseStepMarker(BRPC_READ_OUT_TO_PROCESS_IN, tcp_count);
+                        BrpcTraceEraseStepMarker(BRPC_READ_OUT_TO_DESERIALIZE_IN, tcp_count);
+                        BrpcTraceEraseStepMarker(BRPC_STEP3_SERVER_FRAMEWORK, tcp_count);
+                    }
+                    if (rdma_count > 0 &&
+                        BrpcTraceGetStepMarker(BRPC_RDMA_READ_OUT_TO_PROCESS_IN, rdma_count) > 1000000000000LL) {
+                        BrpcTraceEraseStepMarker(BRPC_RDMA_READ_OUT_TO_PROCESS_IN, rdma_count);
+                        BrpcTraceEraseStepMarker(BRPC_RDMA_READ_OUT_TO_DESERIALIZE_IN, rdma_count);
+                        BrpcTraceEraseStepMarker(BRPC_STEP3_SERVER_FRAMEWORK, rdma_count);
+                    }
+                    if (ub_count > 0 &&
+                        BrpcTraceGetStepMarker(BRPC_UB_READ_OUT_TO_PROCESS_IN, ub_count) > 1000000000000LL) {
+                        BrpcTraceEraseStepMarker(BRPC_UB_READ_OUT_TO_PROCESS_IN, ub_count);
+                        BrpcTraceEraseStepMarker(BRPC_UB_READ_OUT_TO_DESERIALIZE_IN, ub_count);
+                        BrpcTraceEraseStepMarker(BRPC_STEP3_SERVER_FRAMEWORK, ub_count);
+                    }
+                }
+#endif
                 // incomplete message, re-read.
                 // However, some buffer may have been consumed
                 // under protocols like HTTP. Record this size
@@ -296,6 +332,47 @@ int InputMessenger::ProcessNewMessage(
         if (pr.message() == NULL) { // the Process() step can be skipped.
             continue;
         }
+#if BRPC_ENABLE_TRACE_SCOPE
+        if (g_brpc_step_latency_nocntl[BRPC_CALL_COUNT][BRPC_LATENCY_CNT]
+                .load(butil::memory_order_relaxed) != 0) {
+            const int64_t rpc_count =
+                g_brpc_step_latency_nocntl[BRPC_RPC_COUNT][BRPC_LATENCY_CNT]
+                    .load(butil::memory_order_relaxed);
+            if (BrpcTraceGetStepMarker(BRPC_READ_OUT_TO_RPC_OUT, rpc_count) == 0) {
+                // Start this stage only after a complete message is parsed out.
+                BrpcTraceSetStepMarker(
+                    BRPC_READ_OUT_TO_RPC_OUT, rpc_count, butil::cpuwide_time_ns());
+            }
+        }
+        if (g_brpc_step_latency_nocntl[BRPC_CALL_COUNT][BRPC_LATENCY_CNT]
+                .load(butil::memory_order_relaxed) == 0) {
+            const bool rdma_path = (m->_rdma_state != Socket::RDMA_OFF);
+            const bool ub_path = (!rdma_path && m->use_ub());
+            const int64_t count = rdma_path
+                ? g_brpc_step_latency_nocntl[BRPC_RDMA_READ_OUT_TO_PROCESS_COUNT][BRPC_LATENCY_CNT]
+                      .load(butil::memory_order_relaxed)
+                : (ub_path
+                    ? g_brpc_step_latency_nocntl[BRPC_UB_READ_OUT_TO_PROCESS_COUNT][BRPC_LATENCY_CNT]
+                          .load(butil::memory_order_relaxed)
+                    : g_brpc_step_latency_nocntl[BRPC_READ_OUT_TO_PROCESS_COUNT][BRPC_LATENCY_CNT]
+                          .load(butil::memory_order_relaxed));
+            if (count > 0 && BrpcTraceGetStepMarker(BRPC_PROCESS_IN_TO_TRANSPORT_SPLIT, count) == 0) {
+                const int64_t process_start = butil::cpuwide_time_ns();
+                const BRPC_STEP read_out_step = rdma_path ? BRPC_RDMA_READ_OUT_TO_PROCESS_IN :
+                    (ub_path ? BRPC_UB_READ_OUT_TO_PROCESS_IN : BRPC_READ_OUT_TO_PROCESS_IN);
+                const int64_t read_out_marker =
+                    BrpcTraceTakeStepMarker(read_out_step, count);
+                if (read_out_marker > 1000000000000LL && process_start > read_out_marker) {
+                    BrpcTraceRecordStepSample(
+                        read_out_step, process_start - read_out_marker);
+                }
+                // Always mark process-in start for the next split stage.
+                // READ_OUT marker may be absent in some batches (e.g. partial reads),
+                // but PROCESS->TRANSPORT should still be measurable.
+                BrpcTraceSetStepMarker(BRPC_PROCESS_IN_TO_TRANSPORT_SPLIT, count, process_start);
+            }
+        }
+#endif
         pr.message()->_received_us = received_us;
         pr.message()->_base_real_us = base_realtime;
                     
@@ -365,6 +442,25 @@ void InputMessenger::OnNewMessages(Socket* m) {
     //   any process.
     InputMessenger* messenger = static_cast<InputMessenger*>(m->user());
     int progress = Socket::PROGRESS_INIT;
+#if BRPC_ENABLE_TRACE_SCOPE
+    static const int64_t kTraceTimestampThresholdNs = 1000000000000LL;
+    const bool tcp_path = (m->_rdma_state == Socket::RDMA_OFF && !m->use_ub());
+    const bool ub_path = (m->_rdma_state == Socket::RDMA_OFF && m->use_ub());
+    int64_t epoll_wait_latency_ns = 0;
+    int64_t epoll_wait_end_ns = 0;
+    if (tcp_path || ub_path) {
+        m->ConsumeInputEpollTrace(&epoll_wait_latency_ns, &epoll_wait_end_ns);
+        if (epoll_wait_latency_ns > 0) {
+            BrpcTraceRecordStepSample(BRPC_EPOLL_WAIT, epoll_wait_latency_ns);
+        }
+        const int64_t on_new_msg_enter_ns = butil::cpuwide_time_ns();
+        if (epoll_wait_end_ns > kTraceTimestampThresholdNs &&
+            on_new_msg_enter_ns > epoll_wait_end_ns) {
+            BrpcTraceRecordStepSample(BRPC_EPOLL_WAIT_OUT_TO_ON_NEW_MSG_IN,
+                                      on_new_msg_enter_ns - epoll_wait_end_ns);
+        }
+    }
+#endif
 
     // Notice that all *return* no matter successful or not will run last
     // message, even if the socket is about to be closed. This should be
@@ -372,6 +468,19 @@ void InputMessenger::OnNewMessages(Socket* m) {
     InputMessageClosure last_msg;
     bool read_eof = false;
     while (!read_eof) {
+#if BRPC_ENABLE_TRACE_SCOPE
+        if (tcp_path || ub_path) {
+            const int64_t readv_idx =
+                g_brpc_step_latency_nocntl[BRPC_READV_COUNT][BRPC_LATENCY_CNT]
+                    .load(butil::memory_order_relaxed) + 1;
+            const BRPC_STEP loop_step = ub_path ?
+                BRPC_ON_NEW_MSG_LOOP_IN_TO_UB_READV_IN :
+                BRPC_ON_NEW_MSG_LOOP_IN_TO_TCP_READV_IN;
+            if (BrpcTraceGetStepMarker(loop_step, readv_idx) == 0) {
+                BrpcTraceSetStepMarker(loop_step, readv_idx, butil::cpuwide_time_ns());
+            }
+        }
+#endif
         const int64_t received_us = butil::cpuwide_time_us();
         const int64_t base_realtime = butil::gettimeofday_us() - received_us;
 

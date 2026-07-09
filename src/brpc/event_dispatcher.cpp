@@ -43,6 +43,21 @@ static EventDispatcher* g_edisp = NULL;
 static bvar::LatencyRecorder* g_edisp_read_lantency = NULL;
 static bvar::LatencyRecorder* g_edisp_write_lantency = NULL;
 static pthread_once_t g_edisp_once = PTHREAD_ONCE_INIT;
+thread_local int64_t g_input_epoll_wait_latency_ns = 0;
+thread_local int64_t g_input_epoll_wait_end_ns = 0;
+
+int64_t GetCurrentInputEpollWaitLatencyNs() {
+    return g_input_epoll_wait_latency_ns;
+}
+
+int64_t GetCurrentInputEpollWaitEndNs() {
+    return g_input_epoll_wait_end_ns;
+}
+
+void SetCurrentInputEpollWaitTrace(int64_t wait_latency_ns, int64_t wait_end_ns) {
+    g_input_epoll_wait_latency_ns = wait_latency_ns;
+    g_input_epoll_wait_end_ns = wait_end_ns;
+}
 
 static void StopAndJoinGlobalDispatchers() {
     for (int i = 0; i < FLAGS_task_group_ntags; ++i) {

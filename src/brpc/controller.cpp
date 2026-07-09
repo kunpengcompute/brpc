@@ -968,7 +968,73 @@ void Controller::EndRPC(const CompletionInfo& info) {
             // Join is not signalled when the done does not Run() and the done
             // can't Run() because all backup threads are blocked by Join().
 
-            OnRPCEnd(butil::gettimeofday_us());
+            const int64_t end_latency_time = butil::cpuwide_time_ns();
+            const int64_t end_latency_time_us = butil::gettimeofday_us();
+
+            OnRPCEnd(end_latency_time_us);
+            latency_end = end_latency_time;
+#if BRPC_ENABLE_TRACE_SCOPE
+            BrpcTraceRecordStepLatency(
+                BRPC_END2END_STEP, log_id(), latency_end - latency_start);
+
+            const int64_t count =
+                g_brpc_step_latency_nocntl[BRPC_RPC_COUNT][BRPC_LATENCY_CNT]
+                    .load(butil::memory_order_relaxed);
+            const int64_t read_out_marker =
+                BrpcTraceTakeStepMarker(BRPC_READ_OUT_TO_RPC_OUT, count);
+            if (read_out_marker > 1000000000000LL && end_latency_time > read_out_marker) {
+                BrpcTraceRecordStepSample(
+                    BRPC_READ_OUT_TO_RPC_OUT, end_latency_time - read_out_marker);
+            }
+
+            const int64_t deserialize_out_marker =
+                BrpcTraceTakeStepMarker(
+                    BRPC_CLIENT_DESERIALIZE_OUT_TO_ENDRPC_IN, count);
+            if (deserialize_out_marker > 1000000000000LL &&
+                end_latency_time > deserialize_out_marker) {
+                BrpcTraceRecordStepSample(
+                    BRPC_CLIENT_DESERIALIZE_OUT_TO_ENDRPC_IN,
+                    end_latency_time - deserialize_out_marker);
+            }
+
+            const int64_t client_framework_marker =
+                BrpcTraceTakeStepMarker(BRPC_STEP5_CLIENT_FRAMEWORK, count);
+            if (client_framework_marker > 1000000000000LL &&
+                end_latency_time > client_framework_marker) {
+                BrpcTraceRecordStepSample(
+                    BRPC_STEP5_CLIENT_FRAMEWORK,
+                    end_latency_time - client_framework_marker);
+            }
+
+            const int64_t call_out_marker_us =
+                BrpcTraceTakeStepMarker(BRPC_CALL_IN_TO_RPC_OUT, count);
+            if (call_out_marker_us > 0 && end_latency_time_us > call_out_marker_us) {
+                BrpcTraceRecordStepSample(
+                    BRPC_CALL_IN_TO_RPC_OUT,
+                    (end_latency_time_us - call_out_marker_us) * 1000);
+            }
+
+            const int64_t rpc_count_after =
+                g_brpc_step_latency_nocntl[BRPC_RPC_COUNT][BRPC_LATENCY_CNT]
+                    .fetch_add(1, butil::memory_order_relaxed) + 1;
+
+            if ((rpc_count_after % 50000) == 0) {
+                LOG(INFO)
+                    << "\nCall Count: "
+                    << g_brpc_step_latency_nocntl[BRPC_CALL_COUNT][BRPC_LATENCY_CNT]
+                           .load(butil::memory_order_relaxed)
+                    << "\nWriteV Count: "
+                    << g_brpc_step_latency_nocntl[BRPC_WRITEV_COUNT][BRPC_LATENCY_CNT]
+                           .load(butil::memory_order_relaxed)
+                    << "\nReadV Count: "
+                    << g_brpc_step_latency_nocntl[BRPC_READV_COUNT][BRPC_LATENCY_CNT]
+                           .load(butil::memory_order_relaxed)
+                    << "\nRPC Count: " << rpc_count_after
+                    << "\nCount: " << count
+                    << "\nLog ID: " << log_id()
+                    << "\nRPC End.";
+            }
+#endif
             const bool destroy_cid_in_done = has_flag(FLAGS_DESTROY_CID_IN_DONE);
             _done->Run();
             // NOTE: Don't touch this Controller anymore, because it's likely to be
@@ -1199,8 +1265,16 @@ void Controller::IssueRPC(int64_t start_realtime_us) {
     // Make request
     butil::IOBuf packet;
     SocketMessage* user_packet = NULL;
+#if BRPC_ENABLE_TRACE_SCOPE
+    const int64_t start_latency_time = butil::cpuwide_time_ns();
+#endif
     _pack_request(&packet, &user_packet, cid.value, _method, this,
                   _request_buf, using_auth);
+#if BRPC_ENABLE_TRACE_SCOPE
+    const int64_t pack_end_time = butil::cpuwide_time_ns();
+    BrpcTraceRecordStepLatency(
+        BRPC_PACK_STEP, log_id(), pack_end_time - start_latency_time);
+#endif
     // TODO: PackRequest may accept SocketMessagePtr<>?
     SocketMessagePtr<> user_packet_guard(user_packet);
     if (FailedInline()) {
@@ -1211,6 +1285,20 @@ void Controller::IssueRPC(int64_t start_realtime_us) {
         }
         return HandleSendFailed();
     }
+#if BRPC_ENABLE_TRACE_SCOPE
+    const int64_t call_count =
+        g_brpc_step_latency_nocntl[BRPC_CALL_COUNT][BRPC_LATENCY_CNT]
+            .load(butil::memory_order_relaxed);
+    if (call_count > 0) {
+        const bool rdma_path = _current_call.sending_sock->use_rdma();
+        const bool ub_path = (!rdma_path && _current_call.sending_sock->use_ub());
+        const BRPC_STEP pack_out_step = rdma_path ?
+            BRPC_CLIENT_SERIALIZE_PACK_OUT_TO_RDMA_WRITEV_IN :
+            (ub_path ? BRPC_CLIENT_SERIALIZE_PACK_OUT_TO_UB_WRITEV_IN :
+                       BRPC_CLIENT_SERIALIZE_PACK_OUT_TO_TCP_WRITEV_IN);
+        BrpcTraceSetStepMarker(pack_out_step, call_count - 1, pack_end_time);
+    }
+#endif
 
     timespec connect_abstime;
     timespec* pabstime = NULL;

@@ -26,8 +26,9 @@
 #include "butil/logging.h"
 #include "butil/time.h"
 #include "brpc/server.h"
+#include "brpc/rpc_pb_message_factory.h"
 #include "bvar/variable.h"
-#include "test.pb.h"
+#include "press.pb.h"
 
 DEFINE_int32(port, 8002, "TCP Port of this server");
 DEFINE_bool(use_rdma, false, "Use RDMA or not");
@@ -37,13 +38,11 @@ DEFINE_bool(server_ignore_oc, false, "Server ignore eovercrowded, false by defau
 DEFINE_int32(num_threads, 5, "The max number of threads are used");
 DEFINE_int32(max_concurrency, 128, "max concurrency");
 DEFINE_int32(server_bthread_concurrency, 5, "server bthread concurrency");
-DEFINE_int64(rsp_size, 0, "response size");
 DEFINE_int32(stats_timeout_seconds, 20, "Timeout in seconds before collecting statistics. (default 20)");
+DEFINE_bool(echo_attachment, false, "Echo request attachment to response. Set on server side directly.");
 DEFINE_bool(sort, false, "sort");
 
-butil::atomic<uint64_t> g_last_time(0);
 butil::atomic<uint64_t> g_total_cnt(0);
-std::string g_name;
 #if BRPC_ENABLE_TRACE_SCOPE
 static const int64_t kMaxRpcIoNum = BRPC_TRACE_MAX_RPC_IO_NUM;
 int64_t g_step_capacity = 0;
@@ -69,7 +68,7 @@ static void* StatsPrinter(void* arg) {
     return nullptr;
 }
 
-namespace test {
+namespace press {
 class PerfTestServiceImpl : public PerfTestService {
 public:
     PerfTestServiceImpl() {}
@@ -77,23 +76,12 @@ public:
     ~PerfTestServiceImpl() {}
 
     void Test(google::protobuf::RpcController* cntl_base,
-              const PerfTestRequest* request,
-              PerfTestResponse* response,
+              const Request* request,
+              Request* response,
               google::protobuf::Closure* done) {
         brpc::ClosureGuard done_guard(done);
-        uint64_t last = g_last_time.load(butil::memory_order_relaxed);
-        uint64_t now = butil::monotonic_time_us();
-        if (now > last && now - last > 100000) {
-            if (g_last_time.exchange(now, butil::memory_order_relaxed) == last) {
-                response->set_cpu_usage(bvar::Variable::describe_exposed("process_cpu_usage"));
-            } else {
-                response->set_cpu_usage("");
-            }
-        } else {
-            response->set_cpu_usage("");
-        }
-        response->set_name(g_name);
-        if (request->echo_attachment()) {
+        response->Swap(const_cast<Request*>(request));
+        if (FLAGS_echo_attachment) {
             brpc::Controller* cntl =
                 static_cast<brpc::Controller*>(cntl_base);
             cntl->response_attachment().append(cntl->request_attachment());
@@ -137,19 +125,15 @@ int main(int argc, char* argv[]) {
     bthread::FLAGS_bthread_concurrency = FLAGS_server_bthread_concurrency;
 
     brpc::Server server;
-    test::PerfTestServiceImpl perf_test_service_impl;
+    press::PerfTestServiceImpl perf_test_service_impl;
 
-    g_name.resize(FLAGS_rsp_size, 'r');
-    std::cout << "server rsp/name len is " << g_name.size() << "B" << std::endl;
- 
     g_total_cnt.store(0, butil::memory_order_relaxed);
 
-    if (server.AddService(&perf_test_service_impl, 
+    if (server.AddService(&perf_test_service_impl,
                           brpc::SERVER_DOESNT_OWN_SERVICE) != 0) {
         LOG(ERROR) << "Fail to add service";
         return -1;
     }
-    g_last_time.store(0, butil::memory_order_relaxed);
 
     brpc::ServerOptions options;
     options.use_rdma = FLAGS_use_rdma;
@@ -157,6 +141,7 @@ int main(int argc, char* argv[]) {
     options.max_concurrency = FLAGS_max_concurrency;
     options.num_threads = FLAGS_num_threads;
     options.ignore_eovercrowded = FLAGS_server_ignore_oc;
+    options.rpc_pb_message_factory = brpc::GetArenaRpcPBMessageFactory();
     if (server.Start(FLAGS_port, &options) != 0) {
         LOG(ERROR) << "Fail to start EchoServer";
         return -1;

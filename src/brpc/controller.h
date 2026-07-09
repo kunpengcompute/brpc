@@ -164,6 +164,9 @@ public:
         std::string request_id;
     };
 
+    int64_t latency_start{0};
+    int64_t latency_end{0};
+
 public:
     Controller();
     Controller(const Inheritable& parent_ctx);

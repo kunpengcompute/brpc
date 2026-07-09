@@ -58,6 +58,13 @@ proto_library(
 )
 
 proto_library(
+    name = "ub_performance_press_proto",
+    srcs = [
+        "ub_performance_press/press.proto",
+    ],
+)
+
+proto_library(
     name = "http_c++_proto",
     srcs = [
         "http_c++/http.proto",
@@ -124,6 +131,13 @@ cc_proto_library(
     name = "cc_ub_performance_proto",
     deps = [
         ":ub_performance_proto",
+    ],
+)
+
+cc_proto_library(
+    name = "cc_ub_performance_press_proto",
+    deps = [
+        ":ub_performance_press_proto",
     ],
 )
 
@@ -366,6 +380,38 @@ cc_binary(
     copts = COPTS + ["-DBRPC_WITH_RDMA=1"],
     deps = [
         ":cc_ub_performance_proto",
+        "//:brpc",
+    ],
+)
+
+cc_binary(
+    name = "ub_performance_press_client",
+    srcs = [
+        "ub_performance_press/client.cpp",
+        "ub_performance_press/data_generator.h",
+    ],
+    includes = [
+        "ub_performance_press",
+    ],
+    copts = COPTS + ["-DBRPC_WITH_RDMA=1"],
+    deps = [
+        ":cc_ub_performance_press_proto",
+        "//:brpc",
+    ],
+)
+
+cc_binary(
+    name = "ub_performance_press_server",
+    srcs = [
+        "ub_performance_press/server.cpp",
+        "ub_performance_press/data_generator.h",
+    ],
+    includes = [
+        "ub_performance_press",
+    ],
+    copts = COPTS + ["-DBRPC_WITH_RDMA=1"],
+    deps = [
+        ":cc_ub_performance_press_proto",
         "//:brpc",
     ],
 )

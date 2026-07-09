@@ -419,6 +419,9 @@ public:
 
     int32_t health_check_timeout_ms() const {return _hc_option.health_check_timeout_ms; }
 
+    bool use_ub() const { return _use_ub; }
+    bool use_rdma() const;
+
     // True if health checking is enabled.
     bool HCEnabled() const {
         // This fence makes sure that we see change of
@@ -642,6 +645,9 @@ public:
     bool is_overcrowded() const { return _overcrowded; }
 
     bthread_keytable_pool_t* keytable_pool() const { return _keytable_pool; }
+
+    void SetInputEpollTrace(int64_t wait_latency_ns, int64_t wait_end_ns);
+    void ConsumeInputEpollTrace(int64_t* wait_latency_ns, int64_t* wait_end_ns);
 
     void set_http_request_method(const HttpMethod& method) { _http_request_method = method; }
     HttpMethod http_request_method() const { return _http_request_method; }
@@ -867,6 +873,9 @@ private:
 
     // Set with cpuwide_time_us() at last read operation
     butil::atomic<int64_t> _last_readtime_us;
+    // Trace context carried from epoll callback to OnNewMessages.
+    butil::atomic<int64_t> _input_epoll_wait_latency_ns;
+    butil::atomic<int64_t> _input_epoll_wait_end_ns;
 
     // Saved context for parsing, reset before trying other protocols.
     butil::atomic<Destroyable*> _parsing_context;
