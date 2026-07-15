@@ -36,6 +36,7 @@ build --define absl=1
 build --define=BRPC_WITH_GLOG=true
 build --define=BRPC_WITH_BORINGSSL=true
 test --define=BRPC_BUILD_FOR_UNITTEST=true
+test --test_output=streamed
 
 # Pass PATH, CC, CXX and LLVM_CONFIG variables from the environment.
 build --action_env=CC

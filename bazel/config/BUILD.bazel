@@ -145,6 +145,12 @@ config_setting(
 )
 
 config_setting(
+    name = "with_babylon_counter",
+    define_values = {"with_babylon_counter": "true"},
+    visibility = ["//visibility:public"],
+)
+
+config_setting(
     name = "brpc_with_urma",
     define_values = {"brpc_with_urma": "true"},
     visibility = ["//visibility:public"],

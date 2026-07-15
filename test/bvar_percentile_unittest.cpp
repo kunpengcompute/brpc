@@ -137,6 +137,7 @@ TEST_F(PercentileTest, merge2) {
                    << " belong_to_b2=" << belong_to_b2;
 }
 
+#if !WITH_BABYLON_COUNTER
 TEST_F(PercentileTest, combine_of) {
     // Combine multiple percentle samplers into one
     const int num_samplers = 10;
@@ -186,3 +187,4 @@ TEST_F(PercentileTest, combine_of) {
                   
     }
 }
+#endif // !WITH_BABYLON_COUNTER
