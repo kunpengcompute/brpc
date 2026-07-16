@@ -16,6 +16,7 @@
 // under the License.
 
 #include <fcntl.h>
+#include "butil/atomicops.h"
 #include "butil/iobuf_profiler.h"
 #include "butil/strings/string_number_conversions.h"
 #include "butil/file_util.h"
@@ -40,6 +41,7 @@ const uint32_t IOBufProfiler::MAX_SLEEP_MS = 1000;
 static pthread_once_t g_iobuf_profiler_info_once = PTHREAD_ONCE_INIT;
 static bool g_iobuf_profiler_enabled = false;
 static uint g_iobuf_profiler_sample_rate = 100;
+static butil::atomic<bool> g_iobuf_profiler_initialized(false);
 
 // Environment variables:
 // 1. ENABLE_IOBUF_PROFILER: set value to 1 to enable IOBuf profiler.
@@ -48,6 +50,7 @@ static void InitGlobalIOBufProfilerInfo() {
     const char* enabled = getenv("ENABLE_IOBUF_PROFILER");
     g_iobuf_profiler_enabled = enabled && strcmp("1", enabled) == 0 && ::GetStackTrace != NULL;
     if (!g_iobuf_profiler_enabled) {
+        g_iobuf_profiler_initialized.store(true, butil::memory_order_release);
         return;
     }
 
@@ -65,15 +68,20 @@ static void InitGlobalIOBufProfilerInfo() {
         }
     }
     LOG(INFO) << "g_iobuf_profiler_sample_rate=" << g_iobuf_profiler_sample_rate;
+    g_iobuf_profiler_initialized.store(true, butil::memory_order_release);
 }
 
 bool IsIOBufProfilerEnabled() {
-    pthread_once(&g_iobuf_profiler_info_once, InitGlobalIOBufProfilerInfo);
+    if (!g_iobuf_profiler_initialized.load(butil::memory_order_acquire)) {
+        pthread_once(&g_iobuf_profiler_info_once, InitGlobalIOBufProfilerInfo);
+    }
     return g_iobuf_profiler_enabled;
 }
 
 bool IsIOBufProfilerSamplable() {
-    pthread_once(&g_iobuf_profiler_info_once, InitGlobalIOBufProfilerInfo);
+    if (!g_iobuf_profiler_initialized.load(butil::memory_order_acquire)) {
+        pthread_once(&g_iobuf_profiler_info_once, InitGlobalIOBufProfilerInfo);
+    }
     if (g_iobuf_profiler_sample_rate == 100) {
         return true;
     }
