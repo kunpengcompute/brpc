@@ -507,7 +507,6 @@ int VersionedRefWithId<T>::ReleaseAdditionalReference() {
             expect, ADDITIONAL_REF_RECYCLED,
             butil::memory_order_relaxed,
             butil::memory_order_relaxed)) {
-            BeforeAdditionalRefReleasedWrapper();
             WRAPPER_CALL(BeforeAdditionalRefReleased, static_cast<T*>(this));
             return Dereference();
         }
