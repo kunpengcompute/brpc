@@ -1787,6 +1787,115 @@ TEST_F(IOBufTest, acquire_tls_block) {
     ASSERT_NE(butil::iobuf::block_cap(b), butil::iobuf::block_size(b));
 }
 
+TEST_F(IOBufTest, clear_recycles_unique_full_block) {
+    butil::iobuf::remove_tls_block_chain();
+    butil::IOBuf buf;
+    {
+        butil::IOBufAsZeroCopyOutputStream out(&buf);
+        void* data = NULL;
+        int size = 0;
+        ASSERT_TRUE(out.Next(&data, &size));
+        ASSERT_GT(size, 0);
+    }
+
+    ASSERT_EQ(0, butil::iobuf::get_tls_block_count());
+    buf.clear();
+    ASSERT_EQ(1, butil::iobuf::get_tls_block_count());
+
+    butil::IOBuf::Block* b = butil::iobuf::acquire_tls_block();
+    ASSERT_EQ(0u, butil::iobuf::block_size(b));
+    butil::iobuf::release_tls_block_chain(b);
+}
+
+struct ClearIOBufInThreadArgs {
+    butil::IOBuf* buf;
+    int tls_block_count;
+};
+
+void* clear_iobuf_in_another_thread(void* arg) {
+    ClearIOBufInThreadArgs* args =
+        static_cast<ClearIOBufInThreadArgs*>(arg);
+    butil::iobuf::remove_tls_block_chain();
+    args->buf->clear();
+    args->tls_block_count = butil::iobuf::get_tls_block_count();
+    butil::iobuf::remove_tls_block_chain();
+    return NULL;
+}
+
+TEST_F(IOBufTest, clear_rejects_cross_thread_block) {
+    butil::iobuf::remove_tls_block_chain();
+    butil::IOBuf buf;
+    {
+        butil::IOBufAsZeroCopyOutputStream out(&buf);
+        void* data = NULL;
+        int size = 0;
+        ASSERT_TRUE(out.Next(&data, &size));
+    }
+
+    ClearIOBufInThreadArgs args = {&buf, -1};
+    pthread_t tid;
+    ASSERT_EQ(0, pthread_create(&tid, NULL,
+                                clear_iobuf_in_another_thread, &args));
+    ASSERT_EQ(0, pthread_join(tid, NULL));
+    ASSERT_TRUE(buf.empty());
+    ASSERT_EQ(0, args.tls_block_count);
+}
+
+TEST_F(IOBufTest, clear_rejects_foreign_owner_tag) {
+    butil::iobuf::remove_tls_block_chain();
+    butil::IOBuf buf;
+    {
+        butil::IOBufAsZeroCopyOutputStream out(&buf);
+        void* data = NULL;
+        int size = 0;
+        ASSERT_TRUE(out.Next(&data, &size));
+    }
+
+    const uint16_t owner_tag = butil::iobuf::get_tls_owner_tag();
+    const uint16_t foreign_tag = owner_tag == (1 << 5) ? (2 << 5) : (1 << 5);
+    buf._front_ref().block->flags =
+        (buf._front_ref().block->flags &
+         ~butil::IOBUF_BLOCK_TLS_OWNER_MASK) |
+        foreign_tag;
+
+    buf.clear();
+    ASSERT_TRUE(buf.empty());
+    ASSERT_EQ(0, butil::iobuf::get_tls_block_count());
+    butil::iobuf::remove_tls_block_chain();
+}
+
+TEST_F(IOBufTest, clear_keeps_saturated_tls_cache) {
+    butil::iobuf::remove_tls_block_chain();
+    butil::IOBuf buf;
+    {
+        butil::IOBufAsZeroCopyOutputStream out(&buf);
+        void* data = NULL;
+        int size = 0;
+        ASSERT_TRUE(out.Next(&data, &size));
+        ASSERT_TRUE(out.Next(&data, &size));
+    }
+    ASSERT_EQ(2u, buf.backing_block_num());
+
+    std::vector<butil::IOBuf::Block*> blocks;
+    // Saturate both the default (8) and BRPC_WITH_URMA (128) limits.
+    const int num_blocks = 128;
+    blocks.reserve(num_blocks);
+    for (int i = 0; i < num_blocks; ++i) {
+        blocks.push_back(butil::iobuf::acquire_tls_block());
+    }
+    for (int i = 0; i + 1 < num_blocks; ++i) {
+        blocks[i]->u.portal_next = blocks[i + 1];
+    }
+    blocks.back()->u.portal_next = NULL;
+    butil::iobuf::release_tls_block_chain(blocks.front());
+    ASSERT_EQ(num_blocks, butil::iobuf::get_tls_block_count());
+
+    buf.clear();
+    ASSERT_TRUE(buf.empty());
+    ASSERT_EQ(num_blocks, butil::iobuf::get_tls_block_count());
+    butil::iobuf::remove_tls_block_chain();
+}
+
 TEST_F(IOBufTest, reserve_aligned) {
     {
         butil::IOReserveAlignedBuf buf(16);

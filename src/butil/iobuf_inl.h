@@ -46,6 +46,7 @@ const uint16_t IOBUF_BLOCK_FLAGS_SAMPLED = 1 << 1;
 const uint16_t IOBUF_BLOCK_FLAGS_UB = 1 << 2;
 const uint16_t IOBUF_BLOCK_FLAGS_UB_TINY_POOL = 1 << 3;
 const uint16_t IOBUF_BLOCK_FLAGS_UB_ESCAPE = 1 << 4;
+const uint16_t IOBUF_BLOCK_TLS_OWNER_MASK = 0xFFE0;
 
 inline ssize_t IOBuf::cut_into_file_descriptor(int fd, size_t size_hint) {
     return pcut_into_file_descriptor(fd, -1, size_hint);
@@ -463,6 +464,7 @@ void inc_g_blockmem();
 void dec_g_blockmem();
 
 void inc_g_num_hit_tls_threshold();
+void add_g_num_hit_tls_threshold(size_t n);
 void dec_g_num_hit_tls_threshold();
 
 // Function pointers to allocate or deallocate memory for a IOBuf::Block
@@ -648,9 +650,15 @@ struct TLSData {
     
     // Number of TLS blocks
     int num_blocks;
-    
+
     // True if the remote_tls_block_chain is registered to the thread.
     bool registered;
+
+    // Flush observability-only threshold hits in batches instead of writing a
+    // shared cache line for every released block.
+    size_t pending_threshold_hits;
+
+    uint16_t owner_tag;
 };
 
 // Max number of blocks in each TLS. This is a soft limit namely
@@ -663,15 +671,67 @@ struct TLSData {
     const int MAX_BLOCKS_PER_THREAD = 8;
 #endif
 
+// Capacity used by clear()'s same-owner recycling path. Keep this independent
+// from the UB build mode so the optimization is available to TCP builds too.
+const int MAX_RECYCLE_BLOCKS_PER_THREAD = 128;
+
 inline int max_blocks_per_thread() {
     // If IOBufProfiler is enabled, do not cache blocks in TLS.
     return IsIOBufProfilerEnabled() ? 0 : MAX_BLOCKS_PER_THREAD;
 }
 
+inline int max_recycle_blocks_per_thread() {
+    // If IOBufProfiler is enabled, do not cache blocks in TLS.
+    return IsIOBufProfilerEnabled() ? 0 : MAX_RECYCLE_BLOCKS_PER_THREAD;
+}
+
 TLSData* get_g_tls_data();
 void remove_tls_block_chain();
+uint16_t get_tls_owner_tag();
 
 IOBuf::Block* acquire_tls_block();
+
+inline void set_tls_block_owner(IOBuf::Block* b) {
+    const uint16_t owner_tag = get_tls_owner_tag();
+    if ((b->flags & IOBUF_BLOCK_TLS_OWNER_MASK) != owner_tag) {
+        b->flags = (b->flags & ~IOBUF_BLOCK_TLS_OWNER_MASK) | owner_tag;
+    }
+}
+
+// Recycle a block whose last external reference is being dropped. Same-owner
+// ordinary blocks can be reset and reused, while shared, foreign, user-data
+// and UB blocks must keep their original destruction path.
+inline bool recycle_tls_block(IOBuf::Block* b) {
+    if (BAIDU_UNLIKELY(b == NULL)) {
+        return false;
+    }
+    if (b->ref_count() != 1 ||
+        (b->flags & (IOBUF_BLOCK_FLAGS_USER_DATA | IOBUF_BLOCK_FLAGS_UB))) {
+        b->dec_ref();
+        return false;
+    }
+
+    TLSData* tls_data = get_g_tls_data();
+    const uint16_t owner_tag = get_tls_owner_tag();
+    if ((b->flags & IOBUF_BLOCK_TLS_OWNER_MASK) != owner_tag) {
+        b->dec_ref();
+        return false;
+    }
+    if (tls_data->num_blocks >= max_recycle_blocks_per_thread()) {
+        b->dec_ref();
+        return true;
+    }
+
+    b->size = 0;
+    b->u.portal_next = tls_data->block_head;
+    tls_data->block_head = b;
+    ++tls_data->num_blocks;
+    if (!tls_data->registered) {
+        tls_data->registered = true;
+        butil::thread_atexit(remove_tls_block_chain);
+    }
+    return false;
+}
 
 // Return one block to TLS.
 inline void release_tls_block(IOBuf::Block* b) {

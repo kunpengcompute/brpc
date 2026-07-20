@@ -257,21 +257,42 @@ inline IOBuf::Block* create_block_aligned(size_t block_size, size_t alignment) {
 
 // === Share TLS blocks between appending operations ===
 
-static __thread TLSData g_tls_data = { NULL, 0, false };
+static __thread TLSData g_tls_data = {
+    NULL, 0, false, 0, 0
+};
+static butil::static_atomic<unsigned> g_next_tls_owner_tag =
+    BUTIL_STATIC_ATOMIC_INIT(1);
 
 // Used in release_tls_block()
 TLSData* get_g_tls_data() { return &g_tls_data; }
+uint16_t get_tls_owner_tag() {
+    if (g_tls_data.owner_tag == 0) {
+        const unsigned raw_tag = g_next_tls_owner_tag.fetch_add(
+            1, butil::memory_order_relaxed);
+        const unsigned tag_count = IOBUF_BLOCK_TLS_OWNER_MASK >> 5;
+        g_tls_data.owner_tag = ((raw_tag % tag_count) + 1) << 5;
+    }
+    return g_tls_data.owner_tag;
+}
 // Used in UT
 IOBuf::Block* get_tls_block_head() { return g_tls_data.block_head; }
 int get_tls_block_count() { return g_tls_data.num_blocks; }
 
-// Number of blocks that can't be returned to TLS which has too many block
-// already. This counter should be 0 in most scenarios, otherwise performance
-// of appending functions in IOPortal may be lowered.
+// Number of block references released while TLS already has too many blocks.
 static butil::static_atomic<size_t> g_num_hit_tls_threshold = BUTIL_STATIC_ATOMIC_INIT(0);
 
 void inc_g_num_hit_tls_threshold() {
-    g_num_hit_tls_threshold.fetch_add(1, butil::memory_order_relaxed);
+    add_g_num_hit_tls_threshold(1);
+}
+
+void add_g_num_hit_tls_threshold(size_t n) {
+    const size_t flush_threshold = 64;
+    g_tls_data.pending_threshold_hits += n;
+    if (g_tls_data.pending_threshold_hits >= flush_threshold) {
+        g_num_hit_tls_threshold.fetch_add(
+            g_tls_data.pending_threshold_hits, butil::memory_order_relaxed);
+        g_tls_data.pending_threshold_hits = 0;
+    }
 }
 
 void dec_g_num_hit_tls_threshold() {
@@ -281,6 +302,11 @@ void dec_g_num_hit_tls_threshold() {
 // Called in UT.
 void remove_tls_block_chain() {
     TLSData& tls_data = g_tls_data;
+    if (tls_data.pending_threshold_hits != 0) {
+        g_num_hit_tls_threshold.fetch_add(
+            tls_data.pending_threshold_hits, butil::memory_order_relaxed);
+        tls_data.pending_threshold_hits = 0;
+    }
     IOBuf::Block* b = tls_data.block_head;
     if (!b) {
         return;
@@ -322,6 +348,7 @@ IOBuf::Block* share_tls_block() {
     if (!new_block) {
         new_block = create_block(); // may be NULL
         if (new_block) {
+            set_tls_block_owner(new_block);
             ++tls_data.num_blocks;
         }
     }
@@ -341,7 +368,7 @@ void release_tls_block_chain(IOBuf::Block* b) {
             b->dec_ref();
             b = saved_next;
         } while (b);
-        g_num_hit_tls_threshold.fetch_add(n, butil::memory_order_relaxed);
+        add_g_num_hit_tls_threshold(n);
         return;
     }
     IOBuf::Block* first_b = b;
@@ -369,7 +396,11 @@ IOBuf::Block* acquire_tls_block() {
     TLSData& tls_data = g_tls_data;
     IOBuf::Block* b = tls_data.block_head;
     if (!b) {
-        return create_block();
+        b = create_block();
+        if (b) {
+            set_tls_block_owner(b);
+        }
+        return b;
     }
     while (b->full()) {
         IOBuf::Block* const saved_next = b->u.portal_next;
@@ -378,7 +409,11 @@ IOBuf::Block* acquire_tls_block() {
         --tls_data.num_blocks;
         b = saved_next;
         if (!b) {
-            return create_block();
+            b = create_block();
+            if (b) {
+                set_tls_block_owner(b);
+            }
+            return b;
         }
     }
     tls_data.block_head = b->u.portal_next;
@@ -627,19 +662,23 @@ int IOBuf::_pop_back_ref() {
 }
 
 void IOBuf::clear() {
+    size_t num_hit_tls_threshold = 0;
     if (_small()) {
         if (_sv.refs[0].block != NULL) {
-            _sv.refs[0].block->dec_ref();
+            num_hit_tls_threshold +=
+                iobuf::recycle_tls_block(_sv.refs[0].block);
             reset_block_ref(_sv.refs[0]);
-                        
+
             if (_sv.refs[1].block != NULL) {
-                _sv.refs[1].block->dec_ref();
+                num_hit_tls_threshold +=
+                    iobuf::recycle_tls_block(_sv.refs[1].block);
                 reset_block_ref(_sv.refs[1]);
             }
         }
     } else {
         for (uint32_t i = 0; i < _bv.nref; ++i) { 
-            _bv.ref_at(i).block->dec_ref();
+            num_hit_tls_threshold +=
+                iobuf::recycle_tls_block(_bv.ref_at(i).block);
         }
         iobuf::release_blockref_array(_bv.refs, _bv.capacity());
         // Do not reconstruct IOBuf with placement new here: clear() may run on
@@ -647,6 +686,9 @@ void IOBuf::clear() {
         // would overwrite the derived class vptr.
         reset_block_ref(_sv.refs[0]);
         reset_block_ref(_sv.refs[1]);
+    }
+    if (num_hit_tls_threshold != 0) {
+        iobuf::add_g_num_hit_tls_threshold(num_hit_tls_threshold);
     }
 }
 
