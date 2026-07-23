@@ -43,6 +43,9 @@
 #include "brpc/versioned_ref_with_id.h"
 #include "brpc/health_check_option.h"
 #include "brpc/socket_mode.h"
+#if BRPC_WITH_IO_URING
+#include "brpc/event_dispatcher_iouring_impl.h"
+#endif
 
 namespace brpc {
 namespace policy {
@@ -344,6 +347,26 @@ public:
     // instead. It's public just because of requirement of ResourcePool.
     explicit Socket(Forbidden);
     ~Socket() override;
+
+#if BRPC_WITH_IO_URING
+    const static int MAX_TASK_LIST_LENGTH = 8192;
+    butil::atomic<std::size_t> _read_index{0};
+    butil::atomic<std::size_t> _write_index{0};
+    butil::atomic<bool> _is_working{false};
+    iouring_backend::IoUringFdInfo* tasklist[MAX_TASK_LIST_LENGTH];
+
+    inline void clean_resource(iouring_backend::IoUringFdInfo* fd_info) {
+        delete fd_info;
+    }
+
+    void add_task(iouring_backend::IoUringFdInfo* fd_info);
+
+    iouring_backend::IoUringFdInfo* get_task();
+
+    bool is_queue_empty() const;
+
+    static void* iouring_callback(void* arg);
+#endif
 
     // Write `msg' into this Socket and clear it. The `msg' should be an
     // intact request or response. To prevent messages from interleaving
@@ -885,10 +908,10 @@ private:
     uint32_t _last_msg_size;
     // Average message size of last #MSG_SIZE_WINDOW messages (roughly)
     uint32_t _avg_msg_size;
-
+public:
     // Storing data read from `_fd' but cut-off yet.
     butil::IOPortal _read_buf;
-
+private:
     // Set with cpuwide_time_us() at last read operation
     butil::atomic<int64_t> _last_readtime_us;
 

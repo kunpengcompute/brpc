@@ -26,17 +26,40 @@
 
 namespace brpc {
 
-// Unique identifier of a IOEventData.
-// Users shall store EventDataId instead of EventData and call EventData::Address()
-// to convert the identifier to an unique_ptr at each access. Whenever a
-// unique_ptr is not destructed, the enclosed EventData will not be recycled.
 typedef VRefId IOEventDataId;
 
 const VRefId INVALID_IO_EVENT_DATA_ID = INVALID_VREF_ID;
 
 class IOEventData;
+class EventDispatcher;
 
 typedef VersionedRefWithIdUniquePtr<IOEventData> EventDataUniquePtr;
+
+namespace epoll_backend {
+void Init(EventDispatcher*);
+void Destroy(EventDispatcher*);
+int Start(EventDispatcher*, const bthread_attr_t*);
+void Stop(EventDispatcher*);
+int AddConsumer(EventDispatcher*, IOEventDataId, int);
+int RemoveConsumer(EventDispatcher*, int);
+int RegisterEvent(EventDispatcher*, IOEventDataId, int, bool);
+int UnregisterEvent(EventDispatcher*, IOEventDataId, int, bool);
+void Run(EventDispatcher*);
+}
+
+#if BRPC_WITH_IO_URING
+namespace iouring_backend {
+void Init(EventDispatcher*);
+void Destroy(EventDispatcher*);
+int Start(EventDispatcher*, const bthread_attr_t*);
+void Stop(EventDispatcher*);
+int AddConsumer(EventDispatcher*, IOEventDataId, int);
+int RemoveConsumer(EventDispatcher*, int);
+int RegisterEvent(EventDispatcher*, IOEventDataId, int, bool);
+int UnregisterEvent(EventDispatcher*, IOEventDataId, int, bool);
+void Run(EventDispatcher*);
+}
+#endif
 
 // User callback type of input event and output event.
 typedef int (*InputEventCallback) (void* id, uint32_t events,
@@ -74,8 +97,10 @@ public:
         return _options.output_cb(_options.user_data, events, thread_attr);
     }
 
+    void* user_data() const { return _options.user_data; }
+
 private:
-friend class VersionedRefWithId<IOEventData>;
+    friend class VersionedRefWithId<IOEventData>;
 
     int OnCreated(const IOEventDataOptions& options);
     void BeforeRecycled();
@@ -133,11 +158,32 @@ public:
     // Returns 0 on success, -1 otherwise and errno is set
     int UnregisterEvent(IOEventDataId event_data_id, int fd, bool pollin);
 
-private:
-    DISALLOW_COPY_AND_ASSIGN(EventDispatcher);
+    static int CallInputEventCallback(IOEventDataId event_data_id,
+                                      uint32_t events,
+                                      const bthread_attr_t& thread_attr) {
+        return OnEvent<true>(event_data_id, events, thread_attr);
+    }
+
+    static int CallOutputEventCallback(IOEventDataId event_data_id,
+                                       uint32_t events,
+                                       const bthread_attr_t& thread_attr) {
+        return OnEvent<false>(event_data_id, events, thread_attr);
+    }
+
+    // Internal data for backend implementations
+    int _event_dispatcher_fd;
+    volatile bool _stop;
+    bthread_t _tid;
+    bthread_attr_t _thread_attr;
+    int _wakeup_fds[2];
+    int _backend_type;
+    void* _iouring_ctx;
 
     // Calls Run()
     static void* RunThis(void* arg);
+
+private:
+    DISALLOW_COPY_AND_ASSIGN(EventDispatcher);
 
     // Thread entry.
     void Run();
@@ -157,33 +203,6 @@ private:
                data->CallInputEventCallback(events, thread_attr) :
                data->CallOutputEventCallback(events, thread_attr);
     }
-
-    static int CallInputEventCallback(IOEventDataId event_data_id,
-                                      uint32_t events,
-                                      const bthread_attr_t& thread_attr) {
-        return OnEvent<true>(event_data_id, events, thread_attr);
-    }
-
-    static int CallOutputEventCallback(IOEventDataId event_data_id,
-                                       uint32_t events,
-                                       const bthread_attr_t& thread_attr) {
-        return OnEvent<false>(event_data_id, events, thread_attr);
-    }
-
-    // The epoll/kqueue fd to watch events.
-    int _event_dispatcher_fd;
-
-    // false unless Stop() is called.
-    volatile bool _stop;
-
-    // identifier of hosting bthread
-    bthread_t _tid;
-
-    // The attribute of bthreads calling user callbacks.
-    bthread_attr_t _thread_attr;
-
-    // Pipe fds to wakeup EventDispatcher from `epoll_wait' in order to quit
-    int _wakeup_fds[2];
 };
 
 EventDispatcher& GetGlobalEventDispatcher(int fd, bthread_tag_t tag);

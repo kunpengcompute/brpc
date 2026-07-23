@@ -22,6 +22,10 @@
 
 #include <stdlib.h>   // malloc & free
 
+#ifdef BLOCK_SIZE
+#undef BLOCK_SIZE
+#endif
+
 namespace butil {
 
 // A single-threaded pool for very efficient allocations of same-sized items.

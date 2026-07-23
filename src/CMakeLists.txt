@@ -64,6 +64,10 @@ if(WITH_THRIFT)
    check_thrift_version(brpc-static)
 endif()
 
+if(WITH_IO_URING)
+   target_link_libraries(brpc-static ${LIBURING_LIB})
+endif()
+
 SET_TARGET_PROPERTIES(brpc-static PROPERTIES OUTPUT_NAME brpc CLEAN_DIRECT_OUTPUT 1)
 
 # for protoc-gen-mcpack
@@ -86,6 +90,9 @@ if(BUILD_SHARED_LIBS)
     if(WITH_THRIFT)
         target_link_libraries(brpc-shared ${THRIFT_LIB})
         check_thrift_version(brpc-shared)
+    endif()
+    if(WITH_IO_URING)
+        target_link_libraries(brpc-shared ${LIBURING_LIB})
     endif()
     SET_TARGET_PROPERTIES(brpc-shared PROPERTIES OUTPUT_NAME brpc CLEAN_DIRECT_OUTPUT 1)
 

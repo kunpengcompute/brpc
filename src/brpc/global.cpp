@@ -81,6 +81,7 @@
 #include "brpc/policy/nshead_mcpack_protocol.h"
 #include "brpc/policy/rtmp_protocol.h"
 #include "brpc/policy/esp_protocol.h"
+#include "brpc/policy/echo_protocol.h"
 #ifdef ENABLE_THRIFT_FRAMED_PROTOCOL
 # include "brpc/policy/thrift_protocol.h"
 #endif
@@ -599,6 +600,16 @@ static void GlobalInitializeOrDieImpl() {
         NULL, NULL, NULL,
         CONNECTION_TYPE_POOLED_AND_SHORT, "esp"};
     if (RegisterProtocol(PROTOCOL_ESP, esp_protocol) != 0) {
+        exit(1);
+    }
+
+    Protocol echo_protocol = {
+        ParseEchoMessage,
+        SerializeEchoRequest, PackEchoRequest,
+        ProcessEchoRequest, ProcessEchoResponse,
+        NULL, NULL, NULL,
+        CONNECTION_TYPE_ALL, "echo" };
+    if (RegisterProtocol(PROTOCOL_ECHO, echo_protocol) != 0) {
         exit(1);
     }
 

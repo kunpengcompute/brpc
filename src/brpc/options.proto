@@ -48,7 +48,7 @@ enum ProtocolType {
     PROTOCOL_PUBLIC_PBRPC = 8;
     PROTOCOL_NOVA_PBRPC = 9;
     PROTOCOL_REDIS = 10;
-    PROTOCOL_NSHEAD_CLIENT = 11;       // implemented in baidu-rpc-ub
+    PROTOCOL_ECHO = 11;                // Minimal echo protocol, before nshead(12) to avoid being blocked
     PROTOCOL_NSHEAD = 12;
     PROTOCOL_HADOOP_RPC = 13;
     PROTOCOL_HADOOP_SERVER_RPC = 14;
@@ -65,6 +65,7 @@ enum ProtocolType {
     PROTOCOL_CDS_AGENT = 24;           // Client side only
     PROTOCOL_ESP = 25;                 // Client side only
     PROTOCOL_H2 = 26;
+    PROTOCOL_NSHEAD_CLIENT = 27;       // implemented in baidu-rpc-ub
 }
 
 enum CompressType {

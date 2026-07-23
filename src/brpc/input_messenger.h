@@ -131,7 +131,6 @@ protected:
     static void OnNewMessages(Socket* m);
     
 private:
-
     // Find a valid scissor from `handlers' to cut off `header' and `payload'
     // from m->read_buf, save index of the scissor into `index'.
     ParseResult CutInputMessage(Socket* m, size_t* index, bool read_eof);
