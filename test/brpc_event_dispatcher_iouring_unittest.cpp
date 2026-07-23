@@ -28,13 +28,16 @@
 #include "bthread/bthread.h"
 #include "brpc/event_dispatcher.h"
 
-#ifdef BRPC_WITH_IO_URING
+#if BRPC_WITH_IO_URING
 
+#include <gflags/gflags.h>
 #include <liburing.h>
 #include <atomic>
 #include <vector>
 
 namespace brpc {
+DECLARE_string(io_backend);
+
 namespace testing {
 
 class IoUringEventDispatcherTest : public ::testing::Test {
@@ -43,6 +46,7 @@ protected:
     ~IoUringEventDispatcherTest() override = default;
 
     void SetUp() override {
+        FLAGS_io_backend = "io_uring";
         dispatcher_ = new EventDispatcher();
     }
 

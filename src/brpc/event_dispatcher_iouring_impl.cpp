@@ -536,7 +536,11 @@ int AddConsumer(EventDispatcher* disp, IOEventDataId event_data_id, int fd) {
 
     RemoveConsumer(disp, fd);
     auto user_data = new IoUringFdInfo(fd, events, event_data_id, FLAGS_io_uring_multishot_recv, false);
-    FillRecvSqe(ctx, user_data);
+    if (!FillRecvSqe(ctx, user_data)) {
+        LOG(ERROR) << "Failed to fill recv SQE for fd=" << fd;
+        DeleteUserData(user_data);
+        return -1;
+    }
 
     int ret = ctx->Submit();
     if (ret < 0) {
@@ -697,7 +701,7 @@ void Run(EventDispatcher* disp) {
                         continue;
                     }
 
-                    auto socket_id = reinterpret_cast<SocketId>(event_data->_options.user_data);
+                    auto socket_id = reinterpret_cast<SocketId>(event_data->user_data());
                     SocketUniquePtr s;
                     int addr_ret = Socket::Address(socket_id, &s);
                     if (addr_ret < 0 || s == NULL) {
@@ -767,6 +771,7 @@ void Run(EventDispatcher* disp) {
                     if (read_eof) {
                         s->SetEOF();
                         DeleteUserData(user_data);
+                        continue;
                     } else {
                         bool need_rearm = !(cqe->flags & IORING_CQE_F_MORE);
 
@@ -794,6 +799,7 @@ void Run(EventDispatcher* disp) {
                             } else {
                                 delete new_user_data;
                             }
+                            DeleteUserData(user_data);
                         }
                     }
                 }

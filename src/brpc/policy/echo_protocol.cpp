@@ -100,7 +100,7 @@ void ProcessEchoRequest(InputMessageBase* msg_base) {
     if (FLAGS_echo_fake_payload_size > 0) {
         const int n = FLAGS_echo_fake_payload_size;
         const int iter = FLAGS_echo_fake_payload_iterations;
-        char* buf = new (std::nothrow) char[n];
+        char* buf = new (std::nothrow) char[n]();
         char* buf2 = new (std::nothrow) char[n];
         if (buf && buf2) {
             uint64_t sum = 0;

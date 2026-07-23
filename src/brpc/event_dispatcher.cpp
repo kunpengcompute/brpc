@@ -25,7 +25,7 @@
 #include "bthread/bthread.h"
 #include "brpc/event_dispatcher.h"
 
-#ifdef BRPC_WITH_IO_URING
+#if BRPC_WITH_IO_URING
 #include <liburing.h>
 #endif
 
@@ -56,7 +56,7 @@ static int ResolveIoBackend() {
     if (backend == "epoll") {
         return IO_BACKEND_EPOLL;
     }
-#ifdef BRPC_WITH_IO_URING
+#if BRPC_WITH_IO_URING
     if (backend == "io_uring") {
         return IO_BACKEND_IOURING;
     }
@@ -131,7 +131,7 @@ void IOEventData::BeforeRecycled() {
 #if defined(OS_LINUX)
 
 #include "brpc/event_dispatcher_epoll_impl.cpp"
-#ifdef BRPC_WITH_IO_URING
+#if BRPC_WITH_IO_URING
 #include "brpc/event_dispatcher_iouring_impl.cpp"
 #endif
 
@@ -146,7 +146,7 @@ EventDispatcher::EventDispatcher()
     , _backend_type(ResolveIoBackend())
     , _iouring_ctx(NULL) {
     if (_backend_type == IO_BACKEND_IOURING) {
-#ifdef BRPC_WITH_IO_URING
+#if BRPC_WITH_IO_URING
         iouring_backend::Init(this);
 #endif
     } else {
@@ -158,7 +158,7 @@ EventDispatcher::~EventDispatcher() {
     Stop();
     Join();
     if (_backend_type == IO_BACKEND_IOURING) {
-#ifdef BRPC_WITH_IO_URING
+#if BRPC_WITH_IO_URING
         iouring_backend::Destroy(this);
 #endif
     } else {
@@ -168,7 +168,7 @@ EventDispatcher::~EventDispatcher() {
 
 int EventDispatcher::Start(const bthread_attr_t* thread_attr) {
     if (_backend_type == IO_BACKEND_IOURING) {
-#ifdef BRPC_WITH_IO_URING
+#if BRPC_WITH_IO_URING
         return iouring_backend::Start(this, thread_attr);
 #endif
     }
@@ -181,7 +181,7 @@ bool EventDispatcher::Running() const {
 
 void EventDispatcher::Stop() {
     if (_backend_type == IO_BACKEND_IOURING) {
-#ifdef BRPC_WITH_IO_URING
+#if BRPC_WITH_IO_URING
         iouring_backend::Stop(this);
 #endif
     } else {
@@ -198,7 +198,7 @@ void EventDispatcher::Join() {
 
 int EventDispatcher::AddConsumer(IOEventDataId event_data_id, int fd) {
     if (_backend_type == IO_BACKEND_IOURING) {
-#ifdef BRPC_WITH_IO_URING
+#if BRPC_WITH_IO_URING
         return iouring_backend::AddConsumer(this, event_data_id, fd);
 #endif
     }
@@ -207,7 +207,7 @@ int EventDispatcher::AddConsumer(IOEventDataId event_data_id, int fd) {
 
 int EventDispatcher::RemoveConsumer(int fd) {
     if (_backend_type == IO_BACKEND_IOURING) {
-#ifdef BRPC_WITH_IO_URING
+#if BRPC_WITH_IO_URING
         return iouring_backend::RemoveConsumer(this, fd);
 #endif
     }
@@ -216,7 +216,7 @@ int EventDispatcher::RemoveConsumer(int fd) {
 
 int EventDispatcher::RegisterEvent(IOEventDataId event_data_id, int fd, bool pollin) {
     if (_backend_type == IO_BACKEND_IOURING) {
-#ifdef BRPC_WITH_IO_URING
+#if BRPC_WITH_IO_URING
         return iouring_backend::RegisterEvent(this, event_data_id, fd, pollin);
 #endif
     }
@@ -225,7 +225,7 @@ int EventDispatcher::RegisterEvent(IOEventDataId event_data_id, int fd, bool pol
 
 int EventDispatcher::UnregisterEvent(IOEventDataId event_data_id, int fd, bool pollin) {
     if (_backend_type == IO_BACKEND_IOURING) {
-#ifdef BRPC_WITH_IO_URING
+#if BRPC_WITH_IO_URING
         return iouring_backend::UnregisterEvent(this, event_data_id, fd, pollin);
 #endif
     }
@@ -239,7 +239,7 @@ void* EventDispatcher::RunThis(void* arg) {
 
 void EventDispatcher::Run() {
     if (_backend_type == IO_BACKEND_IOURING) {
-#ifdef BRPC_WITH_IO_URING
+#if BRPC_WITH_IO_URING
         iouring_backend::Run(this);
 #endif
     } else {

@@ -43,9 +43,13 @@ void Destroy(EventDispatcher* disp) {
         close(disp->_event_dispatcher_fd);
         disp->_event_dispatcher_fd = -1;
     }
-    if (disp->_wakeup_fds[0] > 0) {
+    if (disp->_wakeup_fds[0] >= 0) {
         close(disp->_wakeup_fds[0]);
+        disp->_wakeup_fds[0] = -1;
+    }
+    if (disp->_wakeup_fds[1] >= 0) {
         close(disp->_wakeup_fds[1]);
+        disp->_wakeup_fds[1] = -1;
     }
 }
 

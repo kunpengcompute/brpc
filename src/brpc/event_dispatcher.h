@@ -47,7 +47,7 @@ int UnregisterEvent(EventDispatcher*, IOEventDataId, int, bool);
 void Run(EventDispatcher*);
 }
 
-#ifdef BRPC_WITH_IO_URING
+#if BRPC_WITH_IO_URING
 namespace iouring_backend {
 void Init(EventDispatcher*);
 void Destroy(EventDispatcher*);
@@ -97,13 +97,15 @@ public:
         return _options.output_cb(_options.user_data, events, thread_attr);
     }
 
-    IOEventDataOptions _options;
+    void* user_data() const { return _options.user_data; }
+
 private:
-friend class VersionedRefWithId<IOEventData>;
+    friend class VersionedRefWithId<IOEventData>;
 
     int OnCreated(const IOEventDataOptions& options);
     void BeforeRecycled();
 
+    IOEventDataOptions _options;
 };
 
 namespace rdma {

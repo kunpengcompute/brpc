@@ -43,7 +43,9 @@
 #include "brpc/versioned_ref_with_id.h"
 #include "brpc/health_check_option.h"
 #include "brpc/socket_mode.h"
+#if BRPC_WITH_IO_URING
 #include "brpc/event_dispatcher_iouring_impl.h"
+#endif
 
 namespace brpc {
 namespace policy {
@@ -346,6 +348,7 @@ public:
     explicit Socket(Forbidden);
     ~Socket() override;
 
+#if BRPC_WITH_IO_URING
     const static int MAX_TASK_LIST_LENGTH = 8192;
     butil::atomic<std::size_t> _read_index{0};
     butil::atomic<std::size_t> _write_index{0};
@@ -363,6 +366,7 @@ public:
     bool is_queue_empty() const;
 
     static void* iouring_callback(void* arg);
+#endif
 
     // Write `msg' into this Socket and clear it. The `msg' should be an
     // intact request or response. To prevent messages from interleaving

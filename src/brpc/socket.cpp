@@ -55,7 +55,9 @@
 #include "brpc/transport_factory.h"
 #include "brpc/rdma/rdma_endpoint.h"
 #include "brpc/rdma/rdma_helper.h"
+#if BRPC_WITH_IO_URING
 #include "brpc/event_dispatcher_iouring_impl.h"
+#endif
 #if defined(OS_MACOSX)
 #include <sys/event.h>
 #endif
@@ -3455,6 +3457,7 @@ void Socket::OnProgressiveReadCompleted() {
     }
 }
 
+#if BRPC_WITH_IO_URING
 void Socket::add_task(iouring_backend::IoUringFdInfo* fd_info) {
     std::size_t curr_write = _write_index.load(butil::memory_order_relaxed);
     std::size_t curr_read = _read_index.load(butil::memory_order_relaxed);
@@ -3573,6 +3576,7 @@ void* Socket::iouring_callback(void* arg) {
     }
     return nullptr;
 }
+#endif
 
 SocketSSLContext::SocketSSLContext()
     : raw_ctx(NULL)
