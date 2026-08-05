@@ -54,10 +54,11 @@ else
     LDD=ldd
 fi
 
-TEMP=`getopt -o v: --long headers:,libs:,cc:,cxx:,with-glog,with-thrift,with-rdma,with-mesalink,with-bthread-tracer,with-debug-bthread-sche-safety,with-debug-lock,with-asan,with-riscv-zvbc,with-riscv-zbc,with-cpu-frequency,nodebugsymbols,werror -n 'config_brpc' -- "$@"`
+TEMP=`getopt -o v: --long headers:,libs:,cc:,cxx:,with-glog,with-thrift,with-rdma,with-urma,with-mesalink,with-bthread-tracer,with-debug-bthread-sche-safety,with-debug-lock,with-asan,with-riscv-zvbc,with-riscv-zbc,nodebugsymbols,werror -n 'config_brpc' -- "$@"`
 WITH_GLOG=0
 WITH_THRIFT=0
 WITH_RDMA=0
+WITH_URMA=0
 WITH_MESALINK=0
 WITH_BTHREAD_TRACER=0
 WITH_ASAN=0
@@ -67,7 +68,6 @@ BRPC_DEBUG_BTHREAD_SCHE_SAFETY=0
 DEBUGSYMBOLS=-g
 WERROR=
 BRPC_DEBUG_LOCK=0
-WITH_CPU_FREQUENCY=0
 
 if [ $? != 0 ] ; then >&2 $ECHO "Terminating..."; exit 1 ; fi
 
@@ -90,11 +90,11 @@ while true; do
         --with-glog ) WITH_GLOG=1; shift 1 ;;
         --with-thrift) WITH_THRIFT=1; shift 1 ;;
         --with-rdma) WITH_RDMA=1; shift 1 ;;
+        --with-urma) WITH_URMA=1; shift 1 ;;
         --with-mesalink) WITH_MESALINK=1; shift 1 ;;
         --with-bthread-tracer) WITH_BTHREAD_TRACER=1; shift 1 ;;
         --with-debug-bthread-sche-safety ) BRPC_DEBUG_BTHREAD_SCHE_SAFETY=1; shift 1 ;;
         --with-debug-lock ) BRPC_DEBUG_LOCK=1; shift 1 ;;
-        --with-cpu-frequency ) WITH_CPU_FREQUENCY=1; shift 1 ;;
         --with-asan) WITH_ASAN=1; shift 1 ;;
         --with-riscv-zvbc) WITH_RISCV_ZVBC=1; shift 1 ;;
         --with-riscv-zbc) WITH_RISCV_ZBC=1; shift 1 ;;
@@ -128,8 +128,8 @@ fi
 print_info "CC=$CC, CXX=$CXX"
 
 GCC_VERSION=$(CXX=$CXX tools/print_gcc_version.sh)
-if [ $GCC_VERSION -eq 0 ] || [ $GCC_VERSION -lt 50000 ]; then
-    >&2 $ECHO "C++ compiler is too old, please install GCC 5.0+ or Clang 3.5+ with C++14 support"
+if [ $GCC_VERSION -gt 0 ] && [ $GCC_VERSION -lt 40800 ]; then
+    >&2 $ECHO "GCC is too old, please install a newer version supporting C++11"
     exit 1
 fi
 
@@ -385,7 +385,7 @@ if [ "$PROTOBUF_VERSION" -ge 4022000 ]; then
     CXXFLAGS="-std=c++17"
     print_success "Found protobuf version $PROTOBUF_VERSION (>= v22, using C++17 with abseil)"
 else
-    CXXFLAGS="-std=c++14"
+    CXXFLAGS="-std=c++0x"
     print_success "Found protobuf version $PROTOBUF_VERSION"
 fi
 
@@ -481,7 +481,7 @@ append_to_output "STATIC_LINKINGS=$STATIC_LINKINGS"
 append_to_output "DYNAMIC_LINKINGS=$DYNAMIC_LINKINGS"
 
 # CPP means C PreProcessing, not C PlusPlus
-CPPFLAGS="${CPPFLAGS} -DBRPC_WITH_GLOG=$WITH_GLOG -DBRPC_DEBUG_BTHREAD_SCHE_SAFETY=$BRPC_DEBUG_BTHREAD_SCHE_SAFETY -DBRPC_DEBUG_LOCK=$BRPC_DEBUG_LOCK -DBUTIL_USE_CPU_FREQUENCY=$WITH_CPU_FREQUENCY"
+CPPFLAGS="${CPPFLAGS} -DBRPC_WITH_GLOG=$WITH_GLOG -DBRPC_DEBUG_BTHREAD_SCHE_SAFETY=$BRPC_DEBUG_BTHREAD_SCHE_SAFETY -DBRPC_DEBUG_LOCK=$BRPC_DEBUG_LOCK"
 
 # Avoid over-optimizations of TLS variables by GCC>=4.8
 # See: https://github.com/apache/brpc/issues/1693
@@ -536,6 +536,26 @@ if [ $WITH_RDMA != 0 ]; then
 
     append_to_output "DYNAMIC_LINKINGS+=-libverbs"
     append_to_output "WITH_RDMA=1"
+fi
+
+if [ $WITH_URMA != 0 ]; then
+    URMA_LIB=$(find_dir_of_lib urma)
+    URMA_HDR=$(find_dir_of_header_or_die urma_api.h)
+    URMA_BOND_HDR=$(find_dir_of_header urma_ubagg.h)
+    CPPFLAGS="${CPPFLAGS} -DBRPC_WITH_URMA=1"
+    append_to_output "WITH_URMA=1"
+    append_to_output_headers "$URMA_HDR"
+    if [ -n "$URMA_BOND_HDR" ]; then
+        append_to_output_headers "$URMA_BOND_HDR"
+    fi
+    if [ -n "$URMA_LIB" ]; then
+        append_to_output_libs "$URMA_LIB"
+        append_to_output "DYNAMIC_LINKINGS+=-lurma"
+        append_to_output "URMA_USE_MOCK=0"
+    else
+        append_to_output "URMA_USE_MOCK=1"
+        print_info "liburma not found; using URMA link-time mock"
+    fi
 fi
 
 if [ $WITH_MESALINK != 0 ]; then
@@ -651,11 +671,6 @@ cat << EOF > src/butil/config.h
 #endif
 #define BRPC_WITH_GLOG $WITH_GLOG
 
-#ifdef BUTIL_USE_CPU_FREQUENCY
-#undef BUTIL_USE_CPU_FREQUENCY
-#endif
-#define BUTIL_USE_CPU_FREQUENCY $WITH_CPU_FREQUENCY
-
 #endif  // BUTIL_CONFIG_H
 EOF
 
@@ -674,6 +689,7 @@ print_info "System:    $SYSTEM"
 if [ $WITH_GLOG -ne 0 ]; then print_info "With glog: yes"; fi
 if [ $WITH_THRIFT -ne 0 ]; then print_info "With thrift: yes"; fi
 if [ $WITH_RDMA -ne 0 ]; then print_info "With RDMA: yes"; fi
+if [ $WITH_URMA -ne 0 ]; then print_info "With URMA: yes"; fi
 if [ $WITH_MESALINK -ne 0 ]; then print_info "With MesaLink: yes"; fi
 if [ $WITH_BTHREAD_TRACER -ne 0 ]; then print_info "With bthread tracer: yes"; fi
 if [ $WITH_ASAN -ne 0 ]; then print_info "With ASAN: yes"; fi

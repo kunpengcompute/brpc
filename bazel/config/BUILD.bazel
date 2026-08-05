@@ -36,12 +36,6 @@ config_setting(
     define_values = {"BRPC_WITH_GLOG": "true"},
 )
 
-config_setting(
-    name = "brpc_with_cpu_frequency",
-    define_values = {"BUTIL_USE_CPU_FREQUENCY": "true"},
-    visibility = ["//visibility:public"],
-)
-
 selects.config_setting_group(
     name = "brpc_with_mesalink",
     match_any = [
@@ -107,6 +101,12 @@ config_setting(
 config_setting(
     name = "brpc_with_rdma",
     define_values = {"BRPC_WITH_RDMA": "true"},
+    visibility = ["//visibility:public"],
+)
+
+config_setting(
+    name = "brpc_with_urma",
+    define_values = {"BRPC_WITH_URMA": "true"},
     visibility = ["//visibility:public"],
 )
 
