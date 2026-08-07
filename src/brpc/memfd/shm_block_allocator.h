@@ -35,7 +35,8 @@ static const uint16_t SHM_VERSION_CURRENT = SHM_VERSION_V1;
 struct ShmBlockState {
     std::atomic<int32_t>  pending_count;
     std::atomic<uint8_t>  write_complete;
-    uint8_t               _pad[3];
+    std::atomic<uint8_t>  recycle_claimed;
+    uint8_t               _pad[2];
 };
 
 struct ShmBufferHeader {
@@ -71,6 +72,7 @@ public:
     void FreeBlock(uint32_t block_index);
 
     void MarkWriteComplete(uint32_t block_index);
+    bool TryRecycleBlock(uint32_t block_index);
     inline int32_t IncPendingCount(uint32_t block_index) {
         return _block_states[block_index].pending_count.fetch_add(1, std::memory_order_acq_rel);
     }

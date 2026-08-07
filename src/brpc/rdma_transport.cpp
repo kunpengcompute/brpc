@@ -127,7 +127,7 @@ void RdmaTransport::ProcessEvent(bthread_attr_t attr) {
     bthread_t tid;
     if (FLAGS_usercode_in_coroutine) {
         OnEdge(_socket);
-    } else if (rdma::FLAGS_rdma_edisp_unsched == false) {
+    } else if (rdma::FLAGS_rdma_edisp_unsched) {
         auto rc = bthread_start_background(&tid, &attr, OnEdge, _socket);
         if (rc != 0) {
             LOG(FATAL) << "Fail to start ProcessEvent";

@@ -29,6 +29,11 @@ int TransportFactory::ContextInitOrDie(SocketMode mode, bool serverOrNot, const 
     else if (mode == SOCKET_MODE_RDMA) {
         return RdmaTransport::ContextInitOrDie(serverOrNot, _options);
     }
+#else
+    else if (mode == SOCKET_MODE_RDMA) {
+        LOG(ERROR) << "RDMA transport is not available in this build";
+        return 1;
+    }
 #endif
     else if (mode == SOCKET_MODE_MEMFD) {
         return MemfdTransport::ContextInitOrDie(serverOrNot, _options);
@@ -46,6 +51,11 @@ std::unique_ptr<Transport> TransportFactory::CreateTransport(SocketMode mode) {
 #if BRPC_WITH_RDMA
     else if (mode == SOCKET_MODE_RDMA) {
         return std::unique_ptr<RdmaTransport>(new RdmaTransport());
+    }
+#else
+    else if (mode == SOCKET_MODE_RDMA) {
+        LOG(ERROR) << "RDMA transport is not available in this build";
+        return nullptr;
     }
 #endif
     else if (mode == SOCKET_MODE_MEMFD) {

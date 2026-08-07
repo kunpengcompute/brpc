@@ -209,7 +209,7 @@ int ShmQueue::WaitNotify(const timespec* abstime) {
         return 0;
     }
 
-    int ret = bthread_fd_wait(_notify_fd, EPOLLIN);
+    int ret = bthread_fd_timedwait(_notify_fd, EPOLLIN, abstime);
     _free_notify.fetch_sub(1, std::memory_order_release);
     if (ret < 0) {
         return -1;

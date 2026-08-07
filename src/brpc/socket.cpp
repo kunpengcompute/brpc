@@ -727,7 +727,10 @@ int Socket::OnCreated(const SocketOptions& options) {
     // start build the transport
     _socket_mode = options.socket_mode;
     _transport = TransportFactory::CreateTransport(options.socket_mode);
-    CHECK(NULL != _transport);
+    if (!_transport) {
+        LOG(ERROR) << "Unsupported socket mode=" << options.socket_mode;
+        return -1;
+    }
     _transport->Init(this, options);
 
     g_vars->nsocket << 1;
@@ -844,7 +847,7 @@ void Socket::BeforeRecycled() {
     };
     const int prev_fd = _fd.exchange(-1, butil::memory_order_relaxed);
     if (ValidFileDescriptor(prev_fd)) {
-        if (_transport->HasOnEdgeTrigger()) {
+        if (_transport && _transport->HasOnEdgeTrigger()) {
             _io_event.RemoveConsumer(prev_fd);
         }
         close(prev_fd);
@@ -853,7 +856,9 @@ void Socket::BeforeRecycled() {
         }
     }
     _read_buf.clear();
-    _transport->Release();
+    if (_transport) {
+        _transport->Release();
+    }
     reset_parsing_context(NULL);
 
     _auth_flag_error.store(0, butil::memory_order_relaxed);

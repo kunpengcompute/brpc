@@ -513,6 +513,7 @@ void Channel::CallMethod(const google::protobuf::MethodDescriptor* method,
     cntl->_response = response;
     cntl->_done = done;
     cntl->_pack_request = _pack_request;
+    cntl->set_socket_mode(_options.socket_mode);
     cntl->_method = method;
     cntl->_auth = _options.auth;
 

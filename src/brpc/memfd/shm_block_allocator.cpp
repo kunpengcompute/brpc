@@ -251,7 +251,15 @@ int ShmBlockAllocator::Init(const std::string& name, size_t total_size) {
     _header_size = _header->header_size + block_count * _header->block_state_size;
     _block_region = reinterpret_cast<char*>(_base) + _header_size;
 
-    std::atomic_thread_fence(std::memory_order_release);
+    for (uint32_t i = 0; i < block_count; ++i) {
+        _block_states[i].pending_count.store(0, std::memory_order_relaxed);
+        _block_states[i].write_complete.store(0, std::memory_order_relaxed);
+        _block_states[i].recycle_claimed.store(0, std::memory_order_relaxed);
+        char* block_data = _block_region + i * _header->block_size;
+        *reinterpret_cast<uint32_t*>(block_data) =
+            i + 1 < block_count ? i + 1 : SHM_INVALID_BLOCK_INDEX;
+    }
+    _header->initialized.store(1, std::memory_order_release);
 
     return 0;
 }
@@ -301,24 +309,18 @@ butil::IOBuf::Block* ShmBlockAllocator::TryAllocBlock() {
         }
 
         char* block_data = _block_region + old_head * _header->block_size;
-        uint32_t new_head;
-        if (_header->initialized == 0) {
-            new_head = old_head + 1;
-            uint8_t old_val = 0;
-            _header->initialized.compare_exchange_weak(old_val, (new_head == (_header->block_count - 1)),
-                std::memory_order_acq_rel, std::memory_order_acquire);
-        } else {
-            new_head = *reinterpret_cast<uint32_t*>(block_data);
-            if (new_head == SHM_INVALID_BLOCK_INDEX) {
-                // 由于并发，可能FreeBlock中还没来的及刷新next
-                continue;
-            }
+        uint32_t new_head = *reinterpret_cast<uint32_t*>(block_data);
+        if (new_head == SHM_INVALID_BLOCK_INDEX) {
+            // FreeBlock publishes the new tail before linking the previous
+            // tail to it. Retry until that link becomes visible.
+            continue;
         }
 
         if (_header->free_head.compare_exchange_weak(old_head, new_head,
                 std::memory_order_acq_rel, std::memory_order_acquire)) {
             _block_states[old_head].write_complete.store(0, std::memory_order_relaxed);
             _block_states[old_head].pending_count.store(0, std::memory_order_relaxed);
+            _block_states[old_head].recycle_claimed.store(0, std::memory_order_relaxed);
             char* data_area = block_data + sizeof(butil::IOBuf::Block);
             uint32_t data_cap = _header->block_size - sizeof(butil::IOBuf::Block);
 
@@ -375,11 +377,26 @@ void ShmBlockAllocator::MarkWriteComplete(uint32_t block_index) {
     if (!_header || block_index >= _header->block_count) return;
 
     _block_states[block_index].write_complete.store(1, std::memory_order_release);
+    TryRecycleBlock(block_index);
+}
 
-    int32_t pending = _block_states[block_index].pending_count.load(std::memory_order_acquire);
-    if (pending == 0) {
-        FreeBlock(block_index);
+bool ShmBlockAllocator::TryRecycleBlock(uint32_t block_index) {
+    if (!_header || block_index >= _header->block_count) {
+        return false;
     }
+    ShmBlockState& state = _block_states[block_index];
+    if (state.pending_count.load(std::memory_order_acquire) != 0 ||
+        state.write_complete.load(std::memory_order_acquire) == 0) {
+        return false;
+    }
+    uint8_t expected = 0;
+    if (state.recycle_claimed.compare_exchange_strong(
+            expected, 1, std::memory_order_acq_rel,
+            std::memory_order_acquire)) {
+        FreeBlock(block_index);
+        return true;
+    }
+    return false;
 }
 
 void ShmBlockAllocator::NotifyWaiter() {
@@ -417,9 +434,7 @@ int ShmBlockAllocator::WaitNotify(const timespec* abstime) {
 void ShmBlockRecycler::operator()(void* data) {
     int32_t remaining = _allocator->DecPendingCount(_block_index);
     if (remaining == 1) {
-        if (_allocator->IsWriteComplete(_block_index)) {
-            _allocator->FreeBlock(_block_index);
-        }
+        _allocator->TryRecycleBlock(_block_index);
     }
 }
 

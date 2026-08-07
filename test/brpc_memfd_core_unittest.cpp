@@ -25,11 +25,13 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstring>
 #include <limits>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -228,6 +230,83 @@ TEST_F(MemfdCoreTest, BlockAllocatorAllocatesMapsAndRecycles) {
     owner._header->free_head.store(saved_head, std::memory_order_relaxed);
 }
 
+TEST_F(MemfdCoreTest, BlockAllocatorInitialFreeListIsConcurrentSafe) {
+    ShmBlockAllocator allocator;
+    ASSERT_EQ(0, allocator.Init(UniqueName("concurrent_init_"), 64 * 1024));
+    ASSERT_EQ(1, allocator._header->initialized.load());
+
+    std::atomic<bool> start(false);
+    std::mutex blocks_mutex;
+    std::vector<butil::IOBuf::Block*> blocks;
+    std::vector<std::thread> threads;
+    for (int i = 0; i < 8; ++i) {
+        threads.emplace_back([&] {
+            while (!start.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            while (butil::IOBuf::Block* block = allocator.TryAllocBlock()) {
+                std::lock_guard<std::mutex> lock(blocks_mutex);
+                blocks.push_back(block);
+            }
+        });
+    }
+    start.store(true, std::memory_order_release);
+    for (std::thread& thread : threads) {
+        thread.join();
+    }
+
+    ASSERT_EQ(allocator._header->block_count - 1, blocks.size());
+    std::vector<uint32_t> indices;
+    for (butil::IOBuf::Block* block : blocks) {
+        indices.push_back(allocator.GetBlockIndex(block));
+    }
+    std::sort(indices.begin(), indices.end());
+    EXPECT_EQ(indices.end(), std::unique(indices.begin(), indices.end()));
+
+    for (butil::IOBuf::Block* block : blocks) {
+        const uint32_t index = allocator.GetBlockIndex(block);
+        block->~Block();
+        allocator.FreeBlock(index);
+    }
+    EXPECT_EQ(static_cast<int32_t>(allocator._header->block_count),
+              allocator._header->free_count.load());
+}
+
+TEST_F(MemfdCoreTest, BlockRecycleIsClaimedExactlyOnce) {
+    ShmBlockAllocator allocator;
+    ASSERT_EQ(0, allocator.Init(UniqueName("recycle_race_"), 4096));
+    const int32_t initial_free_count = allocator._header->free_count.load();
+
+    for (int round = 0; round < 1000; ++round) {
+        butil::IOBuf::Block* block = allocator.TryAllocBlock();
+        ASSERT_NE(nullptr, block);
+        const uint32_t index = allocator.GetBlockIndex(block);
+        ASSERT_EQ(0, allocator.IncPendingCount(index));
+        block->~Block();
+
+        std::atomic<bool> start(false);
+        std::thread writer([&] {
+            while (!start.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            allocator.MarkWriteComplete(index);
+        });
+        std::thread reader([&] {
+            while (!start.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            ShmBlockRecycler recycler(&allocator, index);
+            recycler(nullptr);
+        });
+        start.store(true, std::memory_order_release);
+        writer.join();
+        reader.join();
+
+        EXPECT_EQ(1, allocator._block_states[index].recycle_claimed.load());
+        ASSERT_EQ(initial_free_count, allocator._header->free_count.load());
+    }
+}
+
 TEST_F(MemfdCoreTest, BlockAllocatorExhaustionAndNotification) {
     ShmBlockAllocator allocator;
     ASSERT_EQ(0, allocator.Init(UniqueName("exhaust_"), 2048));
@@ -341,6 +420,16 @@ TEST_F(MemfdCoreTest, QueueValidatesMetadataAndProcessesRing) {
     ASSERT_EQ(0, queue.Enqueue(30, 31));
     EXPECT_FALSE(queue.IsFree());
     EXPECT_EQ(-1, queue.Enqueue(40, 41));
+
+    timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_nsec += 5 * 1000 * 1000;
+    if (deadline.tv_nsec >= 1000 * 1000 * 1000) {
+        ++deadline.tv_sec;
+        deadline.tv_nsec -= 1000 * 1000 * 1000;
+    }
+    EXPECT_EQ(-1, queue.WaitNotify(&deadline));
+    EXPECT_EQ(ETIMEDOUT, errno);
 
     std::vector<ShmQueueElement> elements;
     EXPECT_EQ(2, queue.DequeueAndProcessBatch(

@@ -138,6 +138,16 @@ TEST_F(MemfdTransportTest, FactoryCreatesSupportedTransports) {
                      SOCKET_MODE_MEMFD, false, nullptr));
     EXPECT_NE(0, TransportFactory::ContextInitOrDie(
                      static_cast<SocketMode>(99), false, nullptr));
+
+#if !BRPC_WITH_RDMA
+    EXPECT_EQ(nullptr, TransportFactory::CreateTransport(SOCKET_MODE_RDMA));
+    EXPECT_NE(0, TransportFactory::ContextInitOrDie(
+                     SOCKET_MODE_RDMA, false, nullptr));
+    SocketOptions options;
+    options.socket_mode = SOCKET_MODE_RDMA;
+    SocketId id = INVALID_SOCKET_ID;
+    EXPECT_NE(0, Socket::Create(options, &id));
+#endif
 }
 
 TEST_F(MemfdTransportTest, LocalIpMapsToAbstractUnixEndpoint) {
@@ -588,7 +598,8 @@ TEST_F(MemfdTransportTest, MemfdReadCallbackHandlesEofAndBadDescriptor) {
 
 void AssertEcho(test::EchoService_Stub* stub,
                 const std::string& message,
-                const std::string& attachment) {
+                const std::string& attachment,
+                SocketMode expected_socket_mode) {
     Controller cntl;
     test::EchoRequest request;
     test::EchoResponse response;
@@ -596,6 +607,7 @@ void AssertEcho(test::EchoService_Stub* stub,
     cntl.request_attachment().append(attachment);
     stub->Echo(&cntl, &request, &response, nullptr);
     ASSERT_FALSE(cntl.Failed()) << cntl.ErrorText();
+    EXPECT_EQ(expected_socket_mode, cntl.socket_mode());
     EXPECT_EQ(message, response.message());
     EXPECT_EQ(attachment, cntl.response_attachment().to_string());
 }
@@ -622,10 +634,11 @@ TEST_F(MemfdTransportTest, MemfdRpcHandlesPayloadsAttachmentsAndConcurrency) {
     ASSERT_EQ(0, channel.Init("127.0.0.1", port, &channel_options));
     test::EchoService_Stub stub(&channel);
 
-    AssertEcho(&stub, "", "");
-    AssertEcho(&stub, "small", "attachment");
+    AssertEcho(&stub, "", "", SOCKET_MODE_MEMFD);
+    AssertEcho(&stub, "small", "attachment", SOCKET_MODE_MEMFD);
     const std::string large(32 * 1024, 'L');
-    AssertEcho(&stub, large, std::string(12 * 1024, 'A'));
+    AssertEcho(&stub, large, std::string(12 * 1024, 'A'),
+               SOCKET_MODE_MEMFD);
 
     std::atomic<int> failures(0);
     std::vector<std::thread> threads;
@@ -678,7 +691,7 @@ TEST_F(MemfdTransportTest, TcpRpcRegressesConnectionTypes) {
         ASSERT_EQ(0, channel.Init("127.0.0.1",
                                   server.listen_address().port, &options));
         test::EchoService_Stub stub(&channel);
-        AssertEcho(&stub, "tcp", "");
+        AssertEcho(&stub, "tcp", "", SOCKET_MODE_TCP);
     }
     EXPECT_EQ(SOCKET_MODE_TCP, service.last_socket_mode.load());
     ASSERT_EQ(0, server.Stop(0));
