@@ -22,6 +22,14 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netdb.h>
+#include <limits>
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <mutex>
+#include <vector>
+#include <gflags/gflags.h>
 #include <gtest/gtest.h>
 #include "gperftools_helper.h"
 #include "butil/time.h"
@@ -30,7 +38,159 @@
 #include "butil/fd_guard.h"
 #include "butil/unix_socket.h"
 #include "brpc/acceptor.h"
+#include "brpc/input_messenger.h"
 #include "brpc/policy/hulu_pbrpc_protocol.h"
+
+namespace brpc {
+DECLARE_bool(usercode_in_coroutine);
+DECLARE_int32(input_message_batch_process_size);
+}
+
+namespace {
+
+struct BatchRecorder {
+    void Record(int value) {
+        std::lock_guard<std::mutex> lock(mutex);
+        values.push_back(value);
+        condition.notify_all();
+    }
+
+    bool WaitForSize(size_t expected) {
+        std::unique_lock<std::mutex> lock(mutex);
+        return condition.wait_for(
+            lock, std::chrono::seconds(5),
+            [this, expected] { return values.size() >= expected; });
+    }
+
+    void RecordDestroy() {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            destroyed.fetch_add(1, std::memory_order_relaxed);
+        }
+        condition.notify_all();
+    }
+
+    bool WaitForDestroyed(int expected) {
+        std::unique_lock<std::mutex> lock(mutex);
+        return condition.wait_for(
+            lock, std::chrono::seconds(5),
+            [this, expected] {
+                return destroyed.load(std::memory_order_relaxed) >= expected;
+            });
+    }
+
+    std::vector<int> Snapshot() {
+        std::lock_guard<std::mutex> lock(mutex);
+        return values;
+    }
+
+    std::mutex mutex;
+    std::condition_variable condition;
+    std::vector<int> values;
+    std::atomic<int> destroyed{0};
+};
+
+class ParsedInputMessage : public brpc::InputMessageBase {
+public:
+    ParsedInputMessage(int value, BatchRecorder* recorder)
+        : value(value), recorder(recorder) {}
+
+    int value;
+    BatchRecorder* recorder;
+
+private:
+    void DestroyImpl() override {
+        recorder->RecordDestroy();
+        delete this;
+    }
+};
+
+void RecordParsedInputMessage(brpc::InputMessageBase* msg_base) {
+    brpc::DestroyingPtr<brpc::InputMessageBase> guard(msg_base);
+    ParsedInputMessage* msg =
+        static_cast<ParsedInputMessage*>(msg_base);
+    msg->recorder->Record(msg->value);
+}
+
+brpc::ParseResult ParseBatchTestMessage(
+        butil::IOBuf* source, brpc::Socket*, bool,
+        const void* arg) {
+    if (source->empty()) {
+        return brpc::MakeParseError(brpc::PARSE_ERROR_NOT_ENOUGH_DATA);
+    }
+    char value = '\0';
+    source->copy_to(&value, 1);
+    source->pop_front(1);
+    if (value == '?') {
+        return brpc::MakeParseError(brpc::PARSE_ERROR_TRY_OTHERS);
+    }
+    if (value == '!') {
+        return brpc::MakeParseError(
+            brpc::PARSE_ERROR_ABSOLUTELY_WRONG, "injected parse error");
+    }
+    if (value == '#') {
+        return brpc::MakeMessage(nullptr);
+    }
+    return brpc::MakeMessage(new ParsedInputMessage(
+        static_cast<unsigned char>(value),
+        static_cast<BatchRecorder*>(const_cast<void*>(arg))));
+}
+
+bool RejectBatchTestMessage(const brpc::InputMessageBase*) {
+    return false;
+}
+
+brpc::SocketUniquePtr CreateBatchTestSocket(
+        brpc::InputMessenger* messenger, brpc::SocketId* id) {
+    brpc::SocketOptions options;
+    options.socket_mode = brpc::SOCKET_MODE_TCP;
+    EXPECT_EQ(0, messenger->Create(options, id));
+    brpc::SocketUniquePtr socket;
+    EXPECT_EQ(0, brpc::Socket::Address(*id, &socket));
+    return socket;
+}
+
+brpc::InputMessageHandler BatchTestHandler(
+        BatchRecorder* recorder,
+        brpc::InputMessageHandler::Verify verify = nullptr) {
+    const brpc::InputMessageHandler handler = {
+        ParseBatchTestMessage,
+        RecordParsedInputMessage,
+        verify,
+        recorder,
+        "batch_test",
+    };
+    return handler;
+}
+
+class NumberedInputMessage : public brpc::InputMessageBase {
+public:
+    explicit NumberedInputMessage(int value) : value(value) {}
+
+    int value;
+
+private:
+    void DestroyImpl() override { delete this; }
+};
+
+void RecordNumberedInputMessage(brpc::InputMessageBase* msg_base) {
+    brpc::DestroyingPtr<brpc::InputMessageBase> guard(msg_base);
+    NumberedInputMessage* msg =
+        static_cast<NumberedInputMessage*>(msg_base);
+    std::vector<int>* values =
+        static_cast<std::vector<int>*>(const_cast<void*>(msg->arg()));
+    values->push_back(msg->value);
+}
+
+NumberedInputMessage* NewNumberedInputMessage(
+        int value, std::vector<int>* values) {
+    NumberedInputMessage* msg = new NumberedInputMessage(value);
+    msg->_process = RecordNumberedInputMessage;
+    msg->_arg = values;
+    return msg;
+}
+
+}  // namespace
 
 void EmptyProcessHuluRequest(brpc::InputMessageBase* msg_base) {
     brpc::DestroyingPtr<brpc::InputMessageBase> a(msg_base);
@@ -59,6 +219,342 @@ protected:
     virtual void TearDown() {
     };
 };
+
+TEST_F(MessengerTest, input_message_batch_runs_in_order_once) {
+    std::vector<int> values;
+    {
+        brpc::InputMessageBatch batch(8);
+        EXPECT_TRUE(batch.empty());
+        batch.add(NewNumberedInputMessage(1, &values));
+        batch.add(nullptr);
+        batch.add(NewNumberedInputMessage(2, &values));
+        batch.add(NewNumberedInputMessage(3, &values));
+        EXPECT_EQ(3u, batch.size());
+
+        batch.Run();
+        EXPECT_TRUE(batch.empty());
+        EXPECT_EQ((std::vector<int>{1, 2, 3}), values);
+
+        batch.Run();
+        EXPECT_EQ(3u, values.size());
+        batch.add(NewNumberedInputMessage(4, &values));
+    }
+    EXPECT_EQ((std::vector<int>{1, 2, 3, 4}), values);
+}
+
+TEST_F(MessengerTest, input_message_batch_flag_validation) {
+    EXPECT_FALSE(GFLAGS_NAMESPACE::SetCommandLineOption(
+        "input_message_batch_process_size", "-1").empty());
+    EXPECT_FALSE(GFLAGS_NAMESPACE::SetCommandLineOption(
+        "input_message_batch_process_size", "0").empty());
+    EXPECT_FALSE(GFLAGS_NAMESPACE::SetCommandLineOption(
+        "input_message_batch_process_size", "1").empty());
+    EXPECT_FALSE(GFLAGS_NAMESPACE::SetCommandLineOption(
+        "input_message_batch_process_size", "8").empty());
+    EXPECT_TRUE(GFLAGS_NAMESPACE::SetCommandLineOption(
+        "input_message_batch_process_size", "-2").empty());
+    EXPECT_FALSE(GFLAGS_NAMESPACE::SetCommandLineOption(
+        "input_message_batch_process_size", "0").empty());
+}
+
+TEST_F(MessengerTest, adaptive_input_message_batch_rises_and_falls) {
+    uint32_t ema_q8 = 256;
+    uint32_t batch_size = 1;
+    std::vector<uint32_t> levels;
+    levels.push_back(batch_size);
+    for (int i = 0; i < 16 && batch_size < 16; ++i) {
+        const uint32_t old_batch_size = batch_size;
+        batch_size = brpc::InputMessenger::UpdateAdaptiveBatchSize(
+            &ema_q8, batch_size, 32);
+        if (batch_size != old_batch_size) {
+            levels.push_back(batch_size);
+        }
+    }
+    EXPECT_EQ((std::vector<uint32_t>{1, 2, 4, 8, 16}), levels);
+    EXPECT_LE(ema_q8, 32u * 256);
+
+    ema_q8 = 9 * 256;
+    batch_size = 8;
+    batch_size = brpc::InputMessenger::UpdateAdaptiveBatchSize(
+        &ema_q8, batch_size, 9);
+    EXPECT_EQ(16u, batch_size);
+
+    const uint32_t old_ema_q8 = ema_q8;
+    EXPECT_EQ(batch_size,
+              brpc::InputMessenger::UpdateAdaptiveBatchSize(
+                  &ema_q8, batch_size, 0));
+    EXPECT_EQ(old_ema_q8, ema_q8);
+
+    std::vector<uint32_t> falling_levels;
+    falling_levels.push_back(batch_size);
+    for (int i = 0; i < 16 && batch_size > 1; ++i) {
+        const uint32_t old_batch_size = batch_size;
+        batch_size = brpc::InputMessenger::UpdateAdaptiveBatchSize(
+            &ema_q8, batch_size, 1);
+        if (batch_size != old_batch_size) {
+            falling_levels.push_back(batch_size);
+        }
+    }
+    EXPECT_EQ((std::vector<uint32_t>{16, 8, 4, 2, 1}),
+              falling_levels);
+}
+
+TEST_F(MessengerTest, adaptive_input_message_batch_caps_sample_and_resets) {
+    uint32_t ema_q8 = 0;
+    uint32_t batch_size = 0;
+    for (int i = 0; i < 32; ++i) {
+        batch_size = brpc::InputMessenger::UpdateAdaptiveBatchSize(
+            &ema_q8, batch_size, std::numeric_limits<size_t>::max());
+    }
+    EXPECT_EQ(16u, batch_size);
+    EXPECT_LE(ema_q8, 32u * 256);
+
+    brpc::SocketId id;
+    ASSERT_EQ(0, brpc::Socket::Create(brpc::SocketOptions(), &id));
+    brpc::SocketUniquePtr socket;
+    ASSERT_EQ(0, brpc::Socket::Address(id, &socket));
+    socket->_input_messages_per_read_ema_q8 = ema_q8;
+    socket->_adaptive_input_message_batch_size = batch_size;
+    ASSERT_EQ(0, socket->ResetFileDescriptor(-1));
+    EXPECT_EQ(0u, socket->_input_messages_per_read_ema_q8);
+    EXPECT_EQ(0u, socket->_adaptive_input_message_batch_size);
+}
+
+TEST_F(MessengerTest, input_message_closure_and_batch_entrypoints) {
+    std::vector<int> values;
+    brpc::InputMessageClosure closure;
+    EXPECT_EQ(nullptr, closure.release());
+    closure.reset(NewNumberedInputMessage(1, &values));
+    closure.reset(NewNumberedInputMessage(2, &values));
+    EXPECT_EQ((std::vector<int>{1}), values);
+    brpc::ProcessInputMessage(closure.release());
+    EXPECT_EQ((std::vector<int>{1, 2}), values);
+
+    brpc::InputMessageBatch* batch = new brpc::InputMessageBatch(4);
+    batch->add(NewNumberedInputMessage(3, &values));
+    batch->add(NewNumberedInputMessage(4, &values));
+    brpc::ProcessInputMessageBatch(batch);
+    EXPECT_EQ((std::vector<int>{1, 2, 3, 4}), values);
+}
+
+TEST_F(MessengerTest, queue_helpers_cover_empty_full_and_coroutine_fallback) {
+    const bool saved_coroutine = brpc::FLAGS_usercode_in_coroutine;
+    brpc::FLAGS_usercode_in_coroutine = true;
+
+    brpc::InputMessenger messenger;
+    brpc::SocketId id;
+    brpc::SocketUniquePtr socket = CreateBatchTestSocket(&messenger, &id);
+    ASSERT_TRUE(socket);
+
+    std::vector<int> values;
+    int num_bthread_created = 0;
+    std::unique_ptr<brpc::InputMessageBatch> batch;
+    brpc::InputMessenger::QueueInputMessageBatch(
+        socket.get(), &batch, &num_bthread_created, false);
+
+    brpc::InputMessageClosure last;
+    brpc::InputMessenger::QueueLastMessageOrBatch(
+        socket.get(), last, &batch, &num_bthread_created, 2);
+    last.reset(NewNumberedInputMessage(1, &values));
+    brpc::InputMessenger::QueueLastMessageOrBatch(
+        socket.get(), last, &batch, &num_bthread_created, 2);
+    ASSERT_NE(nullptr, batch.get());
+    EXPECT_EQ(1u, batch->size());
+
+    last.reset(NewNumberedInputMessage(2, &values));
+    brpc::InputMessenger::QueueLastMessageOrBatch(
+        socket.get(), last, &batch, &num_bthread_created, 2);
+    EXPECT_EQ(nullptr, batch.get());
+    EXPECT_EQ((std::vector<int>{1, 2}), values);
+    EXPECT_EQ(0, num_bthread_created);
+
+    socket->SetFailed();
+    socket.reset();
+    brpc::FLAGS_usercode_in_coroutine = saved_coroutine;
+}
+
+TEST_F(MessengerTest, process_new_message_covers_all_batch_modes) {
+    const int saved_batch_size =
+        brpc::FLAGS_input_message_batch_process_size;
+    const bool saved_coroutine = brpc::FLAGS_usercode_in_coroutine;
+    brpc::FLAGS_usercode_in_coroutine = false;
+
+    const int batch_sizes[] = {-1, 0, 1, 2, 8};
+    for (int batch_size : batch_sizes) {
+        brpc::FLAGS_input_message_batch_process_size = batch_size;
+        BatchRecorder recorder;
+        brpc::InputMessenger messenger(4);
+        ASSERT_EQ(0, messenger.AddNonProtocolHandler(
+            BatchTestHandler(&recorder)));
+        brpc::SocketId id;
+        brpc::SocketUniquePtr socket =
+            CreateBatchTestSocket(&messenger, &id);
+        ASSERT_TRUE(socket);
+        socket->_read_buf.append("abcd", 4);
+        {
+            brpc::InputMessageClosure last;
+            ASSERT_EQ(0, messenger.ProcessNewMessage(
+                socket.get(), 4, false, 123, 456, last));
+        }
+        ASSERT_TRUE(recorder.WaitForSize(4)) << "batch_size=" << batch_size;
+        socket->SetFailed();
+        ASSERT_TRUE(recorder.WaitForDestroyed(4))
+            << "batch_size=" << batch_size;
+        std::vector<int> values = recorder.Snapshot();
+        std::sort(values.begin(), values.end());
+        EXPECT_EQ((std::vector<int>{'a', 'b', 'c', 'd'}), values)
+            << "batch_size=" << batch_size;
+        EXPECT_EQ(4, recorder.destroyed.load())
+            << "batch_size=" << batch_size;
+        EXPECT_EQ(1u, socket->_avg_msg_size);
+        if (batch_size == -1) {
+            EXPECT_EQ(2u, socket->_adaptive_input_message_batch_size);
+            EXPECT_GT(socket->_input_messages_per_read_ema_q8, 256u);
+        }
+    }
+
+    brpc::FLAGS_input_message_batch_process_size = saved_batch_size;
+    brpc::FLAGS_usercode_in_coroutine = saved_coroutine;
+}
+
+TEST_F(MessengerTest, process_new_message_handles_skip_partial_and_mode_reset) {
+    const int saved_batch_size =
+        brpc::FLAGS_input_message_batch_process_size;
+    const bool saved_coroutine = brpc::FLAGS_usercode_in_coroutine;
+    brpc::FLAGS_usercode_in_coroutine = true;
+
+    BatchRecorder recorder;
+    brpc::InputMessenger messenger(4);
+    ASSERT_EQ(0, messenger.AddNonProtocolHandler(
+        BatchTestHandler(&recorder)));
+    brpc::SocketId id;
+    brpc::SocketUniquePtr socket =
+        CreateBatchTestSocket(&messenger, &id);
+    ASSERT_TRUE(socket);
+
+    brpc::FLAGS_input_message_batch_process_size = -1;
+    socket->_read_buf.append("#a", 2);
+    {
+        brpc::InputMessageClosure last;
+        EXPECT_EQ(0, messenger.ProcessNewMessage(
+            socket.get(), 2, false, 111, 222, last));
+    }
+    ASSERT_TRUE(recorder.WaitForSize(1));
+    EXPECT_EQ((std::vector<int>{'a'}), recorder.Snapshot());
+    // Coroutine mode disables adaptive batching.
+    EXPECT_EQ(0u, socket->_adaptive_input_message_batch_size);
+
+    socket->_input_messages_per_read_ema_q8 = 4096;
+    socket->_adaptive_input_message_batch_size = 16;
+    brpc::FLAGS_input_message_batch_process_size = 0;
+    {
+        brpc::InputMessageClosure last;
+        EXPECT_EQ(0, messenger.ProcessNewMessage(
+            socket.get(), 0, false, 333, 444, last));
+    }
+    EXPECT_EQ(0u, socket->_input_messages_per_read_ema_q8);
+    EXPECT_EQ(0u, socket->_adaptive_input_message_batch_size);
+    EXPECT_EQ(333, socket->_last_readtime_us.load());
+
+    socket->SetFailed();
+    brpc::FLAGS_input_message_batch_process_size = saved_batch_size;
+    brpc::FLAGS_usercode_in_coroutine = saved_coroutine;
+}
+
+TEST_F(MessengerTest, process_new_message_handles_progressive_and_parse_errors) {
+    const int saved_batch_size =
+        brpc::FLAGS_input_message_batch_process_size;
+    const bool saved_coroutine = brpc::FLAGS_usercode_in_coroutine;
+    brpc::FLAGS_input_message_batch_process_size = 8;
+    brpc::FLAGS_usercode_in_coroutine = false;
+
+    {
+        BatchRecorder recorder;
+        brpc::InputMessenger messenger(4);
+        ASSERT_EQ(0, messenger.AddNonProtocolHandler(
+            BatchTestHandler(&recorder)));
+        brpc::SocketId id;
+        brpc::SocketUniquePtr socket =
+            CreateBatchTestSocket(&messenger, &id);
+        ASSERT_TRUE(socket);
+        socket->read_will_be_progressive(brpc::CONNECTION_TYPE_SINGLE);
+        socket->_read_buf.append("abc", 3);
+        {
+            brpc::InputMessageClosure last;
+            EXPECT_EQ(0, messenger.ProcessNewMessage(
+                socket.get(), 3, false, 1, 2, last));
+        }
+        ASSERT_TRUE(recorder.WaitForSize(3));
+        socket->SetFailed();
+        ASSERT_TRUE(recorder.WaitForDestroyed(3));
+        EXPECT_EQ(3, recorder.destroyed.load());
+    }
+
+    const char failures[] = {'?', '!'};
+    for (char failure : failures) {
+        BatchRecorder recorder;
+        brpc::InputMessenger messenger(4);
+        ASSERT_EQ(0, messenger.AddNonProtocolHandler(
+            BatchTestHandler(&recorder)));
+        brpc::SocketId id;
+        brpc::SocketUniquePtr socket =
+            CreateBatchTestSocket(&messenger, &id);
+        ASSERT_TRUE(socket);
+        socket->_read_buf.append(&failure, 1);
+        brpc::InputMessageClosure last;
+        EXPECT_EQ(-1, messenger.ProcessNewMessage(
+            socket.get(), 1, false, 1, 2, last));
+        EXPECT_TRUE(socket->Failed());
+    }
+
+    brpc::FLAGS_input_message_batch_process_size = saved_batch_size;
+    brpc::FLAGS_usercode_in_coroutine = saved_coroutine;
+}
+
+TEST_F(MessengerTest, process_new_message_releases_unprocessable_and_rejected) {
+    const int saved_batch_size =
+        brpc::FLAGS_input_message_batch_process_size;
+    const bool saved_coroutine = brpc::FLAGS_usercode_in_coroutine;
+    brpc::FLAGS_input_message_batch_process_size = 0;
+    brpc::FLAGS_usercode_in_coroutine = true;
+
+    {
+        BatchRecorder recorder;
+        brpc::InputMessenger messenger(4);
+        ASSERT_EQ(0, messenger.AddNonProtocolHandler(
+            BatchTestHandler(&recorder)));
+        messenger._handlers[0].process = nullptr;
+        brpc::SocketId id;
+        brpc::SocketUniquePtr socket =
+            CreateBatchTestSocket(&messenger, &id);
+        socket->_read_buf.append("a", 1);
+        brpc::InputMessageClosure last;
+        EXPECT_EQ(0, messenger.ProcessNewMessage(
+            socket.get(), 1, false, 1, 2, last));
+        EXPECT_EQ(1, recorder.destroyed.load());
+        EXPECT_TRUE(recorder.Snapshot().empty());
+        socket->SetFailed();
+    }
+
+    {
+        BatchRecorder recorder;
+        brpc::InputMessenger messenger(4);
+        ASSERT_EQ(0, messenger.AddNonProtocolHandler(
+            BatchTestHandler(&recorder, RejectBatchTestMessage)));
+        brpc::SocketId id;
+        brpc::SocketUniquePtr socket =
+            CreateBatchTestSocket(&messenger, &id);
+        socket->_read_buf.append("a", 1);
+        brpc::InputMessageClosure last;
+        EXPECT_EQ(-1, messenger.ProcessNewMessage(
+            socket.get(), 1, false, 1, 2, last));
+        EXPECT_EQ(1, recorder.destroyed.load());
+        EXPECT_TRUE(socket->Failed());
+    }
+
+    brpc::FLAGS_input_message_batch_process_size = saved_batch_size;
+    brpc::FLAGS_usercode_in_coroutine = saved_coroutine;
+}
 
 #define USE_UNIX_DOMAIN_SOCKET 1
 
