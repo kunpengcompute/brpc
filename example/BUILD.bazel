@@ -50,6 +50,13 @@ proto_library(
     ],
 )
 
+proto_library(
+    name = "stress_performance_proto",
+    srcs = [
+        "stress_performance/test.proto",
+    ],
+)
+
 cc_proto_library(
     name = "cc_echo_c++_proto",
     deps = [
@@ -61,6 +68,13 @@ cc_proto_library(
     name = "cc_rdma_performance_proto",
     deps = [
         ":rdma_performance_proto",
+    ],
+)
+
+cc_proto_library(
+    name = "cc_stress_performance_proto",
+    deps = [
+        ":stress_performance_proto",
     ],
 )
 
@@ -120,6 +134,36 @@ cc_binary(
     copts = COPTS + ["-DBRPC_WITH_RDMA=1"],
     deps = [
         ":cc_rdma_performance_proto",
+        "//:brpc",
+    ],
+)
+
+cc_binary(
+    name = "stress_performance_server",
+    srcs = [
+        "stress_performance/server.cpp",
+    ],
+    includes = [
+        "stress_performance",
+    ],
+    copts = COPTS,
+    deps = [
+        ":cc_stress_performance_proto",
+        "//:brpc",
+    ],
+)
+
+cc_binary(
+    name = "stress_performance_client",
+    srcs = [
+        "stress_performance/client.cpp",
+    ],
+    includes = [
+        "stress_performance",
+    ],
+    copts = COPTS,
+    deps = [
+        ":cc_stress_performance_proto",
         "//:brpc",
     ],
 )
