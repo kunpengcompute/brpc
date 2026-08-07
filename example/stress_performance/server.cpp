@@ -35,7 +35,7 @@ DECLARE_int32(bthread_concurrency);
 
 DEFINE_int32(port, 8002, "TCP Port of this server");
 DEFINE_string(transport, "rdma",
-              "Transport mode: tcp or rdma. When explicitly set, "
+              "Transport mode: tcp, rdma, or memfd. When explicitly set, "
               "this overrides --use_rdma.");
 DEFINE_bool(use_rdma, true,
             "Compatibility flag. Used only when --transport is not explicitly "
@@ -55,7 +55,7 @@ bool IsFlagExplicitlySet(const char* flag_name) {
 }
 
 struct TransportChoice {
-    bool use_rdma;
+    brpc::SocketMode socket_mode;
     const char* name;
 };
 
@@ -70,13 +70,13 @@ bool ResolveTransportMode(TransportChoice* choice) {
     }
 
     if (transport == "tcp") {
-        choice->use_rdma = false;
+        choice->socket_mode = brpc::SOCKET_MODE_TCP;
         choice->name = "tcp";
         return true;
     }
     if (transport == "rdma") {
 #if BRPC_WITH_RDMA
-        choice->use_rdma = true;
+        choice->socket_mode = brpc::SOCKET_MODE_RDMA;
         choice->name = "rdma";
         return true;
 #else
@@ -86,13 +86,18 @@ bool ResolveTransportMode(TransportChoice* choice) {
         return false;
 #endif
     }
+    if (transport == "memfd") {
+        choice->socket_mode = brpc::SOCKET_MODE_MEMFD;
+        choice->name = "memfd";
+        return true;
+    }
     LOG(ERROR) << "Invalid transport=" << FLAGS_transport
-               << ", valid values are tcp and rdma";
+               << ", valid values are tcp, rdma, and memfd";
     return false;
 }
 
 bool InitializeTransportRuntime(const TransportChoice& choice) {
-    if (choice.use_rdma) {
+    if (choice.socket_mode == brpc::SOCKET_MODE_RDMA) {
 #if BRPC_WITH_RDMA
         brpc::rdma::GlobalRdmaInitializeOrDie();
         return true;
@@ -158,7 +163,7 @@ int main(int argc, char* argv[]) {
     g_last_time.store(0, butil::memory_order_relaxed);
 
     brpc::ServerOptions options;
-    options.use_rdma = transport.use_rdma;
+    options.socket_mode = transport.socket_mode;
     if (FLAGS_server_num_threads >= 0) {
         options.num_threads = FLAGS_server_num_threads;
     }
