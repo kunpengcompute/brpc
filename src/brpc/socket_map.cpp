@@ -25,6 +25,7 @@
 #include "brpc/log.h"
 #include "brpc/protocol.h"
 #include "brpc/input_messenger.h"
+#include "brpc/memfd/memfd_endpoint.h"
 #include "brpc/reloadable_flags.h"
 #include "brpc/socket_map.h"
 
@@ -90,11 +91,9 @@ SocketMap* get_or_new_client_side_socket_map() {
 }
 
 int SocketMapInsert(const SocketMapKey& key, SocketId* id,
-                    const std::shared_ptr<SocketSSLContext>& ssl_ctx,
-                    bool use_rdma,
-                    const HealthCheckOption& hc_option) {
-    return get_or_new_client_side_socket_map()->Insert(key, id, ssl_ctx, use_rdma, hc_option);
-}    
+                    SocketOptions& opt) {
+    return get_or_new_client_side_socket_map()->Insert(key, id, opt);
+}
 
 int SocketMapFind(const SocketMapKey& key, SocketId* id) {
     SocketMap* m = get_client_side_socket_map();
@@ -225,9 +224,7 @@ void SocketMap::ShowSocketMapInBvarIfNeed() {
 }
 
 int SocketMap::Insert(const SocketMapKey& key, SocketId* id,
-                      const std::shared_ptr<SocketSSLContext>& ssl_ctx,
-                      bool use_rdma,
-                      const HealthCheckOption& hc_option) {
+                      SocketOptions& opt) {
     ShowSocketMapInBvarIfNeed();
 
     std::unique_lock<butil::Mutex> mu(_mutex);
@@ -247,11 +244,16 @@ int SocketMap::Insert(const SocketMapKey& key, SocketId* id,
         sc = NULL;
     }
     SocketId tmp_id;
-    SocketOptions opt;
     opt.remote_side = key.peer.addr;
-    opt.initial_ssl_ctx = ssl_ctx;
-    opt.use_rdma = use_rdma;
-    opt.hc_option = hc_option;
+    if (opt.socket_mode == SOCKET_MODE_MEMFD) {
+        butil::EndPoint control_endpoint;
+        if (MakeMemfdEndpoint(key.peer.addr, &control_endpoint) != 0) {
+            PLOG(ERROR) << "MEMFD transport requires a local IP address, got "
+                        << key.peer.addr;
+            return -1;
+        }
+        opt.remote_side = control_endpoint;
+    }
     if (_options.socket_creator->CreateSocket(opt, &tmp_id) != 0) {
         PLOG(FATAL) << "Fail to create socket to " << key.peer;
         return -1;

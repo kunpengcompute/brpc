@@ -37,6 +37,7 @@
 #include "brpc/details/usercode_backup_pool.h"       // TooManyUserCode
 #include "brpc/rdma/rdma_helper.h"
 #include "brpc/policy/esp_authenticator.h"
+#include "brpc/transport_factory.h"
 
 namespace brpc {
 
@@ -60,7 +61,7 @@ ChannelOptions::ChannelOptions()
     , connection_type(CONNECTION_TYPE_UNKNOWN)
     , succeed_without_server(true)
     , log_succeed_without_server(true)
-    , use_rdma(false)
+    , socket_mode(SOCKET_MODE_TCP)
     , auth(NULL)
     , backup_request_policy(NULL)
     , retry_policy(NULL)
@@ -75,7 +76,8 @@ ChannelSSLOptions* ChannelOptions::mutable_ssl_options() {
 }
 
 static ChannelSignature ComputeChannelSignature(const ChannelOptions& opt) {
-    if (opt.auth == NULL &&
+    if (opt.socket_mode == SOCKET_MODE_TCP &&
+        opt.auth == NULL &&
         !opt.has_ssl_options() &&
         opt.connection_group.empty() &&
         opt.hc_option.health_check_path.empty()) {
@@ -120,8 +122,9 @@ static ChannelSignature ComputeChannelSignature(const ChannelOptions& opt) {
         } else {
             // All disabled ChannelSSLOptions are the same
         }
-        if (opt.use_rdma) {
-            buf.append("|rdma");
+        if (opt.socket_mode != SOCKET_MODE_TCP) {
+            buf.append("|socket_mode=");
+            buf.append(std::to_string(opt.socket_mode));
         }
         butil::MurmurHash3_x64_128_Update(&mm_ctx, buf.data(), buf.size());
         buf.clear();
@@ -163,20 +166,6 @@ Channel::~Channel() {
     }
 }
 
-#if BRPC_WITH_RDMA
-static bool OptionsAvailableForRdma(const ChannelOptions* opt) {
-    if (opt->has_ssl_options()) {
-        LOG(WARNING) << "Cannot use SSL and RDMA at the same time";
-        return false;
-    }
-    if (!rdma::SupportedByRdma(opt->protocol.name())) {
-        LOG(WARNING) << "Cannot use " << opt->protocol.name()
-                     << " over RDMA";
-        return false;
-    }
-    return true;
-}
-#endif
 
 int Channel::InitChannelOptions(const ChannelOptions* options) {
     if (options) {  // Override default options if user provided one.
@@ -191,19 +180,10 @@ int Channel::InitChannelOptions(const ChannelOptions* options) {
         _options.hc_option.health_check_path = FLAGS_health_check_path;
         _options.hc_option.health_check_timeout_ms = FLAGS_health_check_timeout_ms;
     }
-    if (_options.use_rdma) {
-#if BRPC_WITH_RDMA
-        if (!OptionsAvailableForRdma(&_options)) {
-            return -1;
-        }
-        rdma::GlobalRdmaInitializeOrDie();
-        if (!rdma::InitPollingModeWithTag(bthread_self_tag())) {
-            return -1;
-        }
-#else
-        LOG(WARNING) << "Cannot use rdma since brpc does not compile with rdma";
+    auto ret = TransportFactory::ContextInitOrDie(_options.socket_mode, false, &_options);
+    if (ret != 0) {
+        LOG(ERROR) << "Fail to initialize transport context for channel, ret=" << ret;
         return -1;
-#endif
     }
 
     _serialize_request = protocol->serialize_request;
@@ -368,8 +348,12 @@ int Channel::InitSingle(const butil::EndPoint& server_addr_and_port,
     if (CreateSocketSSLContext(_options, &ssl_ctx) != 0) {
         return -1;
     }
+    SocketOptions opt;
+    opt.initial_ssl_ctx = ssl_ctx;
+    opt.socket_mode = _options.socket_mode;
+    opt.hc_option = _options.hc_option;
     if (SocketMapInsert(SocketMapKey(server_addr_and_port, sig),
-                        &_server_id, ssl_ctx, _options.use_rdma, _options.hc_option) != 0) {
+                        &_server_id, opt) != 0) {
         LOG(ERROR) << "Fail to insert into SocketMap";
         return -1;
     }
@@ -406,10 +390,11 @@ int Channel::Init(const char* ns_url,
     GetNamingServiceThreadOptions ns_opt;
     ns_opt.succeed_without_server = _options.succeed_without_server;
     ns_opt.log_succeed_without_server = _options.log_succeed_without_server;
-    ns_opt.use_rdma = _options.use_rdma;
+    ns_opt.socket_option.socket_mode = _options.socket_mode;
     ns_opt.channel_signature = ComputeChannelSignature(_options);
-    ns_opt.hc_option =  _options.hc_option;
-    if (CreateSocketSSLContext(_options, &ns_opt.ssl_ctx) != 0) {
+    ns_opt.socket_option.hc_option =  _options.hc_option;
+    if (CreateSocketSSLContext(
+            _options, &ns_opt.socket_option.initial_ssl_ctx) != 0) {
         return -1;
     }
     if (lb->Init(ns_url, lb_name, _options.ns_filter, &ns_opt) != 0) {
