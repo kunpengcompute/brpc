@@ -33,10 +33,14 @@ cmake \
 
 # https://github.com/google/oss-fuzz/pull/10898
 make \
-    fuzz_butil fuzz_esp fuzz_hpack fuzz_http fuzz_hulu fuzz_json \
-    fuzz_redis fuzz_shead fuzz_sofa fuzz_uri --ignore-errors -j$(nproc)
+    fuzz_butil fuzz_esp fuzz_hpack fuzz_http fuzz_hulu \
+    fuzz_json fuzz_memfd_metadata fuzz_memfd_queue \
+    fuzz_memfd_transport fuzz_redis fuzz_shead fuzz_sofa fuzz_uri \
+    --ignore-errors -j$(nproc)
 
 cp test/fuzz_* $OUT/
+cp $SRC/brpc/test/fuzzing/*.options $OUT/ 2>/dev/null || true
+cp $SRC/brpc/test/fuzzing/*.dict $OUT/ 2>/dev/null || true
 
 pushd /lib/x86_64-linux-gnu/
 mkdir -p $OUT/lib/
@@ -50,4 +54,7 @@ zip $OUT/fuzz_redis_seed_corpus.zip fuzz_redis_seed_corpus/*
 zip $OUT/fuzz_http_seed_corpus.zip  fuzz_http_seed_corpus/*
 zip $OUT/fuzz_butil_seed_corpus.zip fuzz_butil_seed_corpus/*
 zip $OUT/fuzz_hpack_seed_corpus.zip fuzz_hpack_seed_corpus/*
+zip $OUT/fuzz_memfd_metadata_seed_corpus.zip fuzz_memfd_metadata_seed_corpus/*
+zip $OUT/fuzz_memfd_queue_seed_corpus.zip fuzz_memfd_queue_seed_corpus/*
+zip $OUT/fuzz_memfd_transport_seed_corpus.zip fuzz_memfd_transport_seed_corpus/*
 popd

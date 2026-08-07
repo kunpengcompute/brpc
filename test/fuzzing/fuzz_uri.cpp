@@ -28,11 +28,6 @@ LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         return 1;
     }
 
-    char *data_in = (char *)malloc(size + 1);
-    memcpy(data_in, data, size);
-    data_in[size] = '\0';
-
-
     std::string input(reinterpret_cast<const char*>(data), size);
     {
         brpc::URI uri;
