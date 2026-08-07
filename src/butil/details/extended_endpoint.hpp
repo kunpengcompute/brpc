@@ -293,7 +293,16 @@ public:
 
     void to(EndPointStr* ep_str) const {
         if (_u.sa.sa_family == AF_UNIX) {
-            snprintf(ep_str->_buf, sizeof(ep_str->_buf), "unix:%s", _u.un.sun_path);
+            if (_u.un.sun_path[0] == '\0' &&
+                _socklen > offsetof(sockaddr_un, sun_path)) {
+                const int name_len = static_cast<int>(
+                    _socklen - offsetof(sockaddr_un, sun_path) - 1);
+                snprintf(ep_str->_buf, sizeof(ep_str->_buf), "unix:@%.*s",
+                         name_len, _u.un.sun_path + 1);
+            } else {
+                snprintf(ep_str->_buf, sizeof(ep_str->_buf), "unix:%s",
+                         _u.un.sun_path);
+            }
         } else if (_u.sa.sa_family == AF_INET6) {
             char buf[INET6_ADDRSTRLEN] = {0};
             const char* ret = inet_ntop(_u.sa.sa_family, &_u.in6.sin6_addr, buf, sizeof(buf));
@@ -306,7 +315,15 @@ public:
 
     int to_hostname(char* host, size_t host_len) const {
         if (_u.sa.sa_family == AF_UNIX) {
-            snprintf(host, host_len, "unix:%s", _u.un.sun_path);
+            if (_u.un.sun_path[0] == '\0' &&
+                _socklen > offsetof(sockaddr_un, sun_path)) {
+                const int name_len = static_cast<int>(
+                    _socklen - offsetof(sockaddr_un, sun_path) - 1);
+                snprintf(host, host_len, "unix:@%.*s",
+                         name_len, _u.un.sun_path + 1);
+            } else {
+                snprintf(host, host_len, "unix:%s", _u.un.sun_path);
+            }
             return 0;
         } else if (_u.sa.sa_family == AF_INET6) {
             sockaddr_in6 sa = _u.in6;
