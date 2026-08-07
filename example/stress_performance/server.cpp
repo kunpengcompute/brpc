@@ -168,7 +168,7 @@ int main(int argc, char* argv[]) {
               << " server_num_threads=" << FLAGS_server_num_threads
               << " bthread_concurrency=" << bthread::FLAGS_bthread_concurrency;
     if (server.Start(FLAGS_port, &options) != 0) {
-        LOG(ERROR) << "Fail to start EchoServer";
+        LOG(ERROR) << "Fail to start stress_performance_server";
         return -1;
     }
 

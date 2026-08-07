@@ -16,10 +16,10 @@
 # under the License.
 
 cmake_minimum_required(VERSION 2.8.10)
-project(rdma_performance C CXX)
+project(stress_performance C CXX)
 
 option(LINK_SO "Whether examples are linked dynamically" OFF)
-option(WITH_RDMA "Build rdma_performance with RDMA transport support" ON)
+option(WITH_RDMA "Build stress_performance with RDMA transport support" ON)
 
 set(BRPC_OUTPUT_PATH "" CACHE PATH
     "Path containing the output/include and output/lib directories of brpc")
@@ -34,11 +34,10 @@ endif()
 
 set(CMAKE_PREFIX_PATH ${OUTPUT_PATH} ${CMAKE_PREFIX_PATH})
 
-include_directories(/home/zfz/ins/protobuf/include)
 include(FindThreads)
-include(FindProtobuf)
+find_package(Protobuf REQUIRED)
 protobuf_generate_cpp(PROTO_SRC PROTO_HEADER test.proto)
-# include PROTO_HEADER
+include_directories(${PROTOBUF_INCLUDE_DIRS})
 include_directories(${CMAKE_CURRENT_BINARY_DIR})
 
 # Search for libthrift* by best effort. If it is not found and brpc is
@@ -79,8 +78,9 @@ if(WITH_RDMA)
     set(WITH_RDMA_VAL "1")
 endif()
 
-set(CMAKE_CPP_FLAGS "${DEFINE_CLOCK_GETTIME} -DBRPC_WITH_RDMA=${WITH_RDMA_VAL}")
-set(CMAKE_CXX_FLAGS "${CMAKE_CPP_FLAGS} -DNDEBUG -O2 -D__const__=__unused__ -pipe -W -Wall -Wno-unused-parameter -fPIC -fno-omit-frame-pointer")
+add_definitions(${DEFINE_CLOCK_GETTIME} -DBRPC_WITH_RDMA=${WITH_RDMA_VAL})
+set(CMAKE_CXX_FLAGS
+    "${CMAKE_CXX_FLAGS} -DNDEBUG -O2 -D__const__=__unused__ -pipe -W -Wall -Wno-unused-parameter -fPIC -fno-omit-frame-pointer")
 
 if(CMAKE_VERSION VERSION_LESS "3.1.3")
     if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
@@ -123,13 +123,18 @@ endif()
 set(DYNAMIC_LIB
     ${CMAKE_THREAD_LIBS_INIT}
     ${GFLAGS_LIBRARY}
-    ${PROTOBUF_LIBRARIES}
     ${LEVELDB_LIB}
     ${OPENSSL_CRYPTO_LIBRARY}
     ${OPENSSL_SSL_LIBRARY}
     ${THRIFT_LIB}
     dl
     )
+
+if(TARGET protobuf::libprotobuf)
+    set(PROTOBUF_LIB protobuf::libprotobuf)
+else()
+    set(PROTOBUF_LIB ${PROTOBUF_LIBRARIES})
+endif()
 
 if(WITH_RDMA)
     set(DYNAMIC_LIB ${DYNAMIC_LIB} ${RDMA_LIB})
@@ -156,19 +161,5 @@ endif()
 add_executable(client client.cpp ${PROTO_SRC} ${PROTO_HEADER})
 add_executable(server server.cpp ${PROTO_SRC} ${PROTO_HEADER})
 
-target_link_libraries(client ${BRPC_LIB} ${DYNAMIC_LIB})
-target_link_libraries(server ${BRPC_LIB} ${DYNAMIC_LIB})
-
-file(GLOB ABSL_LIBS "/home/zfz/ins/protobuf/lib64/libabsl_*.so")
-
-# 2. 定义强制链接标志
-# -Wl,--no-as-needed 会强制链接器加载后续的所有库，不论是否看起来“没被直接使用”
-set(FORCE_LINK_FLAGS "-Wl,--no-as-needed")
-
-# 3. 更新链接逻辑
-if(TARGET client)
-    target_link_libraries(client PRIVATE ${FORCE_LINK_FLAGS} ${ABSL_LIBS})
-endif()
-if(TARGET server)
-    target_link_libraries(server PRIVATE ${FORCE_LINK_FLAGS} ${ABSL_LIBS})
-endif()
+target_link_libraries(client ${BRPC_LIB} ${PROTOBUF_LIB} ${DYNAMIC_LIB})
+target_link_libraries(server ${BRPC_LIB} ${PROTOBUF_LIB} ${DYNAMIC_LIB})

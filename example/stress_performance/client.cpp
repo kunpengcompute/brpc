@@ -25,6 +25,7 @@
 #include <iostream>
 #include <memory>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -179,8 +180,8 @@ struct RespClosure {
 
 struct Worker {
     Worker(int worker_index_in, int attachment_size, bool echo_attachment)
-        : worker_index(worker_index_in)
-        , addr(NULL)
+        : addr(NULL)
+        , worker_index(worker_index_in)
         , start_time_us(0)
         , stop(false)
         , echo_attachment_flag(echo_attachment)
@@ -300,16 +301,23 @@ static void UpdateClientCpuSample() {
 }
 
 static void* GenerateToken(void* arg) {
-    int64_t start_time = butil::monotonic_time_ns();
+    const int64_t start_time = butil::monotonic_time_ns();
     int64_t accumulative_token = g_token.load(butil::memory_order_relaxed);
     while (!g_stop) {
         bthread_usleep(100000);
-        int64_t now = butil::monotonic_time_ns();
-        if (accumulative_token * 1000000000 / (now - start_time) < FLAGS_expected_qps) {
-            int64_t delta =
-                    FLAGS_expected_qps * (now - start_time) / 1000000000 - accumulative_token;
+        const int64_t now = butil::monotonic_time_ns();
+        const long double expected_token_value =
+                static_cast<long double>(FLAGS_expected_qps) *
+                static_cast<long double>(now - start_time) / 1000000000.0L;
+        const int64_t expected_token =
+                expected_token_value >=
+                        static_cast<long double>(std::numeric_limits<int64_t>::max())
+                ? std::numeric_limits<int64_t>::max()
+                : static_cast<int64_t>(expected_token_value);
+        if (expected_token > accumulative_token) {
+            const int64_t delta = expected_token - accumulative_token;
             g_token.fetch_add(delta, butil::memory_order_relaxed);
-            accumulative_token += delta;
+            accumulative_token = expected_token;
         }
     }
     return NULL;
@@ -548,7 +556,7 @@ static void Test(int thread_num, int attachment_size) {
     }
 
     uint64_t start_time = NowUs();
-    bthread_t tids[thread_num];
+    std::vector<bthread_t> tids(thread_num);
     if (FLAGS_expected_qps > 0) {
         bthread_t tid;
         bthread_start_background(&tid, &BTHREAD_ATTR_NORMAL, GenerateToken, NULL);
