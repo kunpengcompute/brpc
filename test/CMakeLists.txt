@@ -275,7 +275,7 @@ if(BUILD_FUZZ_TESTS)
     endif()
 
     set(FUZZ_TARGETS fuzz_butil fuzz_esp fuzz_hpack fuzz_http
-        fuzz_hulu fuzz_json fuzz_memfd_metadata
+        fuzz_hulu fuzz_input_message_batch fuzz_json fuzz_memfd_metadata
         fuzz_memfd_queue fuzz_memfd_transport fuzz_redis fuzz_shead fuzz_sofa
         fuzz_uri)
 
