@@ -1,0 +1,12 @@
+{
+  "baseline": "50a9075d",
+  "threshold": 90.0,
+  "subsystems": {
+    "input_batch": {
+      "commits": [
+        ":/feat: 支持输入消息固定与自适应批处理"
+      ],
+      "working_tree_globs": []
+    }
+  }
+}
