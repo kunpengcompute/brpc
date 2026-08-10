@@ -43,6 +43,7 @@ void SubmitIOBufSample(IOBuf::Block* block, int64_t ref);
 
 const uint16_t IOBUF_BLOCK_FLAGS_USER_DATA = 1 << 0;
 const uint16_t IOBUF_BLOCK_FLAGS_SAMPLED = 1 << 1;
+const uint16_t IOBUF_BLOCK_FLAGS_SHM = 1 << 2;
 
 inline ssize_t IOBuf::cut_into_file_descriptor(int fd, size_t size_hint) {
     return pcut_into_file_descriptor(fd, -1, size_hint);
@@ -191,7 +192,7 @@ inline bool operator==(const IOBuf::BlockRef& r1, const IOBuf::BlockRef& r2) {
     return r1.offset == r2.offset && r1.length == r2.length &&
         r1.block == r2.block;
 }
-        
+
 inline bool operator!=(const IOBuf::BlockRef& r1, const IOBuf::BlockRef& r2) {
     return !(r1 == r2);
 }
@@ -354,7 +355,7 @@ inline void IOBufAppender::shrink() {
 }
 
 inline IOBufBytesIterator::IOBufBytesIterator(const butil::IOBuf& buf)
-    : _block_begin(NULL), _block_end(NULL), _block_count(0), 
+    : _block_begin(NULL), _block_end(NULL), _block_count(0),
       _bytes_left(buf.length()), _buf(&buf) {
     try_next_block();
 }
@@ -457,6 +458,8 @@ void dec_g_num_hit_tls_threshold();
 // Function pointers to allocate or deallocate memory for a IOBuf::Block
 extern void* (*blockmem_allocate)(size_t);
 extern void  (*blockmem_deallocate)(void*);
+extern void  (*shm_block_release)(IOBuf::Block*);
+extern IOBuf::Block*  (*shm_block_acquire)();
 
 } // namespace iobuf
 
@@ -472,11 +475,11 @@ struct IOBuf::Block {
         Block* portal_next;
         uint64_t data_meta;
     } u;
-    // When flag is 0, data points to `size` bytes starting at `(char*)this+sizeof(Block)'
+    // When flag is 0, data points to `size' bytes starting at `(char*)this+sizeof(Block)'
     // When flag & IOBUF_BLOCK_FLAGS_USER_DATA is non-0, data points to the user data and
     // the deleter is put in UserDataExtension at `(char*)this+sizeof(Block)'
     char* data;
-        
+
     Block(char* data_in, uint32_t data_size)
         : nshared(1)
         , flags(0)
@@ -507,6 +510,16 @@ struct IOBuf::Block {
         }
     }
 
+    Block(char* data_in, uint32_t data_size, uint16_t flags_in)
+        : nshared(1)
+        , flags(flags_in)
+        , abi_check(0)
+        , size(0)
+        , cap(data_size)
+        , u({NULL})
+        , data(data_in) {
+    }
+
     // Undefined behavior when (flags & IOBUF_BLOCK_FLAGS_USER_DATA) is 0.
     UserDataExtension* get_user_data_extension() {
         char* p = (char*)this;
@@ -529,7 +542,7 @@ struct IOBuf::Block {
             SubmitIOBufSample(this, 1);
         }
     }
-        
+
     void dec_ref() {
         check_abi();
         if (sampled()) {
@@ -537,7 +550,7 @@ struct IOBuf::Block {
         }
         if (nshared.fetch_sub(1, butil::memory_order_release) == 1) {
             butil::atomic_thread_fence(butil::memory_order_acquire);
-            if (!is_user_data()) {
+            if (!is_user_data() && !is_shm()) {
                 iobuf::dec_g_nblock();
                 iobuf::dec_g_blockmem();
                 this->~Block();
@@ -548,6 +561,12 @@ struct IOBuf::Block {
                 ext->~UserDataExtension();
                 this->~Block();
                 free(this);
+            } else if (flags & IOBUF_BLOCK_FLAGS_SHM) {
+                if (iobuf::shm_block_release) {
+                    iobuf::shm_block_release(this);
+                } else {
+                    this->~Block();
+                }
             }
         }
     }
@@ -558,6 +577,10 @@ struct IOBuf::Block {
 
     bool full() const { return size >= cap; }
     size_t left_space() const { return cap - size; }
+
+    bool is_shm() const {
+        return flags & IOBUF_BLOCK_FLAGS_SHM;
+    }
 
 private:
     bool is_samplable() {
@@ -581,10 +604,10 @@ namespace iobuf {
 struct TLSData {
     // Head of the TLS block chain.
     IOBuf::Block* block_head;
-    
+
     // Number of TLS blocks
     int num_blocks;
-    
+
     // True if the remote_tls_block_chain is registered to the thread.
     bool registered;
 };
@@ -602,6 +625,7 @@ TLSData* get_g_tls_data();
 void remove_tls_block_chain();
 
 IOBuf::Block* acquire_tls_block();
+IOBuf::Block* share_tls_block();
 
 // Return one block to TLS.
 inline void release_tls_block(IOBuf::Block* b) {

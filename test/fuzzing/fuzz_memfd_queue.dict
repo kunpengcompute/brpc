@@ -1,0 +1,5 @@
+queue_magic="\x51\x4d\x53\x4d"
+enqueue="enqueue"
+dequeue="dequeue"
+reset="reset"
+notify="notify"

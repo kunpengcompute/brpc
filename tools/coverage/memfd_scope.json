@@ -1,0 +1,17 @@
+{
+  "baseline": "50a9075d",
+  "threshold": 90.0,
+  "subsystems": {
+    "memfd_transport": {
+      "commits": [
+        ":/refactor: 抽象统一 Transport 通信接口",
+        ":/refactor: 接入多模式 Socket 传输框架",
+        ":/feat: 扩展 IOBuf 支持共享内存数据块",
+        ":/feat: 实现 MEMFD 共享内存块分配器",
+        ":/feat: 实现 MEMFD 队列与会话管理",
+        ":/feat: 实现 MEMFD 握手与消息收发"
+      ],
+      "working_tree_globs": []
+    }
+  }
+}

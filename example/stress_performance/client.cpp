@@ -55,7 +55,7 @@ DEFINE_string(connection_type, "single", "Connection type of the channel");
 DEFINE_string(protocol, "baidu_std", "Protocol type.");
 DEFINE_string(servers, "0.0.0.0:8002+0.0.0.0:8002", "IP Address of servers");
 DEFINE_string(transport, "rdma",
-              "Transport mode: tcp or rdma. When explicitly set, "
+              "Transport mode: tcp, rdma, or memfd. When explicitly set, "
               "this overrides --use_rdma.");
 DEFINE_bool(use_rdma, true,
             "Compatibility flag. Used only when --transport is not explicitly "
@@ -99,7 +99,7 @@ namespace {
 
 const char* kClosedLoop = "closed_loop";
 const char* kOpenLoop = "open_loop";
-bool g_use_rdma = false;
+brpc::SocketMode g_socket_mode = brpc::SOCKET_MODE_TCP;
 std::string g_transport_name = "tcp";
 
 bool IsFlagExplicitlySet(const char* flag_name) {
@@ -109,7 +109,7 @@ bool IsFlagExplicitlySet(const char* flag_name) {
 }
 
 struct TransportChoice {
-    bool use_rdma;
+    brpc::SocketMode socket_mode;
     const char* name;
 };
 
@@ -122,13 +122,13 @@ bool ResolveTransportMode(TransportChoice* choice) {
     }
 
     if (transport == "tcp") {
-        choice->use_rdma = false;
+        choice->socket_mode = brpc::SOCKET_MODE_TCP;
         choice->name = "tcp";
         return true;
     }
     if (transport == "rdma") {
 #if BRPC_WITH_RDMA
-        choice->use_rdma = true;
+        choice->socket_mode = brpc::SOCKET_MODE_RDMA;
         choice->name = "rdma";
         return true;
 #else
@@ -138,13 +138,18 @@ bool ResolveTransportMode(TransportChoice* choice) {
         return false;
 #endif
     }
+    if (transport == "memfd") {
+        choice->socket_mode = brpc::SOCKET_MODE_MEMFD;
+        choice->name = "memfd";
+        return true;
+    }
     LOG(ERROR) << "Invalid transport=" << FLAGS_transport
-               << ", valid values are tcp and rdma";
+               << ", valid values are tcp, rdma, and memfd";
     return false;
 }
 
 bool InitializeTransportRuntime(const TransportChoice& choice) {
-    if (choice.use_rdma) {
+    if (choice.socket_mode == brpc::SOCKET_MODE_RDMA) {
 #if BRPC_WITH_RDMA
         brpc::rdma::GlobalRdmaInitializeOrDie();
         return true;
@@ -446,7 +451,7 @@ static int InitConnectionSlots(int connection_num, bool echo_attachment) {
                                      "_conn_" + std::to_string(i);
         }
         brpc::ChannelOptions options;
-        options.use_rdma = g_use_rdma;
+        options.socket_mode = g_socket_mode;
         options.protocol = FLAGS_protocol;
         options.connection_type = FLAGS_connection_type;
         options.connect_timeout_ms =
@@ -655,7 +660,7 @@ int main(int argc, char* argv[]) {
     if (!InitializeTransportRuntime(transport)) {
         return -1;
     }
-    g_use_rdma = transport.use_rdma;
+    g_socket_mode = transport.socket_mode;
     g_transport_name = transport.name;
 
     if (!IsClosedLoop() && !IsOpenLoop()) {

@@ -50,8 +50,7 @@
 #include "brpc/policy/rtmp_protocol.h"  // FIXME
 #include "brpc/periodic_task.h"
 #include "brpc/details/health_check.h"
-#include "brpc/rdma/rdma_endpoint.h"
-#include "brpc/rdma/rdma_helper.h"
+#include "brpc/transport_factory.h"
 #if defined(OS_MACOSX)
 #include <sys/event.h>
 #endif
@@ -73,11 +72,11 @@ DEFINE_bool(log_idle_connection_close, false,
             "Print log when an idle connection is closed");
 BRPC_VALIDATE_GFLAG(log_idle_connection_close, PassValidate);
 
-DEFINE_int32(socket_recv_buffer_size, -1, 
+DEFINE_int32(socket_recv_buffer_size, -1,
             "Set the recv buffer size of socket if this value is positive");
 
 // Default value of SNDBUF is 2500000 on most machines.
-DEFINE_int32(socket_send_buffer_size, -1, 
+DEFINE_int32(socket_send_buffer_size, -1,
             "Set send buffer size of sockets if this value is positive");
 
 DEFINE_int32(ssl_bio_buffer_size, 16*1024, "Set buffer size for SSL read/write");
@@ -118,14 +117,14 @@ public:
     // Get an address-able socket. If the pool is empty, create one.
     // Returns 0 on success.
     int GetSocket(SocketUniquePtr* ptr);
-    
+
     // Return a socket (which was returned by GetSocket) back to the pool,
     // if the pool is full, setfail the socket directly.
     void ReturnSocket(Socket* sock);
-    
+
     // Get all pooled sockets inside.
     void ListSockets(std::vector<SocketId>* list, size_t max_count);
-    
+
 private:
     // options used to create this instance
     SocketOptions _options;
@@ -173,7 +172,7 @@ public:
     // which has the disadvantage that accesses to different pools contend
     // with each other.
     butil::atomic<SocketPool*> socket_pool;
-    
+
     // The socket newing this object.
     SocketId creator_socket_id;
 
@@ -244,7 +243,7 @@ void Socket::SharedPart::UpdateStatsEverySecond(int64_t now_ms) {
     stat->in_num_messages_s = in_nmsg - stat->last_in_num_messages;
     stat->out_size_s = out_sz - stat->last_out_size;
     stat->out_num_messages_s = out_nmsg - stat->last_out_num_messages;
-    
+
     stat->last_in_size = in_sz;
     stat->last_in_num_messages = in_nmsg;
     stat->last_out_size = out_sz;
@@ -334,7 +333,7 @@ struct BAIDU_CACHELINE_ALIGNMENT Socket::WriteRequest {
     Socket* get_socket() const {
         return _socket_and_control_bits.get();
     }
-    
+
     uint32_t pipelined_count() const {
         return _pc_and_udmsg.extra() & 0x3FFF;
     }
@@ -375,7 +374,7 @@ struct BAIDU_CACHELINE_ALIGNMENT Socket::WriteRequest {
 
     // Register pipelined_count and user_message
     void Setup(Socket* s);
-    
+
 private:
     // Socket pointer and some control bits.
     PackedPtr<Socket> _socket_and_control_bits;
@@ -432,7 +431,7 @@ public:
             timer_id = 0;
         }
     }
-    
+
     void BeforeRecycle(Socket*) override {
         // Recycle itself.
         delete this;
@@ -456,6 +455,7 @@ Socket::Socket(Forbidden f)
     , _tos(0)
     , _reset_fd_real_us(-1)
     , _on_edge_triggered_events(NULL)
+    , _need_on_edge_trigger(false)
     , _user(NULL)
     , _conn(NULL)
     , _preferred_index(-1)
@@ -473,8 +473,7 @@ Socket::Socket(Forbidden f)
     , _auth_context(NULL)
     , _ssl_state(SSL_UNKNOWN)
     , _ssl_session(NULL)
-    , _rdma_ep(NULL)
-    , _rdma_state(RDMA_OFF)
+    , _socket_mode(SOCKET_MODE_TCP)
     , _connection_type_for_progressive_read(CONNECTION_TYPE_UNKNOWN)
     , _controller_released_socket(false)
     , _overcrowded(false)
@@ -601,14 +600,18 @@ int Socket::ResetFileDescriptor(int fd) {
 
     SetSocketOptions(fd);
 
-    if (_on_edge_triggered_events) {
+    if (_transport->HasOnEdgeTrigger()) {
         if (_io_event.AddConsumer(fd) != 0) {
-            PLOG(ERROR) << "Fail to add SocketId=" << id() 
+            PLOG(ERROR) << "Fail to add SocketId=" << id()
                         << " into EventDispatcher";
             _fd.store(-1, butil::memory_order_release);
             return -1;
         }
     }
+
+    // Notify transport that fd is set (for memfd handshake)
+    _transport->OnFdSet();
+
     return 0;
 }
 
@@ -721,6 +724,14 @@ int Socket::OnCreated(const SocketOptions& options) {
     auto guard = butil::MakeScopeGuard([this] {
         _io_event.Reset();
     });
+    // start build the transport
+    _socket_mode = options.socket_mode;
+    _transport = TransportFactory::CreateTransport(options.socket_mode);
+    if (!_transport) {
+        LOG(ERROR) << "Unsupported socket mode=" << options.socket_mode;
+        return -1;
+    }
+    _transport->Init(this, options);
 
     g_vars->nsocket << 1;
     CHECK(NULL == _shared_part.load(butil::memory_order_relaxed));
@@ -730,9 +741,10 @@ int Socket::OnCreated(const SocketOptions& options) {
     _remote_side = options.remote_side;
     _local_side = butil::EndPoint();
     _on_edge_triggered_events = options.on_edge_triggered_events;
+    _need_on_edge_trigger = options.need_on_edge_trigger;
     _user = options.user;
     _conn = options.conn;
-    _app_connect = options.app_connect;
+    _app_connect = _transport->Connect();
     _preferred_index = -1;
     _hc_count = 0;
     CHECK(_read_buf.empty());
@@ -756,22 +768,6 @@ int Socket::OnCreated(const SocketOptions& options) {
     _ssl_state = (options.initial_ssl_ctx == NULL ? SSL_OFF : SSL_UNKNOWN);
     _ssl_session = NULL;
     _ssl_ctx = options.initial_ssl_ctx;
-#if BRPC_WITH_RDMA
-    CHECK(_rdma_ep == NULL);
-    if (options.use_rdma) {
-        _rdma_ep = new (std::nothrow)rdma::RdmaEndpoint(this);
-        if (!_rdma_ep) {
-            const int saved_errno = errno;
-            PLOG(ERROR) << "Fail to create RdmaEndpoint";
-            SetFailed(saved_errno, "Fail to create RdmaEndpoint: %s",
-                         berror(saved_errno));
-            return -1;
-        }
-        _rdma_state = RDMA_UNKNOWN;
-    } else {
-        _rdma_state = RDMA_OFF;
-    }
-#endif
     _connection_type_for_progressive_read = CONNECTION_TYPE_UNKNOWN;
     _controller_released_socket.store(false, butil::memory_order_relaxed);
     _overcrowded = false;
@@ -851,7 +847,7 @@ void Socket::BeforeRecycled() {
     };
     const int prev_fd = _fd.exchange(-1, butil::memory_order_relaxed);
     if (ValidFileDescriptor(prev_fd)) {
-        if (_on_edge_triggered_events != NULL) {
+        if (_transport && _transport->HasOnEdgeTrigger()) {
             _io_event.RemoveConsumer(prev_fd);
         }
         close(prev_fd);
@@ -859,17 +855,11 @@ void Socket::BeforeRecycled() {
             g_vars->channel_conn << -1;
         }
     }
-
-#if BRPC_WITH_RDMA
-    if (_rdma_ep) {
-        delete _rdma_ep;
-        _rdma_ep = NULL;
-        _rdma_state = RDMA_UNKNOWN;
-    }
-#endif
-
-    reset_parsing_context(NULL);
     _read_buf.clear();
+    if (_transport) {
+        _transport->Release();
+    }
+    reset_parsing_context(NULL);
 
     _auth_flag_error.store(0, butil::memory_order_relaxed);
     bthread_id_error(_auth_id, 0);
@@ -1012,7 +1002,7 @@ int Socket::WaitAndReset(int32_t expected_nref) {
     // It's safe to close previous fd (provided expected_nref is correct).
     const int prev_fd = _fd.exchange(-1, butil::memory_order_relaxed);
     if (ValidFileDescriptor(prev_fd)) {
-        if (_on_edge_triggered_events != NULL) {
+        if (_transport->HasOnEdgeTrigger()) {
             _io_event.RemoveConsumer(prev_fd);
         }
         close(prev_fd);
@@ -1020,19 +1010,13 @@ int Socket::WaitAndReset(int32_t expected_nref) {
             g_vars->channel_conn << -1;
         }
     }
-
-#if BRPC_WITH_RDMA
-    if (_rdma_ep) {
-        _rdma_ep->Reset();
-        _rdma_state = RDMA_UNKNOWN;
-    }
-#endif
+    _transport->Reset(expected_nref);
 
     _local_side = butil::EndPoint();
     if (_ssl_session) {
         SSL_free(_ssl_session);
         _ssl_session = NULL;
-    }        
+    }
     _ssl_state = SSL_UNKNOWN;
     _nevent.store(0, butil::memory_order_relaxed);
     // parsing_context is very likely to be associated with the fd,
@@ -1178,13 +1162,6 @@ int Socket::Status(SocketId id, int32_t* nref) {
         }
     }
     return -1;
-}
-
-void* Socket::ProcessEvent(void* arg) {
-    // the enclosed Socket is valid and free to access inside this function.
-    SocketUniquePtr s(static_cast<Socket*>(arg));
-    s->_on_edge_triggered_events(s.get());
-    return NULL;
 }
 
 // Check if there're new requests appended.
@@ -1339,7 +1316,7 @@ int Socket::Connect(const timespec* abstime,
                          (int)sockfd, berror(saved_errno));
             return -1;
         }
-        
+
         // Register a timer for EpollOutRequest. Note that the timeout
         // callback has no race with the one above as both of them try
         // to `SetFailed' `connect_id' while only one of them can succeed
@@ -1356,7 +1333,7 @@ int Socket::Connect(const timespec* abstime,
                 return -1;
             }
         }
-        
+
     } else {
         if (WaitEpollOut(sockfd, false, abstime) != 0) {
             PLOG(WARNING) << "Fail to wait EPOLLOUT of fd=" << sockfd;
@@ -1369,14 +1346,14 @@ int Socket::Connect(const timespec* abstime,
     return sockfd.release();
 }
 
-int Socket::CheckConnected(int sockfd) {    
+int Socket::CheckConnected(int sockfd) {
     if (sockfd == STREAM_FAKE_FD) {
         return 0;
     }
     int err = 0;
     socklen_t errlen = sizeof(err);
     if (getsockopt(sockfd, SOL_SOCKET, SO_ERROR, &err, &errlen) < 0) {
-        PLOG(ERROR) << "Fail to getsockopt of fd=" << sockfd; 
+        PLOG(ERROR) << "Fail to getsockopt of fd=" << sockfd;
         return -1;
     }
     if (err != 0) {
@@ -1420,7 +1397,7 @@ int Socket::ConnectIfNot(const timespec* abstime, WriteRequest* req) {
         return -1;
     }
     s.release();
-    return 1;    
+    return 1;
 }
 
 void Socket::WakeAsEpollOut() {
@@ -1445,11 +1422,11 @@ int Socket::OnOutputEvent(void* user_data, uint32_t,
     if (req != NULL) {
         return s->HandleEpollOutRequest(0, req);
     }
-    
+
     // Currently `WaitEpollOut' needs `_epollout_butex'
     // TODO(jiangrujie): Remove this in the future
     s->_epollout_butex->fetch_add(1, butil::memory_order_relaxed);
-    bthread::butex_wake_except(s->_epollout_butex, 0);  
+    bthread::butex_wake_except(s->_epollout_butex, 0);
     return 0;
 }
 
@@ -1573,7 +1550,7 @@ void Socket::CheckConnectedAndKeepWrite(int fd, int err, void* data) {
         AfterAppConnected(err, req);
     }
 }
-     
+
 inline int SetError(bthread_id_t id_wait, int ec) {
     if (id_wait != INVALID_BTHREAD_ID) {
         bthread_id_error(id_wait, ec);
@@ -1669,11 +1646,11 @@ int Socket::Write(SocketMessagePtr<>& msg, const WriteOptions* options_in) {
             return rc;
         }
     }
-    
+
     if (!opt.ignore_eovercrowded && _overcrowded) {
         return SetError(opt.id_wait, EOVERCROWDED);
     }
-    
+
     WriteRequest* req = butil::get_object<WriteRequest>();
     if (!req) {
         return SetError(opt.id_wait, ENOMEM);
@@ -1717,7 +1694,7 @@ int Socket::StartWrite(WriteRequest* req, const WriteOptions& opt) {
         goto FAIL_TO_WRITE;
     }
     _is_write_shutdown = req->need_shutdown_write();
-    
+
     // Connect to remote_side() if not.
     ret = ConnectIfNot(opt.abstime, req);
     if (ret < 0) {
@@ -1734,29 +1711,20 @@ int Socket::StartWrite(WriteRequest* req, const WriteOptions& opt) {
     // which is assumed to run before any SocketMessage.AppendAndDestroySelf()
     // in some protocols(namely RTMP).
     req->Setup(this);
-    
+
     if (opt.write_in_background || ssl_state() != SSL_OFF) {
         // Writing into SSL may block the current bthread, always write
         // in the background.
         goto KEEPWRITE_IN_BACKGROUND;
     }
-    
+
     // Write once in the calling thread. If the write is not complete,
     // continue it in KeepWrite thread.
     if (_conn) {
         butil::IOBuf* data_arr[1] = { &req->data };
         nw = _conn->CutMessageIntoFileDescriptor(fd(), data_arr, 1);
     } else {
-#if BRPC_WITH_RDMA
-        if (_rdma_ep && _rdma_state != RDMA_OFF) {
-            butil::IOBuf* data_arr[1] = { &req->data };
-            nw = _rdma_ep->CutFromIOBufList(data_arr, 1);
-        } else {
-#else
-        {
-#endif
-            nw = req->data.cut_into_file_descriptor(fd());
-        }
+        nw = _transport->CutFromIOBuf(&req->data);
     }
     if (nw < 0) {
         // RTMP may return EOVERCROWDED
@@ -1764,7 +1732,7 @@ int Socket::StartWrite(WriteRequest* req, const WriteOptions& opt) {
             saved_errno = errno;
             // EPIPE is common in pooled connections + backup requests.
             PLOG_IF(WARNING, errno != EPIPE) << "Fail to write into " << *this;
-            SetFailed(saved_errno, "Fail to write into %s: %s", 
+            SetFailed(saved_errno, "Fail to write into %s: %s",
                       description().c_str(), berror(saved_errno));
             goto FAIL_TO_WRITE;
         }
@@ -1858,45 +1826,11 @@ void* Socket::KeepWrite(void* void_arg) {
             // which may turn on _overcrowded to stop pending requests from
             // growing infinitely.
             const timespec duetime =
-                butil::milliseconds_from_now(WAIT_EPOLLOUT_TIMEOUT_MS);
-#if BRPC_WITH_RDMA
-            if (s->_rdma_state == RDMA_ON) {
-                const int expected_val = s->_epollout_butex
-                    ->load(butil::memory_order_acquire);
-                CHECK(s->_rdma_ep != NULL);
-                if (!s->_rdma_ep->IsWritable()) {
-                    g_vars->nwaitepollout << 1;
-                    if (bthread::butex_wait(s->_epollout_butex,
-                            expected_val, &duetime) < 0) {
-                        if (errno != EAGAIN && errno != ETIMEDOUT) {
-                            const int saved_errno = errno;
-                            PLOG(WARNING) << "Fail to wait rdma window of " << *s;
-                            s->SetFailed(saved_errno, "Fail to wait rdma window of %s: %s",
-                                    s->description().c_str(), berror(saved_errno));
-                        }
-                        if (s->Failed()) {
-                            // NOTE:
-                            // Different from TCP, we cannot find the RDMA channel
-                            // failed by writing to it. Thus we must check if it
-                            // is already failed here.
-                            break;
-                        }
-                    }
-                }
-            } else {
-#else
-            {
-#endif
-                g_vars->nwaitepollout << 1;
-                bool pollin = (s->_on_edge_triggered_events != NULL);
-                const int rc = s->WaitEpollOut(s->fd(), pollin, &duetime);
-                if (rc < 0 && errno != ETIMEDOUT) {
-                    const int saved_errno = errno;
-                    PLOG(WARNING) << "Fail to wait epollout of " << *s;
-                    s->SetFailed(saved_errno, "Fail to wait epollout of %s: %s",
-                             s->description().c_str(), berror(saved_errno));
-                    break;
-                }
+                                butil::milliseconds_from_now(WAIT_EPOLLOUT_TIMEOUT_MS);
+            bool pollin = s->_transport->HasOnEdgeTrigger();
+            int ret = s->_transport->WaitEpollOut(s->_epollout_butex, pollin, duetime);
+            if (ret == 1) {
+                break;
             }
         }
         if (NULL == cur_tail) {
@@ -1936,13 +1870,7 @@ ssize_t Socket::DoWrite(WriteRequest* req) {
         if (_conn) {
             return _conn->CutMessageIntoFileDescriptor(fd(), data_list, ndata);
         } else {
-#if BRPC_WITH_RDMA
-            if (_rdma_ep && _rdma_state != RDMA_OFF) {
-                return _rdma_ep->CutFromIOBufList(data_list, ndata);
-            }
-#endif
-            return butil::IOBuf::cut_multiple_into_file_descriptor(
-                fd(), data_list, ndata);
+            return _transport->CutFromIOBufList(data_list, ndata);
         }
     }
 
@@ -2079,7 +2007,7 @@ int Socket::SSLHandshake(int fd, bool server_mode) {
                 return -1;
             }
             break;
- 
+
         default: {
             const unsigned long e = ERR_get_error();
             if (ssl_error == SSL_ERROR_ZERO_RETURN || e == 0) {
@@ -2120,7 +2048,7 @@ ssize_t Socket::DoRead(size_t size_hint) {
         case SSL_CONNECTED:
             CHECK(false) << "Impossible to reach here";
             break;
-            
+
         case SSL_OFF:
             break;
         }
@@ -2131,7 +2059,6 @@ ssize_t Socket::DoRead(size_t size_hint) {
             errno = ESSL;
             return -1;
         }
-        CHECK(_rdma_state == RDMA_OFF);
         return _read_buf.append_from_file_descriptor(fd(), size_hint);
     }
 
@@ -2145,12 +2072,12 @@ ssize_t Socket::DoRead(size_t size_hint) {
     switch (ssl_error) {
     case SSL_ERROR_NONE:  // `nr' > 0
         break;
-            
+
     case SSL_ERROR_WANT_READ:
         // Regard this error as EAGAIN
         errno = EAGAIN;
         break;
-            
+
     case SSL_ERROR_WANT_WRITE:
         // Disable renegotiation
         errno = EPROTO;
@@ -2201,7 +2128,7 @@ int Socket::FightAuthentication(int* auth_error) {
 }
 
 void Socket::SetAuthentication(int error_code) {
-    uint64_t expected = 0;       
+    uint64_t expected = 0;
     // `bthread_id_destroy' has release fence to prevent this CAS being
     // reordered after it.
     if (_auth_flag_error.compare_exchange_strong(
@@ -2233,7 +2160,7 @@ int Socket::OnInputEvent(void* user_data, uint32_t events,
     if (Address(id, &s) < 0) {
         return -1;
     }
-    if (NULL == s->_on_edge_triggered_events) {
+    if (!s->_transport->HasOnEdgeTrigger()) {
         // Callback can be NULL when receiving error epoll events
         // (Added into epoll by `WaitConnected')
         return 0;
@@ -2259,27 +2186,15 @@ int Socket::OnInputEvent(void* user_data, uint32_t events,
         // is just 1500~1700/s
         g_vars->neventthread << 1;
 
-        bthread_t tid;
         // transfer ownership as well, don't use s anymore!
         Socket* const p = s.release();
 
         bthread_attr_t attr = thread_attr;
         attr.keytable_pool = p->_keytable_pool;
         attr.tag = bthread_self_tag();
-        if (FLAGS_usercode_in_coroutine) {
-            ProcessEvent(p);
-#if BRPC_WITH_RDMA
-        } else if (rdma::FLAGS_rdma_edisp_unsched) {
-            auto rc = bthread_start_background(&tid, &attr, ProcessEvent, p);
-            if (rc != 0) {
-                LOG(FATAL) << "Fail to start ProcessEvent";
-                ProcessEvent(p);
-            }
-#endif
-        } else if (bthread_start_urgent(&tid, &attr, ProcessEvent, p) != 0) {
-            LOG(FATAL) << "Fail to start ProcessEvent";
-            ProcessEvent(p);
-        }
+        // Only event dispatcher thread has flag BTHREAD_GLOBAL_PRIORITY
+        attr.flags = attr.flags & (~BTHREAD_GLOBAL_PRIORITY);
+        p->_transport->ProcessEvent(attr);
     }
     return 0;
 }
@@ -2581,11 +2496,7 @@ void Socket::DebugSocket(std::ostream& os, SocketId id) {
            << "\n}";
     }
 #endif
-#if BRPC_WITH_RDMA
-    if (ptr->_rdma_state == RDMA_ON && ptr->_rdma_ep) {
-        ptr->_rdma_ep->DebugInfo(os);
-    }
-#endif
+    ptr->_transport->Debug(os);
     { os << "\nbthread_tag=" << ptr->_io_event.bthread_tag(); }
 }
 
@@ -2635,7 +2546,7 @@ void Socket::ResetAllStreams(int error_code, const std::string& error_text) {
     _stream_mutex.lock();
     if (_stream_set != NULL) {
         // Not delete _stream_set because there are likely more streams added
-        // after reviving if the Socket is still in use, or it is to be deleted in 
+        // after reviving if the Socket is still in use, or it is to be deleted in
         // BeforeRecycled()
         saved_stream_set.swap(*_stream_set);
     }
@@ -2741,7 +2652,7 @@ inline void SocketPool::ReturnSocket(Socket* sock) {
 
 inline void SocketPool::ListSockets(std::vector<SocketId>* out, size_t max_count) {
     out->clear();
-    // NOTE: size() of vector is thread-unsafe and may return a very 
+    // NOTE: size() of vector is thread-unsafe and may return a very
     // large value during resizing.
     _mutex.lock();
     size_t expected_size = _pool.size();
@@ -2807,10 +2718,11 @@ int Socket::GetPooledSocket(SocketUniquePtr* pooled_socket) {
         opt.remote_side = remote_side();
         opt.user = user();
         opt.on_edge_triggered_events = _on_edge_triggered_events;
+        opt.need_on_edge_trigger = _need_on_edge_trigger;
         opt.initial_ssl_ctx = _ssl_ctx;
         opt.keytable_pool = _keytable_pool;
         opt.app_connect = _app_connect;
-        opt.use_rdma =  (_rdma_ep) ? true : false;
+        opt.socket_mode = _socket_mode;
         socket_pool = new SocketPool(opt);
         SocketPool* expected = NULL;
         if (!main_sp->socket_pool.compare_exchange_strong(
@@ -2897,7 +2809,7 @@ bool Socket::GetPooledSocketStats(int* numfree, int* numinflight) {
     *numinflight = pool->_numinflight.load(butil::memory_order_relaxed);
     return true;
 }
-    
+
 int Socket::GetShortSocket(SocketUniquePtr* short_socket) {
     if (short_socket == NULL) {
         LOG(ERROR) << "short_socket is NULL";
@@ -2908,10 +2820,11 @@ int Socket::GetShortSocket(SocketUniquePtr* short_socket) {
     opt.remote_side = remote_side();
     opt.user = user();
     opt.on_edge_triggered_events = _on_edge_triggered_events;
+    opt.need_on_edge_trigger = _need_on_edge_trigger;
     opt.initial_ssl_ctx = _ssl_ctx;
     opt.keytable_pool = _keytable_pool;
     opt.app_connect = _app_connect;
-    opt.use_rdma =  (_rdma_ep) ? true : false;
+    opt.socket_mode = _socket_mode;
     if (get_client_side_messenger()->Create(opt, &id) != 0 ||
         Socket::Address(id, short_socket) != 0) {
         return -1;

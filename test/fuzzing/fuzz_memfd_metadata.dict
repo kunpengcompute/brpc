@@ -1,0 +1,5 @@
+shm_magic="\x4d\x48\x53\x4d"
+queue_magic="\x51\x4d\x53\x4d"
+valid_alloc="VALID_SHM_ALLOC"
+valid_queue_empty="VALID_QUEUE_EMPTY"
+valid_queue_full="VALID_QUEUE_FULL"

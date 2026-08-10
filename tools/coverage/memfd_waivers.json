@@ -1,0 +1,25 @@
+{
+  "waivers": [
+    {
+      "id": "memfd-endpoint-fixed-name-cannot-overflow",
+      "subsystem": "memfd_transport",
+      "symbol": "brpc::MakeMemfdEndpoint",
+      "reason": "The abstract UDS name is a fixed 11-byte prefix followed by a validated decimal TCP port in [1, 65535]. snprintf therefore produces at most 16 bytes in a 107-byte destination; its ENAMETOOLONG return is a defensive invariant check that no input can trigger.",
+      "safety": "The endpoint family and port range are checked before formatting, snprintf receives the actual sun_path capacity, and sockaddr2endpoint receives the exact produced length.",
+      "alternative_validation": "The UT covers invalid ports, local and remote endpoints, interface enumeration, and exact abstract UDS output. The source-bound context hash invalidates this waiver when the protected code changes.",
+      "residual_risk": "This waiver is valid only while the fixed prefix, integer port validation, and sockaddr_un::sun_path capacity remain unchanged.",
+      "locations": [
+        {
+          "file": "src/brpc/memfd/memfd_endpoint.cpp",
+          "line": 95,
+          "context_sha256": "73eb0a9423a04a81940621a62bb8d3670f7e82a69359923ce9ec25b43d31cfa2"
+        },
+        {
+          "file": "src/brpc/memfd/memfd_endpoint.cpp",
+          "line": 96,
+          "context_sha256": "fb28305bf4c8bf1ab01f2aa042bc0cabdafb05f21bd6ec3f8f214b562cd63134"
+        }
+      ]
+    }
+  ]
+}
