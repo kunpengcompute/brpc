@@ -93,7 +93,9 @@ private:
 class InputMessageBatch {
 public:
     InputMessageBatch() {}
-    explicit InputMessageBatch(size_t /*capacity*/) {}
+    explicit InputMessageBatch(size_t capacity) {
+        _msgs.reserve(capacity);
+    }
     ~InputMessageBatch() noexcept(false);
 
     void add(InputMessageBase* msg);

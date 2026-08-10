@@ -21,8 +21,6 @@
 
 #include <limits>
 #include <memory>
-#include <mutex>
-#include <sstream>
 #include <vector>
 
 #include <fuzzer/FuzzedDataProvider.h>
@@ -83,6 +81,7 @@ void FuzzBatchContainer(FuzzedDataProvider* provider) {
         provider->ConsumeIntegralInRange<size_t>(0, 128);
     std::unique_ptr<brpc::InputMessageBatch> batch(
         new brpc::InputMessageBatch(capacity));
+    assert(batch->_msgs.capacity() >= capacity);
 
     while (provider->remaining_bytes() > 0) {
         const uint8_t op = provider->ConsumeIntegral<uint8_t>() % 5;
