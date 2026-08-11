@@ -34,7 +34,7 @@
 1. 编译benchmark stress_performance。
 
    ```bash
-   bazel build -c opt //example:stress_performance_client //example:stress_performance_server --define BRPC_WITH_URMA==false
+   bazel build -c opt //example:stress_performance_client //example:stress_performance_server --define BRPC_WITH_RDMA==false
    ```
 
 2. 运行benchmark/server。
@@ -54,17 +54,17 @@
     --use_rdma=false \
     --transport=memfd \
     --input_message_batch_process_size=-1
-    protocol=baidu_std    \
-    connection_type=single     \
-    servers=127.0.0.1:10086      \
-    thread_num=1         \
-    queue_depth=1         \
-    attachment_size=1024      \
-    echo_attachment=true       \
-    load_mode=closed_loop        \
-    connection_num=1       \
-    unique_connection_group=false     \
-    test_seconds=10
+    --protocol=baidu_std    \
+    --connection_type=single     \
+    --servers=127.0.0.1:10086      \
+    --thread_num=1         \
+    --queue_depth=1         \
+    --attachment_size=1024      \
+    --echo_attachment=true       \
+    --load_mode=closed_loop        \
+    --connection_num=1       \
+    --unique_connection_group=false     \
+    --test_seconds=10
    ```
 
     回显如下结果说明使能成功。

@@ -47,19 +47,19 @@ brpc/
 
 ## 版本说明
 
-每个发布版本特性变更详细信息，请参见《[版本说明书](docs/cn/release_notes.md)》。
+每个发布版本特性变更详细信息，请参见《[版本说明书](docs/zh/release_notes.md)》。
 
 ## 快速上手
 
-bRPC新增特性使能的详细步骤，请参见《[快速入门](docs/cn/quick_start.md)》。
+bRPC新增特性使能的详细步骤，请参见《[快速入门](docs/zh/quick_start.md)》。
 
 ## 文档
 
 | 资源名称 | 资源简介 |
 | --------- | --------- |
-| [快速入门](./docs/cn/quick_start.md) | 提供bRPC的快速入门指导。 |
-| [版本说明书](./docs/cn/release_notes.md) | 提供bRPC发布版本的基础信息和特性更新信息。 |
-| [API参考](./docs/cn/api_reference.md) | 提供接口说明、接口调用示例等。 |
+| [快速入门](./docs/zh/quick_start.md) | 提供bRPC的快速入门指导。 |
+| [版本说明书](./docs/zh/release_notes.md) | 提供bRPC发布版本的基础信息和特性更新信息。 |
+| [API参考](./docs/zh/api_reference.md) | 提供接口说明、接口调用示例等。 |
 
 ## 免责声明
 
