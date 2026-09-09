@@ -9415,8 +9415,9 @@ index 0000000000000000000000000000000000000000..0a81e3af393e683cb9794bb7b416d12c
 +    EXPECT_NE(0, MakeMemfdEndpoint(
 +                     butil::EndPoint(loopback, 0), &invalid));
 +
-+    butil::ip_t remote;
-+    ASSERT_EQ(0, butil::str2ip("192.0.2.1", &remote));
++    // This only needs to be an address that cannot be a local unicast
++    // interface. MakeMemfdEndpoint rejects it before any network I/O.
++    const butil::ip_t remote = butil::int2ip(INADDR_BROADCAST);
 +    EXPECT_NE(0, MakeMemfdEndpoint(
 +                     butil::EndPoint(remote, 8123), &invalid));
 +
@@ -9437,7 +9438,9 @@ index 0000000000000000000000000000000000000000..0a81e3af393e683cb9794bb7b416d12c
 +    Channel remote_channel;
 +    ChannelOptions options;
 +    options.socket_mode = SOCKET_MODE_MEMFD;
-+    EXPECT_EQ(-1, remote_channel.Init("192.0.2.1:8123", &options));
++    const std::string remote_address =
++        butil::endpoint2str(butil::EndPoint(remote, 8123)).c_str();
++    EXPECT_EQ(-1, remote_channel.Init(remote_address.c_str(), &options));
 +
 +    EXPECT_EQ(-1, MakeMemfdEndpoint(
 +                      butil::EndPoint(loopback, 8123), nullptr));
