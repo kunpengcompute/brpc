@@ -92,7 +92,7 @@
    ./bazel-bin/example/stress_performance_client \
     --use_rdma=false \
     --transport=memfd \
-    --input_message_batch_process_size=-1
+    --input_message_batch_process_size=-1 \
     --protocol=baidu_std    \
     --connection_type=single     \
     --servers=127.0.0.1:10086      \
