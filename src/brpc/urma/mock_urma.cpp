@@ -42,6 +42,7 @@
 #include <cstring>
 #include <deque>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <shared_mutex>
 #include <sys/eventfd.h>
@@ -74,10 +75,22 @@ std::map<urma_jfr_t *, int> jfr_map;
 std::map<urma_jfr_t *, urma_jfc_t *> jfr_jfc_map;
 std::map<urma_jfr_t *, std::deque<PendingRecv>> jfr_recv_map;
 std::map<urma_target_seg_t *, int> seg_map;
-std::map<urma_jetty_t *, int> jetty_map;
+std::map<urma_jetty_t *, std::shared_ptr<std::mutex>> jetty_map;
 std::map<uint32_t, urma_jetty_t *> jetty_id_map;
 std::map<urma_target_jetty_t *, int> target_jetty_map;
 std::atomic<uint32_t> next_jetty_id{1};
+// Deterministic teardown fault injection, exported only by the link-time mock.
+std::atomic<int> fail_jetty_delete{0};
+std::atomic<bool> fail_jetty_import{false};
+std::atomic<bool> pause_jetty_delete{false};
+std::atomic<bool> jetty_delete_entered{false};
+std::atomic<int> fail_send_after{-1};
+std::atomic<bool> pause_send{false};
+std::atomic<bool> send_entered{false};
+std::atomic<bool> pause_send_copy{false};
+std::atomic<bool> send_copy_entered{false};
+std::atomic<bool> pause_send_return{false};
+std::atomic<bool> send_return_entered{false};
 
 void PushCompletion(urma_jfc_t* jfc, JfcState* state,
                     const urma_cr_t& completion) {
@@ -462,12 +475,31 @@ urma_jetty_t *urma_create_jetty(urma_context_t *ctx, urma_jetty_cfg_t *cfg) {
     jetty->jetty_id.id = next_jetty_id.fetch_add(1);
     jetty->jetty_cfg = *cfg;
     jetty->remote_jetty = nullptr;
-    jetty_map[jetty] = 1;
+    jetty_map[jetty] = std::make_shared<std::mutex>();
     jetty_id_map[jetty->jetty_id.id] = jetty;
     return jetty;
 }
 
+void brpc_urma_mock_fail_jetty_delete(int count) {
+    fail_jetty_delete.store(count);
+}
+void brpc_urma_mock_pause_jetty_delete(bool pause) {
+    if (pause) jetty_delete_entered.store(false);
+    pause_jetty_delete.store(pause);
+}
+bool brpc_urma_mock_jetty_delete_entered() {
+    return jetty_delete_entered.load();
+}
+
 urma_status_t urma_delete_jetty(urma_jetty_t *jetty) {
+    jetty_delete_entered.store(true);
+    while (pause_jetty_delete.load()) usleep(1000);
+    int failures = fail_jetty_delete.load();
+    while (failures > 0) {
+        if (fail_jetty_delete.compare_exchange_weak(failures, failures - 1)) {
+            return static_cast<urma_status_t>(EBUSY);
+        }
+    }
     std::unique_lock<std::shared_mutex> lock(g_rw_mutex);
     if (!jetty || jetty_map.find(jetty) == jetty_map.end()) {
         return URMA_EINVAL;
@@ -487,9 +519,18 @@ urma_status_t urma_unbind_jetty(urma_jetty_t *jetty) {
     return URMA_SUCCESS;
 }
 
+void brpc_urma_mock_fail_next_jetty_import() {
+    fail_jetty_import.store(true);
+}
+
 urma_target_jetty_t *urma_import_jetty(urma_context_t *ctx,
                                        urma_rjetty_t *rjetty,
                                        urma_token_t *token_value) {
+    if (fail_jetty_import.exchange(false)) {
+        errno = EIO;
+        return nullptr;
+    }
+
     std::unique_lock<std::shared_mutex> lock(g_rw_mutex);
     if (!ctx || !rjetty || !token_value ||
         context_map.find(ctx) == context_map.end()) {
@@ -531,6 +572,31 @@ urma_status_t urma_modify_jetty(urma_jetty_t *jetty, urma_jetty_attr_t *attr) {
     return URMA_SUCCESS;
 }
 
+void brpc_urma_mock_fail_send_after(int successful_wrs) {
+    fail_send_after.store(successful_wrs);
+}
+void brpc_urma_mock_pause_send(bool pause) {
+    if (pause) send_entered.store(false);
+    pause_send.store(pause);
+}
+bool brpc_urma_mock_send_entered() {
+    return send_entered.load();
+}
+void brpc_urma_mock_pause_send_copy(bool pause) {
+    if (pause) send_copy_entered.store(false);
+    pause_send_copy.store(pause);
+}
+bool brpc_urma_mock_send_copy_entered() {
+    return send_copy_entered.load();
+}
+void brpc_urma_mock_pause_send_return(bool pause) {
+    if (pause) send_return_entered.store(false);
+    pause_send_return.store(pause);
+}
+bool brpc_urma_mock_send_return_entered() {
+    return send_return_entered.load();
+}
+
 urma_status_t urma_post_jetty_send_wr(urma_jetty_t *jetty, urma_jfs_wr_t *wr,
                                       urma_jfs_wr_t **bad_wr) {
     std::shared_lock<std::shared_mutex> read_lock(g_rw_mutex);
@@ -546,9 +612,29 @@ urma_status_t urma_post_jetty_send_wr(urma_jetty_t *jetty, urma_jfs_wr_t *wr,
         return URMA_EINVAL;
     }
     JfcState* local_state = local_jfc_it->second;
+    auto send_mutex = local_it->second;
     read_lock.unlock();
+    // Model the provider's per-SQ post serialization, including SEND/ACK
+    // ordering. Never hold the global object-map mutex while waiting here.
+    std::lock_guard<std::mutex> send_lock(*send_mutex);
 
     for (urma_jfs_wr_t* current = wr; current; current = current->next) {
+        if (current->opcode == URMA_OPC_SEND) {
+            send_entered.store(true);
+            while (pause_send.load()) usleep(1000);
+            int remaining = fail_send_after.load();
+            while (remaining >= 0) {
+                if (fail_send_after.compare_exchange_weak(
+                        remaining, remaining - 1)) {
+                    if (remaining == 0) {
+                        if (bad_wr) *bad_wr = current;
+                        errno = EIO;
+                        return URMA_EINVAL;
+                    }
+                    break;
+                }
+            }
+        }
         if (!current->tjetty) {
             if (bad_wr) {
                 *bad_wr = current;
@@ -560,10 +646,12 @@ urma_status_t urma_post_jetty_send_wr(urma_jetty_t *jetty, urma_jfs_wr_t *wr,
         send_cr.status = URMA_CR_SUCCESS;
         send_cr.user_ctx = current->user_ctx;
         send_cr.flag.bs.s_r = 0;
-        if (current->flag.bs.complete_enable) {
-            PushCompletion(jetty->jetty_cfg.jfs_cfg.jfc,
-                           local_state, send_cr);
-        }
+        auto complete_send = [&] {
+            if (current->flag.bs.complete_enable) {
+                PushCompletion(jetty->jetty_cfg.jfs_cfg.jfc,
+                               local_state, send_cr);
+            }
+        };
 
         PendingRecv recv{};
         urma_jfc_t* remote_jfc = nullptr;
@@ -571,6 +659,7 @@ urma_status_t urma_post_jetty_send_wr(urma_jetty_t *jetty, urma_jfs_wr_t *wr,
             std::unique_lock<std::shared_mutex> lock(g_rw_mutex);
             auto remote_it = jetty_id_map.find(current->tjetty->id.id);
             if (remote_it == jetty_id_map.end()) {
+                complete_send();
                 continue;
             }
             urma_jfr_t* remote_jfr =
@@ -579,6 +668,7 @@ urma_status_t urma_post_jetty_send_wr(urma_jetty_t *jetty, urma_jfs_wr_t *wr,
             auto jfc_it = jfr_jfc_map.find(remote_jfr);
             if (recv_it == jfr_recv_map.end() || recv_it->second.empty() ||
                 jfc_it == jfr_jfc_map.end()) {
+                complete_send();
                 continue;
             }
             recv = recv_it->second.front();
@@ -586,6 +676,10 @@ urma_status_t urma_post_jetty_send_wr(urma_jetty_t *jetty, urma_jfs_wr_t *wr,
             remote_jfc = jfc_it->second;
         }
 
+        if (current->opcode == URMA_OPC_SEND) {
+            send_copy_entered.store(true);
+            while (pause_send_copy.load()) usleep(1000);
+        }
         uint32_t copied = 0;
         for (uint32_t i = 0;
              i < current->send.src.num_sge && copied < recv.len; ++i) {
@@ -616,6 +710,13 @@ urma_status_t urma_post_jetty_send_wr(urma_jetty_t *jetty, urma_jfs_wr_t *wr,
                     : URMA_CR_OPC_SEND;
             recv_cr.imm_data = current->send.imm_data;
             PushCompletion(remote_jfc, remote_state, recv_cr);
+        }
+        // A TX CQE releases the application's last payload reference. The
+        // simulated DMA above must finish before making that CQE visible.
+        complete_send();
+        if (current->opcode == URMA_OPC_SEND) {
+            send_return_entered.store(true);
+            while (pause_send_return.load()) usleep(1000);
         }
     }
     if (bad_wr) {
