@@ -414,6 +414,16 @@ urma_target_seg_t* GetPoolSegFor(void* buf) {
 
 static void GlobalRelease() {
     g_urma_available.store(false, butil::memory_order_release);
+    if (!UrmaEndpoint::GlobalRelease()) {
+        LOG(WARNING) << "Retain URMA services until resource shutdown completes";
+        return;
+    }
+    if ((g_pool && g_pool->outstanding.load(butil::memory_order_acquire) != 0) ||
+        (g_pool_seg && urma_unregister_seg(g_pool_seg) != URMA_SUCCESS)) {
+        LOG(WARNING) << "Retain URMA memory while registered blocks are live";
+        return;
+    }
+    g_pool_seg = nullptr;
     if (g_mem_alloc_orig) {
         butil::iobuf::blockmem_allocate = g_mem_alloc_orig;
         g_mem_alloc_orig = nullptr;
@@ -425,11 +435,6 @@ static void GlobalRelease() {
     if (g_default_block_size_orig != 0) {
         butil::SetDefaultBlockSize(g_default_block_size_orig);
         g_default_block_size_orig = 0;
-    }
-    UrmaEndpoint::GlobalRelease();
-    if (g_pool_seg) {
-        urma_unregister_seg(g_pool_seg);
-        g_pool_seg = nullptr;
     }
     if (g_pool_base) {
         munmap(g_pool_base, g_pool_size);
