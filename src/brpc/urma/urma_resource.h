@@ -35,6 +35,8 @@
 namespace brpc {
 namespace urma {
 
+struct UrmaDeferredMessage;
+struct UrmaRxParseBatch;
 class UrmaConnectionResource;
 class UrmaResourceProvider;
 using UrmaConnectionHandle = std::shared_ptr<UrmaConnectionResource>;
@@ -79,10 +81,14 @@ struct UrmaResourceDescription {
 };
 
 struct UrmaResourceCallbacks {
+    void (*on_fragment)(SocketId, uint32_t, uint16_t, butil::IOBuf,
+                        UrmaDeferredMessage*, UrmaRxParseBatch*) = nullptr;
+    void (*flush_batch)(UrmaRxParseBatch*, UrmaDeferredMessage*) = nullptr;
     UrmaConnectionHandle (*lookup_connection)(SocketId id) = nullptr;
     void (*on_received)(SocketId id,
                         const UrmaConnectionHandle& source,
                         butil::IOBuf data) = nullptr;
+    void (*on_rx_error)(SocketId, int) = nullptr;
     void (*on_error)(SocketId id,
                      const UrmaConnectionHandle& source,
                      int error) = nullptr;
@@ -99,6 +105,7 @@ public:
     // prefix after partial success; only an empty input returns zero.
     // The caller serializes data sends and holds a resource handle throughout.
     virtual ssize_t Send(butil::IOBuf** data, size_t ndata) = 0;
+    virtual bool AcceptsReceive(uint32_t) const { return false; }
     virtual bool IsWritable() const = 0;
     // After binding, wait on the owning Socket's epollout butex only. The
     // caller reads expected before checking IsWritable; no pointer is retained.
@@ -123,6 +130,9 @@ public:
     virtual void ReleasePollingMode(bthread_tag_t tag) = 0;
     virtual bool Shutdown() = 0;
 };
+
+bool UsingPooledUrmaResources();
+int CreatePooledUrmaResourceProvider(std::unique_ptr<UrmaResourceProvider>* out);
 
 // Creates an uninitialized provider; unsupported modes return ENOTSUP.
 int CreateUrmaResourceProvider(UrmaResourceMode mode,
