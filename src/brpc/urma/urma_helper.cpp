@@ -46,6 +46,8 @@
 #include "urma_types.h"
 #include "brpc/urma/urma_bonding.h"
 #include "brpc/urma/urma_endpoint.h"
+#include "brpc/urma/urma_memory_pool.h"
+#include "brpc/urma/urma_pooled_resource.h"
 
 DECLARE_int32(task_group_ntags);
 
@@ -80,6 +82,9 @@ DEFINE_int32(urma_zerocopy_min_size, 512,
 
 DEFINE_string(urma_device, "",
               "The name of the URMA device to use. Empty means the first one.");
+DEFINE_int32(urma_eid_index, -1,
+             "URMA EID index; -1 selects the first entry returned by the device "
+             "(startup only).");
 DEFINE_int32(urma_max_sge, 0,
              "Max SGEs per WR. 0 means the device maximum.");
 DEFINE_int32(urma_bonding_mode, 0,
@@ -94,6 +99,9 @@ DEFINE_int32(urma_prepared_jetty_cnt, 8,
 DEFINE_int32(urma_buffer_size, 8 * 1024,
              "Per-buffer size in the URMA buffer pool (bytes). "
              "Must match IOBuf block size to keep zero-copy working.");
+DEFINE_int32(urma_ctp_buf_count, 48000, "Registered 4 KiB CTP blocks (pooled mode)");
+DEFINE_int32(urma_header_buf_count, 65536, "Registered 64 B headers (pooled mode)");
+DEFINE_int32(urma_memory_pool_limit_mb, 400, "Registered pool limit in MiB (pooled mode)");
 DEFINE_int32(urma_buffer_count, 65536,
              "Number of buffers in the URMA buffer pool.");
 
@@ -398,6 +406,7 @@ bool InitPool() {
 // All pool buffers share the same segment, so we return g_pool_seg for any
 // pool address; the per-WR length selects the slice.
 urma_target_seg_t* GetPoolSegFor(void* buf) {
+    if ((GetUrmaConnectionMode() == UrmaConnectionMode::POOLED)) { return GetPooledMemorySegFor(buf); }
     if (g_skip_urma_init || !g_pool_seg || !g_pool_base) {
         return nullptr;
     }
@@ -416,6 +425,9 @@ static void GlobalRelease() {
     g_urma_available.store(false, butil::memory_order_release);
     if (!UrmaEndpoint::GlobalRelease()) {
         LOG(WARNING) << "Retain URMA services until resource shutdown completes";
+        return;
+    }
+    if ((GetUrmaConnectionMode() == UrmaConnectionMode::POOLED) && !ReleaseUrmaMemoryPools()) {
         return;
     }
     if ((g_pool && g_pool->outstanding.load(butil::memory_order_acquire) != 0) ||
@@ -470,6 +482,10 @@ static void GlobalRelease() {
 // ============================================================================
 
 static bool GlobalUrmaInitializeImpl() {
+    if (ConfigureUrmaConnectionMode() != 0) {
+        LOG(ERROR) << "Invalid urma_resource_mode: expected exclusive or pooled";
+        return false;
+    }
     if (BAIDU_UNLIKELY(g_skip_urma_init)) {
         g_urma_available.store(true, butil::memory_order_release);
         return true;
@@ -483,6 +499,36 @@ static bool GlobalUrmaInitializeImpl() {
         return false;
     }
 
+    const bool pooled = (GetUrmaConnectionMode() == UrmaConnectionMode::POOLED);
+    gflags::CommandLineFlagInfo count_info;
+    const size_t pool_count = pooled &&
+        gflags::GetCommandLineFlagInfo("urma_buffer_count", &count_info) &&
+        count_info.is_default ? 24000 : FLAGS_urma_buffer_count;
+    if (pooled) {
+    const int64_t rx_slots = int64_t(FLAGS_urma_io_jfr_cnt) * FLAGS_urma_io_rx_depth;
+    const int64_t tx_slots = int64_t(FLAGS_urma_io_jfs_cnt) * FLAGS_urma_io_sq_depth;
+    const int64_t pool_bytes = int64_t(FLAGS_urma_buffer_size) * pool_count +
+                              int64_t(64) * FLAGS_urma_header_buf_count +
+                              int64_t(URMA_CTP_BLOCK_SIZE) * FLAGS_urma_ctp_buf_count;
+    if (FLAGS_urma_io_jfs_cnt <= 0 || FLAGS_urma_io_jfr_cnt <= 0 ||
+        FLAGS_urma_io_sq_depth <= 0 || FLAGS_urma_io_rx_depth <= 0 ||
+        FLAGS_urma_io_sq_depth > 65535 || FLAGS_urma_io_rx_depth > 65535 ||
+        FLAGS_urma_buffer_size <= static_cast<int>(URMA_CTP_BLOCK_SIZE) ||
+        FLAGS_urma_buffer_size % 64 != 0 ||
+        pool_count <= 0 || FLAGS_urma_ctp_buf_count <= rx_slots ||
+        FLAGS_urma_header_buf_count < rx_slots + tx_slots ||
+        FLAGS_urma_memory_pool_limit_mb <= 0 ||
+        pool_bytes > int64_t(FLAGS_urma_memory_pool_limit_mb) * 1024 * 1024) {
+        LOG(ERROR) << "Invalid URMA queue, buffer, or poller configuration";
+        errno = EINVAL;
+        return false;
+    }
+
+        if (FLAGS_urma_use_polling || IsBondingDeviceName(FLAGS_urma_device.c_str())) {
+            errno = ENOTSUP;
+            return false;
+        }
+    }
     urma_init_attr_t init_attr{};
     const urma_status_t status = urma_init(&init_attr);
     if (status != URMA_SUCCESS && status != URMA_EEXIST) {
@@ -548,12 +594,33 @@ static bool GlobalUrmaInitializeImpl() {
         g_device = nullptr;
         return false;
     }
+    uint32_t selected = 0;
+    bool eid_found = FLAGS_urma_eid_index == -1;
+    if (FLAGS_urma_eid_index >= 0) {
+        for (uint32_t i = 0; i < eid_cnt; ++i) {
+            if (eids[i].eid_index == static_cast<uint32_t>(FLAGS_urma_eid_index)) {
+                selected = i;
+                eid_found = true;
+                break;
+            }
+        }
+    }
+    if (!eid_found) {
+        LOG(ERROR) << "URMA EID index unavailable or invalid: "
+                   << FLAGS_urma_eid_index << " device=" << device_name;
+        urma_free_eid_list(eids);
+        urma_free_device_list(devices);
+        g_device = nullptr;
+        return false;
+    }
+    LOG(INFO) << "URMA device=" << device_name
+              << " selected eid_index=" << eids[selected].eid_index;
     // Retain the exact EID used to create the context and advertise it in the
     // handshake. This matters for a bonding virtual device whose jetty can
     // carry a provider-selected physical EID.
-    g_local_eid = eids[0].eid;
+    g_local_eid = eids[selected].eid;
     g_has_local_eid = true;
-    g_context = urma_create_context(found, eids[0].eid_index);
+    g_context = urma_create_context(found, eids[selected].eid_index);
     urma_free_eid_list(eids);
     urma_free_device_list(devices);
     g_device = nullptr;
@@ -583,7 +650,7 @@ static bool GlobalUrmaInitializeImpl() {
             g_max_sge = FLAGS_urma_max_sge;
         }
     }
-    g_recv_block_size =
+    g_recv_block_size = pooled ? URMA_CTP_MAX_MESSAGE_SIZE - sizeof(UrmaMsgHeader) :
         static_cast<size_t>(FLAGS_urma_buffer_size) -
         sizeof(butil::IOBuf::Block);
 
@@ -596,6 +663,13 @@ static bool GlobalUrmaInitializeImpl() {
         return false;
     }
 
+    if (pooled) {
+        if (g_max_sge < 2 || IsUrmaBondingDevice() ||
+            !InitializeUrmaMemoryPools(g_context, FLAGS_urma_buffer_size,
+                pool_count, FLAGS_urma_header_buf_count, FLAGS_urma_ctp_buf_count)) {
+            return false;
+        }
+    } else {
     // Buffer pool.
     g_pool = new BufferPool();
     g_pool_buffer_size = static_cast<size_t>(FLAGS_urma_buffer_size);
@@ -620,6 +694,8 @@ static bool GlobalUrmaInitializeImpl() {
     butil::iobuf::blockmem_deallocate = PoolDeallocate;
     butil::SetDefaultBlockSize(g_pool_buffer_size);
 
+    }
+
     if (UrmaEndpoint::GlobalInitialize() != 0) {
         LOG(ERROR) << "Fail to initialize URMA endpoint resources";
         return false;
@@ -634,8 +710,9 @@ static bool GlobalUrmaInitializeImpl() {
     LOG(INFO) << "URMA initialized: device=" << device_name
               << " bonding=" << g_is_bonding_device
               << " max_sge=" << g_max_sge
-              << " buffer_size=" << g_pool_buffer_size
-              << " buffer_count=" << g_pool->buffer_count();
+              << " pooled=" << pooled
+              << " buffer_size=" << FLAGS_urma_buffer_size
+              << " buffer_count=" << pool_count;
     return true;
 }
 

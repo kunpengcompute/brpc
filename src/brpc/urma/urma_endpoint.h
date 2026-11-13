@@ -18,6 +18,7 @@
 #ifndef BRPC_URMA_ENDPOINT_H
 #define BRPC_URMA_ENDPOINT_H
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <ostream>
@@ -33,7 +34,7 @@
 
 #if BRPC_WITH_URMA
 
-#include "brpc/urma/urma_resource.h"
+#include "brpc/urma/urma_connection.h"
 #include "brpc/urma/urma_handshake.h"
 #include "brpc/urma/urma_handshake.pb.h"
 
@@ -44,6 +45,7 @@ class UrmaTransport;
 namespace urma {
 
 class UrmaHandshake;
+class UrmaConnection;
 struct ParsedHello;
 
 DECLARE_bool(urma_use_polling);
@@ -74,11 +76,12 @@ private:
 };
 
 // Per-Socket negotiation and brpc stream integration. Native resources live
-// behind the connection-resource interface.
+// behind the connection interface.
 class BAIDU_CACHELINE_ALIGNMENT UrmaEndpoint {
     friend class UrmaConnect;
+    friend class UrmaPooledConnection;
     friend class Socket;
-    friend class UrmaTransport;
+    friend class ::brpc::UrmaTransport;
     friend class UrmaHandshakeClientV2;
     friend class UrmaHandshakeServerV2;
     friend class UrmaHandshakeClientV3;
@@ -109,12 +112,6 @@ public:
 
     int WaitWritable(butil::atomic<int>* butex, int expected,
                      const timespec* deadline);
-    static UrmaConnectionHandle LookupConnectionResource(SocketId id);
-    static void OnReceived(SocketId id, const UrmaConnectionHandle& source,
-                           butil::IOBuf data);
-    static void OnResourceError(SocketId id, const UrmaConnectionHandle& source,
-                                int error);
-
     // For debug: dump endpoint state to @os.
     void DebugInfo(std::ostream& os,
                    butil::StringPiece connector = "\n") const;
@@ -180,8 +177,9 @@ private:
     static void* ProcessHandshakeAtClient(void* arg);
     static void* ProcessHandshakeAtServer(void* arg);
 
-    // Allocate / deallocate the per-connection URMA resources (JFCE/JFC/JFR/
-    // Jetty, plus the CQ socket). Returns 0 on success.
+    // Publish per-connection resources once. DeallocateResources logically
+    // closes without detaching; destruction/quiescent Reset releases ownership.
+    // AllocateResources returns 0 on success.
     int AllocateResources(UrmaConnectionRole role);
     void DeallocateResources();
 
@@ -197,11 +195,27 @@ private:
     // ACK. Keep those bytes in the URMA input processor and dispatch them only
     // after ESTABLISHED, matching the connection-ready boundary seen by user
     // code.
-    void DispatchReceivedBytes(SocketUniquePtr& s, ssize_t bytes);
-    void DispatchReceivedBytesLocked(SocketUniquePtr& s, ssize_t bytes);
-    UrmaConnectionHandle GetConnectionResource() const;
+    // Accept bytes only from the current, open URMA connection and append them
+    // to the input stream. Return false when the delivery is rejected.
+    bool AppendReceivedBytes(SocketUniquePtr&, const UrmaConnection*, butil::IOBuf);
+    // Parse accumulated input and return the last message for caller dispatch.
+    void ProcessReceivedBytes(SocketUniquePtr&, InputMessageClosure&);
+    // Forward on_bytes to the Endpoint using the already pinned Socket.
+    static bool OnReceivedBytes(SocketUniquePtr&, const UrmaConnection*, butil::IOBuf);
+    // Forward input readiness and return the last parsed message to the caller.
+    static void OnInputReady(SocketUniquePtr&, InputMessageClosure&);
+    // Resolve a receive error by SocketId; ignore sockets no longer using URMA.
+    static void OnRxError(SocketId, int);
+    // Report an asynchronous error only if its source is the current connection.
+    static void OnConnectionError(SocketId, const UrmaConnectionHandle&, int);
+    // Caller must keep the Socket alive. Reset requires quiescent old users.
+    UrmaConnection* BorrowConnection() const {
+        return _published_connection.load(std::memory_order_acquire);
+    }
+    UrmaConnectionHandle PinConnection() const;
 
     inline void TryReadOnTcp();
+    int SendFallbackHello(int version);
     void FallbackToTcp(UrmaTransport* transport, bool process_tcp);
     void FailHandshake(UrmaTransport* transport, int error,
                        const char* reason);
@@ -220,8 +234,13 @@ private:
     butil::atomic<int64_t> _pending_received_bytes{0};
     butil::Mutex _dispatch_mutex;
 
-    mutable butil::Mutex _resource_mutex;
-    UrmaConnectionHandle _connection_resource;
+    // Write once before release-publication; never detach on failure/fallback.
+    // Socket references pin this owner. Only destruction or quiescent Reset
+    // may release it. TX contexts retain their independent DMA/import owners.
+    UrmaConnectionHandle _connection;
+    std::atomic<UrmaConnection*> _published_connection{nullptr};
+    // Protected by _dispatch_mutex; prevents publication after logical close.
+    bool _connection_closed{false};
     InputMessengerProcessor _input_processor;
 
     // Butex for waking the handshake bthread parked in ReadFromFd.

@@ -35,6 +35,8 @@ class UrmaEndpoint;
 // then uses ApplyRemoteHello to size its send/recv windows and to drive
 // urma_import_seg / urma_import_jetty.
 struct ParsedHello {
+    bool pooled = false;
+    uint64_t socket_id = UINT64_MAX;
     uint32_t buffer_size = 0;      // peer recv buffer size in bytes (per WR)
     uint32_t recv_buffer_cnt = 0;  // peer recv buffer count (RQ depth - 1)
     uint32_t jetty_id = 0;         // peer jetty id
@@ -67,9 +69,13 @@ constexpr size_t HELLO_MSG_LEN_MIN = HELLO_PACKET_LEN;
 constexpr size_t HELLO_MSG_LEN_MAX = 4096;
 constexpr uint16_t HELLO_V2_VERSION = 2;
 constexpr uint16_t IMPL_V2_VERSION = 1;
+constexpr uint16_t IMPL_POOLED_VERSION = 2;
+constexpr size_t POOLED_BODY_LEN = HELLO_BODY_LEN + 8;
+constexpr size_t POOLED_PACKET_LEN = HELLO_PACKET_LEN + 8;
 
 // The serializable struct. Aligned so it can be reinterpreted as raw bytes.
 struct HelloMessage {
+    uint64_t socket_id = UINT64_MAX;
     uint16_t msg_len;       // total packet length (incl. magic)
     uint16_t hello_ver;
     uint16_t impl_ver;

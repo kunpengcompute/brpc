@@ -15,8 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef BRPC_URMA_RESOURCE_POOL_H
-#define BRPC_URMA_RESOURCE_POOL_H
+#ifndef BRPC_URMA_POOLED_RESOURCE_H
+#define BRPC_URMA_POOLED_RESOURCE_H
 
 #if BRPC_WITH_URMA
 #include <atomic>
@@ -28,7 +28,7 @@
 #include <tuple>
 #include <vector>
 #include "brpc/socket.h"
-#include "brpc/urma/urma_resource.h"
+#include "brpc/urma/urma_connection.h"
 #include "brpc/urma/urma_memory_pool.h"
 #include "butil/object_pool.h"
 #include "butil/synchronization/lock.h"
@@ -81,14 +81,14 @@ private:
     std::map<Key, Entry> _entries;
 };
 
-struct UrmaConnResource {
+struct UrmaPooledConnectionState {
     std::atomic<bool> failed{false};
     uint32_t local_jfr_index{0};
     urma_target_jetty_t* remote_jfr{nullptr};
     urma_target_seg_t* remote_seg{nullptr};
     std::shared_ptr<ImportedJfrCache> imports;
-    std::weak_ptr<UrmaConnectionResource> source;
-    ~UrmaConnResource();
+    std::weak_ptr<UrmaConnection> owner_connection;
+    ~UrmaPooledConnectionState();
 };
 
 struct TxBatch;
@@ -111,7 +111,7 @@ struct TxCompletionCtx {
     butil::IOBuf send_data;
     // A disconnected endpoint may disappear before DMA finishes. Keep its
     // imports, as well as its data, alive through the final CQE.
-    std::shared_ptr<UrmaConnResource> connection;
+    std::shared_ptr<UrmaPooledConnectionState> connection_state;
     uint16_t seq{0};
     uint8_t type{MSG_SMALL};
     bool header_in_send_data{false};
@@ -201,7 +201,7 @@ struct RxRecvCtx {
 // SocketUser's virtual base makes the slot type check safe (no struct punning).
 // The pool and the carrier Socket each hold a reference. A queued epoll callback
 // can therefore outlive pool shutdown without accessing a freed slot.
-class UrmaResourcePool;
+class UrmaPooledResource;
 struct UrmaIoSlot : public SocketUser {
     enum SlotType { JFS_SLOT, JFR_SLOT };
     explicit UrmaIoSlot(SlotType t, uint32_t i) : type(t), index(i) {}
@@ -210,8 +210,8 @@ struct UrmaIoSlot : public SocketUser {
     void Release() { if (refs.fetch_sub(1) == 1) { delete this; } }
     void BeforeRecycle(Socket*) override { Release(); }
     std::weak_ptr<void> callback_owner;
-    UrmaResourcePool* pool{nullptr};
-    UrmaResourceCallbacks callbacks;
+    UrmaPooledResource* pool{nullptr};
+    UrmaConnectionCallbacks callbacks;
     const SlotType type;
     const uint32_t index;
     urma_jfc_t* jfc{nullptr};
@@ -222,12 +222,12 @@ struct UrmaIoSlot : public SocketUser {
 private:
     std::atomic<uint32_t> refs{1};
 };
-class UrmaResourcePool;
+class UrmaPooledResource;
 struct UrmaJfsSlot;
 struct UrmaWriteWaiter {
-    UrmaWriteWaiter(UrmaResourcePool*, butil::atomic<int>*, UrmaJfsSlot* = nullptr);
+    UrmaWriteWaiter(UrmaPooledResource*, butil::atomic<int>*, UrmaJfsSlot* = nullptr);
     ~UrmaWriteWaiter();
-    UrmaResourcePool* const pool;
+    UrmaPooledResource* const pool;
     UrmaJfsSlot* const slot;
     butil::atomic<int>* const butex;
     UrmaWriteWaiter* prev{nullptr};
@@ -282,13 +282,13 @@ struct UrmaJfrSlot : public UrmaIoSlot {
 
 // Resource ownership and selection are independent of endpoint parsing. The
 // adapter owns event integration; policy subclasses can replace slot selection.
-class UrmaResourcePool {
+class UrmaPooledResource {
 public:
     struct EventAdapter {
         std::function<int(UrmaIoSlot*)> attach;
         std::function<void(UrmaIoSlot*)> detach;
     };
-    virtual ~UrmaResourcePool();
+    virtual ~UrmaPooledResource();
     virtual int Initialize(urma_context_t*, const EventAdapter&);
     virtual bool Shutdown();
     virtual uint32_t PickJfr();
@@ -328,11 +328,11 @@ private:
     int CreateCompletionQueue(urma_context_t*, UrmaIoSlot*, uint32_t);
     EventAdapter _events;
 };
-extern UrmaResourcePool* g_urma_pool;
-typedef UrmaResourcePool* (*UrmaResourcePoolFactory)();
+extern UrmaPooledResource* g_urma_pool;
+typedef UrmaPooledResource* (*UrmaPooledResourceFactory)();
 // Configure a replacement before global initialization (not thread safe).
-bool SetUrmaResourcePoolFactory(UrmaResourcePoolFactory factory);
-UrmaResourcePool* CreateUrmaResourcePool();
+bool SetUrmaPooledResourceFactory(UrmaPooledResourceFactory factory);
+UrmaPooledResource* CreateUrmaPooledResource();
 
 }  // namespace urma
 }  // namespace brpc

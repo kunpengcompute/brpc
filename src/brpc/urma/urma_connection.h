@@ -15,8 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef BRPC_URMA_RESOURCE_H
-#define BRPC_URMA_RESOURCE_H
+#ifndef BRPC_URMA_CONNECTION_H
+#define BRPC_URMA_CONNECTION_H
 
 #include <array>
 #include <cstddef>
@@ -29,20 +29,18 @@
 #include "bthread/types.h"
 #include "butil/atomicops.h"
 #include "butil/iobuf.h"
-#include "brpc/socket_id.h"
+#include "brpc/socket.h"
 
 #if BRPC_WITH_URMA
 namespace brpc {
 namespace urma {
 
-struct UrmaDeferredMessage;
-struct UrmaRxParseBatch;
-class UrmaConnectionResource;
-class UrmaResourceProvider;
-using UrmaConnectionHandle = std::shared_ptr<UrmaConnectionResource>;
+class UrmaConnection;
+class UrmaConnectionProvider;
+using UrmaConnectionHandle = std::shared_ptr<UrmaConnection>;
 
-enum class UrmaResourceMode : uint8_t { EXCLUSIVE = 0, POOLED = 1 };
-enum class UrmaPeerResourceKind : uint8_t { JETTY = 0, JFR = 1 };
+enum class UrmaConnectionMode : uint8_t { EXCLUSIVE = 0, POOLED = 1 };
+enum class UrmaReceiveTargetKind : uint8_t { JETTY = 0, JFR = 1 };
 enum class UrmaReceiveCountKind : uint8_t {
     CONNECTION_CREDIT = 0, SHARED_JFR_DEPTH = 1
 };
@@ -64,12 +62,12 @@ struct UrmaSegmentDescription {
 };
 
 // Host-order description, never serialized by copying this struct.
-struct UrmaResourceDescription {
-    UrmaResourceMode mode = UrmaResourceMode::EXCLUSIVE;
-    UrmaPeerResourceKind resource_kind = UrmaPeerResourceKind::JETTY;
+struct UrmaConnectionDescription {
+    UrmaConnectionMode mode = UrmaConnectionMode::EXCLUSIVE;
+    UrmaReceiveTargetKind receive_target_kind = UrmaReceiveTargetKind::JETTY;
     UrmaReceiveCountKind receive_count_kind =
         UrmaReceiveCountKind::CONNECTION_CREDIT;
-    uint32_t resource_id = 0;
+    uint32_t receive_target_id = 0;
     std::array<uint8_t, 16> eid{};
     uint32_t uasid = 0;
     uint8_t tp_type = 0;
@@ -80,34 +78,27 @@ struct UrmaResourceDescription {
     SocketId socket_id = INVALID_SOCKET_ID;
 };
 
-struct UrmaResourceCallbacks {
-    void (*on_fragment)(SocketId, uint32_t, uint16_t, butil::IOBuf,
-                        UrmaDeferredMessage*, UrmaRxParseBatch*) = nullptr;
-    void (*flush_batch)(UrmaRxParseBatch*, UrmaDeferredMessage*) = nullptr;
-    UrmaConnectionHandle (*lookup_connection)(SocketId id) = nullptr;
-    void (*on_received)(SocketId id,
-                        const UrmaConnectionHandle& source,
-                        butil::IOBuf data) = nullptr;
+// Both backends deliver ordered bytes using an already pinned Socket.
+struct UrmaConnectionCallbacks {
+    bool (*on_bytes)(SocketUniquePtr&, const UrmaConnection*, butil::IOBuf) = nullptr;
+    void (*on_input_ready)(SocketUniquePtr&, InputMessageClosure&) = nullptr;
     void (*on_rx_error)(SocketId, int) = nullptr;
-    void (*on_error)(SocketId id,
-                     const UrmaConnectionHandle& source,
-                     int error) = nullptr;
+    void (*on_error)(SocketId, const UrmaConnectionHandle&, int) = nullptr;
 };
 
-class UrmaConnectionResource {
+class UrmaConnection {
 public:
-    virtual ~UrmaConnectionResource() = default;
-    virtual int GetLocalDescription(UrmaResourceDescription* out) const = 0;
-    virtual int BindPeer(const UrmaResourceDescription& peer) = 0;
+    virtual ~UrmaConnection() = default;
+    virtual int GetLocalDescription(UrmaConnectionDescription* out) const = 0;
+    virtual int ImportPeer(const UrmaConnectionDescription& peer) = 0;
     // Consume exactly the accepted continuous prefix from the caller's IOBufs.
     // Retain accepted data until completion; leave the unaccepted suffix in
     // its original IOBufs, including when a later WR fails. Return a positive
     // prefix after partial success; only an empty input returns zero.
-    // The caller serializes data sends and holds a resource handle throughout.
-    virtual ssize_t Send(butil::IOBuf** data, size_t ndata) = 0;
-    virtual bool AcceptsReceive(uint32_t) const { return false; }
+    // The caller serializes data sends and pins the owning Socket or connection.
+    virtual ssize_t CutFromIOBufList(butil::IOBuf** data, size_t ndata) = 0;
     virtual bool IsWritable() const = 0;
-    // After binding, wait on the owning Socket's epollout butex only. The
+    // After importing the peer, wait on the owning Socket's epollout butex only. The
     // caller reads expected before checking IsWritable; no pointer is retained.
     virtual int WaitWritable(butil::atomic<int>* butex, int expected,
                              const timespec* deadline) = 0;
@@ -115,12 +106,13 @@ public:
     // sends/callbacks. Their handles retain hardware and buffers until exit.
     virtual void Close() = 0;
     virtual void DebugInfo(std::ostream& out) const = 0;
+
 };
 
-class UrmaResourceProvider {
+class UrmaConnectionProvider {
 public:
-    virtual ~UrmaResourceProvider() = default;
-    virtual int Initialize(const UrmaResourceCallbacks& callbacks) = 0;
+    virtual ~UrmaConnectionProvider() = default;
+    virtual int Initialize(const UrmaConnectionCallbacks& callbacks) = 0;
     virtual int CreateConnection(const UrmaConnectionOptions& options,
                                  UrmaConnectionHandle* out) = 0;
     virtual int InitializePollingMode(bthread_tag_t tag,
@@ -131,18 +123,20 @@ public:
     virtual bool Shutdown() = 0;
 };
 
-bool UsingPooledUrmaResources();
-int CreatePooledUrmaResourceProvider(std::unique_ptr<UrmaResourceProvider>* out);
+// Parse the startup-only mode before initializing device and memory services.
+int ConfigureUrmaConnectionMode();
+// Read the mode fixed by common initialization; later flag changes have no effect.
+UrmaConnectionMode GetUrmaConnectionMode();
 
 // Creates an uninitialized provider; unsupported modes return ENOTSUP.
-int CreateUrmaResourceProvider(UrmaResourceMode mode,
-                              std::unique_ptr<UrmaResourceProvider>* out);
+int CreateUrmaConnectionProvider(UrmaConnectionMode mode,
+                              std::unique_ptr<UrmaConnectionProvider>* out);
 
 // Process owner. Initialized after the common device and memory services.
-int InitializeUrmaResourceProvider(const UrmaResourceCallbacks& callbacks);
-UrmaResourceProvider* GetUrmaResourceProvider();
-bool ShutdownUrmaResourceProvider();
+int InitializeUrmaConnectionProvider(const UrmaConnectionCallbacks& callbacks);
+UrmaConnectionProvider* GetUrmaConnectionProvider();
+bool ShutdownUrmaConnectionProvider();
 }  // namespace urma
 }  // namespace brpc
 #endif  // BRPC_WITH_URMA
-#endif  // BRPC_URMA_RESOURCE_H
+#endif  // BRPC_URMA_CONNECTION_H

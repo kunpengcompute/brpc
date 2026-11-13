@@ -39,18 +39,26 @@
 #include "bthread/butex.h"
 
 
+#include "bthread/task_group.h"
 #include "brpc/input_messenger.h"
 #include "brpc/socket.h"
 #include "brpc/urma/urma_handshake.h"
 #include "brpc/urma/urma_handshake.pb.h"
 #include "brpc/urma/urma_helper.h"
+
 #include "brpc/urma_transport.h"
 
 DECLARE_int32(task_group_ntags);
 
+namespace bthread {
+EXTERN_BAIDU_VOLATILE_THREAD_LOCAL(TaskGroup*, tls_task_group);
+// Same internal cleanup primitive used by TaskGroup::task_runner.
+extern void return_keytable(bthread_keytable_pool_t*, KeyTable*);
+}
+
+
 namespace brpc {
 namespace urma {
-
 // ---- Constants shared with the handshake module ----
 static const int WAIT_TIMEOUT_MS = 50;
 static const size_t HELLO_ACK_LEN = 4;
@@ -79,7 +87,14 @@ UrmaEndpoint::~UrmaEndpoint() {
 
 void UrmaEndpoint::Reset() {
     DeallocateResources();
+    // Destroy hardware/resources outside the parsing lock.
+    UrmaConnectionHandle retired_connection;
     BAIDU_SCOPED_LOCK(_dispatch_mutex);
+    // Socket::Revive waits for old Socket users before Transport::Reset.
+    // Never invoke Reset concurrently with a borrowed connection user.
+    _published_connection.store(nullptr, std::memory_order_release);
+    retired_connection.swap(_connection);
+    _connection_closed = false;
     _state = UNINIT;
     _handshake_version = 0;
     _pending_received_bytes.store(0, butil::memory_order_relaxed);
@@ -150,32 +165,37 @@ int UrmaEndpoint::WriteToFd(void* data, size_t len) {
 
 void UrmaEndpoint::MakeLocalParsedHello(ParsedHello* out) const {
     *out = ParsedHello{};
-    const auto resource = GetConnectionResource();
-    UrmaResourceDescription description;
-    if (!resource || resource->GetLocalDescription(&description) != 0) return;
-    out->buffer_size = description.recv_buffer_size;
-    out->recv_buffer_cnt = description.recv_buffer_count;
-    out->jetty_id = description.resource_id;
-    std::memcpy(out->eid, description.eid.data(), 16);
-    out->uasid = description.uasid;
-    out->tp_type = description.tp_type;
-    std::memcpy(out->seg_eid, description.segment.eid.data(), 16);
-    out->seg_uasid = description.segment.uasid;
-    out->seg_va = description.segment.va;
-    out->seg_len = description.segment.length;
-    out->seg_token_id = description.segment.token_id;
+    auto* connection = BorrowConnection();
+    UrmaConnectionDescription local_description;
+    if (!connection || connection->GetLocalDescription(&local_description) != 0) return;
+    out->buffer_size = local_description.recv_buffer_size;
+    out->recv_buffer_cnt = local_description.recv_buffer_count;
+    out->jetty_id = local_description.receive_target_id;
+    out->pooled = local_description.mode == UrmaConnectionMode::POOLED;
+    out->socket_id = local_description.socket_id;
+    std::memcpy(out->eid, local_description.eid.data(), 16);
+    out->uasid = local_description.uasid;
+    out->tp_type = local_description.tp_type;
+    std::memcpy(out->seg_eid, local_description.segment.eid.data(), 16);
+    out->seg_uasid = local_description.segment.uasid;
+    out->seg_va = local_description.segment.va;
+    out->seg_len = local_description.segment.length;
+    out->seg_token_id = local_description.segment.token_id;
 }
 
 void UrmaEndpoint::FillLocalHelloV2(v2_wire::HelloMessage* out) const {
     *out = v2_wire::HelloMessage{};  // value-initialize
-    out->msg_len = v2_wire::HELLO_PACKET_LEN;
+    out->msg_len = (GetUrmaConnectionMode() == UrmaConnectionMode::POOLED) ? v2_wire::POOLED_PACKET_LEN :
+                                               v2_wire::HELLO_PACKET_LEN;
     out->hello_ver = v2_wire::HELLO_V2_VERSION;
-    out->impl_ver = v2_wire::IMPL_V2_VERSION;
+    out->impl_ver = (GetUrmaConnectionMode() == UrmaConnectionMode::POOLED) ? v2_wire::IMPL_POOLED_VERSION :
+                                                v2_wire::IMPL_V2_VERSION;
     ParsedHello p;
     MakeLocalParsedHello(&p);
     out->buffer_size = p.buffer_size;
     out->recv_buffer_cnt = p.recv_buffer_cnt;
     out->jetty_id = p.jetty_id;
+    out->socket_id = p.socket_id;
     std::memcpy(out->eid, p.eid, 16);
     out->uasid = p.uasid;
     out->tp_type = p.tp_type;
@@ -192,6 +212,10 @@ void UrmaEndpoint::FillLocalHelloV3(UrmaHello* out) const {
     out->set_buffer_size(p.buffer_size);
     out->set_recv_buffer_cnt(p.recv_buffer_cnt);
     out->set_jetty_id(p.jetty_id);
+    if (p.pooled) {
+        out->set_socket_id(p.socket_id);
+        out->set_resource_mode(v2_wire::IMPL_POOLED_VERSION);
+    }
     out->set_eid(p.eid, 16);
     out->set_uasid(p.uasid);
     out->set_tp_type(p.tp_type);
@@ -256,6 +280,14 @@ int UrmaEndpoint::ReadAndParseHelloV3(ParsedHello* out, bool* negotiated) {
     if (msg.eid().size() != 16 || msg.seg_eid().size() != 16) {
         return 0;
     }
+    const uint32_t mode = msg.resource_mode();
+    const bool pooled = mode == 2;
+    if ((mode != 1 && mode != 2) ||
+        (pooled && !msg.has_socket_id()) || (!pooled && msg.has_socket_id())) {
+        errno = EPROTO; return -1;
+    }
+    out->pooled = pooled;
+    out->socket_id = pooled ? msg.socket_id() : INVALID_SOCKET_ID;
     out->buffer_size = msg.buffer_size();
     out->recv_buffer_cnt = msg.recv_buffer_cnt();
     out->jetty_id = msg.jetty_id();
@@ -284,132 +316,136 @@ int UrmaEndpoint::AllocateResources(UrmaConnectionRole role) {
     options.role = role;
     options.tag = bthread_self_tag();
     options.keytable_pool = _socket->keytable_pool();
-    UrmaResourceProvider* provider = GetUrmaResourceProvider();
+    UrmaConnectionProvider* provider = GetUrmaConnectionProvider();
     if (!provider) { errno = ENODEV; return -1; }
-    UrmaConnectionHandle resource;
-    if (provider->CreateConnection(options, &resource) != 0) return -1;
-    BAIDU_SCOPED_LOCK(_resource_mutex);
-    _connection_resource.swap(resource);
+    UrmaConnectionHandle connection;
+    if (provider->CreateConnection(options, &connection) != 0) return -1;
+    BAIDU_SCOPED_LOCK(_dispatch_mutex);
+    if (_connection_closed) { errno = ECANCELED; return -1; }
+    if (_connection) { errno = EALREADY; return -1; }
+    _connection.swap(connection);
+    _published_connection.store(_connection.get(), std::memory_order_release);
     return 0;
 }
 
 void UrmaEndpoint::DeallocateResources() {
-    UrmaConnectionHandle resource;
+    UrmaConnection* connection;
     {
-        BAIDU_SCOPED_LOCK(_resource_mutex);
-        resource.swap(_connection_resource);
+        BAIDU_SCOPED_LOCK(_dispatch_mutex);
+        _connection_closed = true;
+        connection = BorrowConnection();
     }
-    if (resource) resource->Close();
+    // Logical close only. Keeping the binding lets Socket-pinned callbacks
+    // safely borrow it even when they race failure or TCP fallback.
+    if (connection) connection->Close();
 }
 
 
 int UrmaEndpoint::ImportPeer(const ParsedHello& peer) {
-    UrmaResourceDescription description;
-    description.recv_buffer_size = peer.buffer_size;
-    description.recv_buffer_count = peer.recv_buffer_cnt;
-    description.resource_id = peer.jetty_id;
-    std::memcpy(description.eid.data(), peer.eid, 16);
-    description.uasid = peer.uasid;
-    description.tp_type = peer.tp_type;
-    std::memcpy(description.segment.eid.data(), peer.seg_eid, 16);
-    description.segment.uasid = peer.seg_uasid;
-    description.segment.va = peer.seg_va;
-    description.segment.length = peer.seg_len;
-    description.segment.token_id = peer.seg_token_id;
-    const auto resource = GetConnectionResource();
-    if (!resource) { errno = ENOTCONN; return -1; }
-    return resource->BindPeer(description);
+    UrmaConnectionDescription peer_description;
+    peer_description.recv_buffer_size = peer.buffer_size;
+    peer_description.recv_buffer_count = peer.recv_buffer_cnt;
+    peer_description.receive_target_id = peer.jetty_id;
+    if (peer.pooled) {
+        peer_description.mode = UrmaConnectionMode::POOLED;
+        peer_description.receive_target_kind = UrmaReceiveTargetKind::JFR;
+        peer_description.receive_count_kind = UrmaReceiveCountKind::SHARED_JFR_DEPTH;
+        peer_description.has_socket_id = true;
+        peer_description.socket_id = peer.socket_id;
+    }
+    std::memcpy(peer_description.eid.data(), peer.eid, 16);
+    peer_description.uasid = peer.uasid;
+    peer_description.tp_type = peer.tp_type;
+    std::memcpy(peer_description.segment.eid.data(), peer.seg_eid, 16);
+    peer_description.segment.uasid = peer.seg_uasid;
+    peer_description.segment.va = peer.seg_va;
+    peer_description.segment.length = peer.seg_len;
+    peer_description.segment.token_id = peer.seg_token_id;
+    auto* connection = BorrowConnection();
+    if (!connection) { errno = ENOTCONN; return -1; }
+    return connection->ImportPeer(peer_description);
 }
 
 
 ssize_t UrmaEndpoint::CutFromIOBufList(butil::IOBuf** from, size_t ndata) {
-    const auto resource = GetConnectionResource();
-    if (!resource) { errno = ENOTCONN; return -1; }
-    return resource->Send(from, ndata);
+    auto* connection = BorrowConnection();
+    if (!connection) { errno = ENOTCONN; return -1; }
+    return connection->CutFromIOBufList(from, ndata);
 }
 
 bool UrmaEndpoint::IsWritable() const {
-    const auto resource = GetConnectionResource();
-    return resource && resource->IsWritable();
+    auto* connection = BorrowConnection();
+    return connection && connection->IsWritable();
 }
 
 int UrmaEndpoint::WaitWritable(butil::atomic<int>* butex, int expected,
                               const timespec* deadline) {
-    const auto resource = GetConnectionResource();
-    if (!resource) { errno = ENOTCONN; return -1; }
-    return resource->WaitWritable(butex, expected, deadline);
+    auto* connection = BorrowConnection();
+    if (!connection) { errno = ENOTCONN; return -1; }
+    return connection->WaitWritable(butex, expected, deadline);
 }
 
-UrmaConnectionHandle UrmaEndpoint::GetConnectionResource() const {
-    BAIDU_SCOPED_LOCK(_resource_mutex);
-    return _connection_resource;
+UrmaConnectionHandle UrmaEndpoint::PinConnection() const {
+    // An acquire load makes the immutable owner visible. Normal RX/TX uses
+    // BorrowConnection to avoid touching the shared reference count.
+    return BorrowConnection() ? _connection : UrmaConnectionHandle();
 }
 
-UrmaConnectionHandle UrmaEndpoint::LookupConnectionResource(SocketId id) {
-    SocketUniquePtr socket;
-    if (Socket::Address(id, &socket) != 0 || socket->Failed() ||
-        socket->socket_mode() != SOCKET_MODE_URMA) return {};
-    auto* transport = static_cast<UrmaTransport*>(socket->_transport.get());
-    if (!transport) return {};
-    const auto resource = transport->_urma_ep ?
-        transport->_urma_ep->GetConnectionResource() : UrmaConnectionHandle();
-    UrmaResourceDescription description;
-    if (!resource || resource->GetLocalDescription(&description) != 0) return {};
-    return resource;
-}
-
-void UrmaEndpoint::OnReceived(SocketId id, const UrmaConnectionHandle& source,
-                              butil::IOBuf data) {
-    SocketUniquePtr socket;
-    if (Socket::Address(id, &socket) != 0 || socket->Failed() ||
-        socket->socket_mode() != SOCKET_MODE_URMA) return;
-    auto* transport = static_cast<UrmaTransport*>(socket->_transport.get());
-    if (!transport) return;
-    UrmaEndpoint* endpoint = transport->_urma_ep;
-    if (!endpoint) return;
-    BAIDU_SCOPED_LOCK(endpoint->_dispatch_mutex);
-    if (!source || source != endpoint->GetConnectionResource()) return;
-    const size_t length = data.size();
-    endpoint->_input_processor.read_buf().append(data.movable());
-    endpoint->DispatchReceivedBytesLocked(socket, length);
-}
-
-void UrmaEndpoint::OnResourceError(SocketId id, const UrmaConnectionHandle& source,
-                                   int error) {
-    SocketUniquePtr socket;
-    if (Socket::Address(id, &socket) != 0 || socket->Failed() ||
-        socket->socket_mode() != SOCKET_MODE_URMA) return;
-    auto* transport = static_cast<UrmaTransport*>(socket->_transport.get());
-    if (!transport) return;
-    UrmaEndpoint* endpoint = transport->_urma_ep;
-    if (!endpoint || !source || source != endpoint->GetConnectionResource()) return;
-    socket->SetFailed(error, "URMA resource failure");
-}
-
-void UrmaEndpoint::DispatchReceivedBytes(SocketUniquePtr& s, ssize_t bytes) {
+bool UrmaEndpoint::AppendReceivedBytes(SocketUniquePtr& socket,
+                                        const UrmaConnection* expected_connection,
+                                        butil::IOBuf data) {
     BAIDU_SCOPED_LOCK(_dispatch_mutex);
-    DispatchReceivedBytesLocked(s, bytes);
+    const State state = _state.load(butil::memory_order_acquire);
+    if (!expected_connection || _connection_closed || state == FAILED || state == FALLBACK_TCP ||
+        socket->Failed() || expected_connection != BorrowConnection()) return false;
+    const size_t bytes = data.size();
+    _input_processor.read_buf().append(data.movable());
+    _pending_received_bytes.fetch_add(bytes);
+    return true;
 }
 
-void UrmaEndpoint::DispatchReceivedBytesLocked(SocketUniquePtr& s, ssize_t bytes) {
-    if (bytes > 0) _pending_received_bytes.fetch_add(bytes, butil::memory_order_relaxed);
-    if (_state.load(butil::memory_order_acquire) != ESTABLISHED) return;
-    const int64_t pending = _pending_received_bytes.exchange(0, butil::memory_order_acq_rel);
-    if (pending <= 0 || s->Failed()) return;
-    if (!s->user()) {
-        LOG(ERROR) << "URMA socket has no InputMessenger: " << s->description();
-        return;
-    }
-    const int64_t received_us = butil::cpuwide_time_us();
-    const int64_t base_realtime = butil::gettimeofday_us() - received_us;
-    InputMessageClosure last_msg;
-    _input_processor.ProcessNewMessage(pending, false, received_us,
-                                       base_realtime, last_msg);
+void UrmaEndpoint::ProcessReceivedBytes(SocketUniquePtr& socket,
+                                        InputMessageClosure& last_msg) {
+    BAIDU_SCOPED_LOCK(_dispatch_mutex);
+    if (_connection_closed ||
+        _state.load(butil::memory_order_acquire) != ESTABLISHED || socket->Failed()) return;
+    const int64_t pending = _pending_received_bytes.exchange(0);
+    if (pending <= 0 || !socket->user()) return;
+    const int64_t now = butil::cpuwide_time_us();
+    _input_processor.ProcessNewMessage(pending, false, now,
+        butil::gettimeofday_us() - now, last_msg);
 }
 
-// ============================================================================
-// OnNewDataFromTcp: edge-triggered dispatcher.
-// ============================================================================
+bool UrmaEndpoint::OnReceivedBytes(SocketUniquePtr& socket,
+                                    const UrmaConnection* expected_connection, butil::IOBuf data) {
+    if (!socket->_transport || socket->socket_mode() != SOCKET_MODE_URMA) return false;
+    auto* ep = static_cast<UrmaTransport*>(socket->_transport.get())->_urma_ep;
+    return ep && ep->AppendReceivedBytes(socket, expected_connection, data.movable());
+}
+
+void UrmaEndpoint::OnInputReady(SocketUniquePtr& socket, InputMessageClosure& last_msg) {
+    if (!socket->_transport || socket->socket_mode() != SOCKET_MODE_URMA) return;
+    auto* ep = static_cast<UrmaTransport*>(socket->_transport.get())->_urma_ep;
+    if (ep) ep->ProcessReceivedBytes(socket, last_msg);
+}
+
+void UrmaEndpoint::OnRxError(SocketId id, int error) {
+    SocketUniquePtr socket;
+    if (Socket::Address(id, &socket) == 0 && !socket->Failed() &&
+        socket->socket_mode() == SOCKET_MODE_URMA)
+        socket->SetFailed(error, "URMA receive queue failure");
+}
+
+void UrmaEndpoint::OnConnectionError(SocketId id, const UrmaConnectionHandle& expected_connection,
+                                      int error) {
+    SocketUniquePtr socket;
+    if (Socket::Address(id, &socket) != 0 || socket->Failed() ||
+        !socket->_transport || socket->socket_mode() != SOCKET_MODE_URMA) return;
+    auto* ep = static_cast<UrmaTransport*>(socket->_transport.get())->_urma_ep;
+    if (ep && expected_connection && expected_connection.get() == ep->BorrowConnection())
+        socket->SetFailed(error, "URMA connection failure");
+}
+
 
 static void TryReadOnTcpDuringUrmaEst(Socket* socket);
 
@@ -426,7 +462,7 @@ void UrmaEndpoint::OnNewDataFromTcp(Socket* m) {
         InputMessenger::OnNewMessages(m);
         return;
     }
-    int progress = 0;
+    int progress = Socket::PROGRESS_INIT;
     while (true) {
         const State state =
             ep->_state.load(butil::memory_order_acquire);
@@ -452,15 +488,12 @@ void UrmaEndpoint::OnNewDataFromTcp(Socket* m) {
                 } else {
                     s.release();
                 }
-                return;
             }
             // Client side: handled by ProcessHandshakeAtClient.
-            return;
         } else if (state < ESTABLISHED) {
             // During handshake: wake the handshake bthread parked in ReadFromFd.
             ep->_read_butex->fetch_add(1, butil::memory_order_release);
             bthread::butex_wake(ep->_read_butex);
-            return;
         } else if (state == FALLBACK_TCP) {
             InputMessenger::OnNewMessages(m);
             return;
@@ -475,6 +508,13 @@ void UrmaEndpoint::OnNewDataFromTcp(Socket* m) {
 }
 
 inline void UrmaEndpoint::TryReadOnTcp() {
+    if ((GetUrmaConnectionMode() == UrmaConnectionMode::POOLED)) {
+        // Recheck an EOF consumed as a handshake notification through the
+        // Socket event owner, never start a concurrent TCP reader.
+        Socket::OnInputEvent(reinterpret_cast<void*>(_socket->id()), 0,
+                             BTHREAD_ATTR_NORMAL);
+        return;
+    }
     if (_state.load(butil::memory_order_acquire) == FALLBACK_TCP) {
         InputMessenger::OnNewMessages(_socket);
     }
@@ -504,6 +544,27 @@ static void TryReadOnTcpDuringUrmaEst(Socket* socket) {
             return;
         }
     }
+}
+
+int UrmaEndpoint::SendFallbackHello(int version) {
+    // A complete, zero-resource Hello rejects URMA without leaving protocol
+    // bytes in the TCP stream. No ACK follows this rejection response.
+    if (version == 2) {
+        v2_wire::HelloMessage hello{};
+        hello.msg_len = v2_wire::HELLO_PACKET_LEN;
+        hello.hello_ver = v2_wire::HELLO_V2_VERSION;
+        hello.impl_ver = v2_wire::IMPL_V2_VERSION;
+        uint8_t packet[v2_wire::HELLO_PACKET_LEN]{};
+        std::memcpy(packet, "URMA", 4);
+        hello.Serialize(packet + 4);
+        return WriteToFd(packet, sizeof(packet));
+    }
+    UrmaHello hello;
+    FillLocalHelloV3(&hello);
+    hello.set_jetty_id(0);
+    hello.clear_socket_id();
+    hello.clear_resource_mode();
+    return WriteHelloV3(hello);
 }
 
 void UrmaEndpoint::FallbackToTcp(UrmaTransport* transport, bool process_tcp) {
@@ -570,6 +631,17 @@ void* UrmaEndpoint::ProcessHandshakeAtClient(void* arg) {
         ep->FallbackToTcp(tp, true);
         return nullptr;
     }
+    if (remote.pooled != (GetUrmaConnectionMode() == UrmaConnectionMode::POOLED)) {
+        // A peer that offered valid resources is waiting for an ACK.
+        uint32_t rejected = 0;
+        if (ep->WriteToFd(&rejected, HELLO_ACK_LEN) < 0) {
+            ep->FailHandshake(tp, errno ? errno : EIO, "send fallback ack");
+            return nullptr;
+        }
+        LOG(INFO) << "URMA resource mode mismatch: client falling back to TCP";
+        ep->FallbackToTcp(tp, true);
+        return nullptr;
+    }
     ep->_state = C_IMPORT_PEER;
     if (ep->ImportPeer(remote) < 0) {
         const int saved_errno = errno ? errno : EIO;
@@ -586,7 +658,11 @@ void* UrmaEndpoint::ProcessHandshakeAtClient(void* arg) {
     }
     tp->_urma_state = UrmaTransport::URMA_ON;
     ep->_state = ESTABLISHED;
-    ep->DispatchReceivedBytes(s, 0);
+    {
+        InputMessageClosure last_msg;
+        ep->ProcessReceivedBytes(s, last_msg);
+    }
+    if ((GetUrmaConnectionMode() == UrmaConnectionMode::POOLED)) ep->TryReadOnTcp();
     return nullptr;
 }
 
@@ -619,6 +695,15 @@ void* UrmaEndpoint::ProcessHandshakeAtServer(void* arg) {
     }
     if (!negotiated) {
         ep->FailHandshake(tp, EPROTO, "invalid client hello");
+        return nullptr;
+    }
+    if (remote.pooled != (GetUrmaConnectionMode() == UrmaConnectionMode::POOLED)) {
+        LOG(INFO) << "URMA resource mode mismatch: server falling back to TCP";
+        if (ep->SendFallbackHello(hs->ProtocolVersion()) < 0) {
+            ep->FailHandshake(tp, errno ? errno : EIO, "send fallback hello");
+            return nullptr;
+        }
+        ep->FallbackToTcp(tp, true);
         return nullptr;
     }
     ep->_state = S_ALLOC_RES;
@@ -657,7 +742,11 @@ void* UrmaEndpoint::ProcessHandshakeAtServer(void* arg) {
         }
         tp->_urma_state = UrmaTransport::URMA_ON;
         ep->_state = ESTABLISHED;
-        ep->DispatchReceivedBytes(s, 0);
+        {
+            InputMessageClosure last_msg;
+            ep->ProcessReceivedBytes(s, last_msg);
+        }
+        if ((GetUrmaConnectionMode() == UrmaConnectionMode::POOLED)) ep->TryReadOnTcp();
     } else {
         ep->FallbackToTcp(tp, true);
     }
@@ -683,6 +772,11 @@ void UrmaConnect::StartConnect(const Socket* socket,
         return;
     }
     if (!tp->_urma_ep || !IsUrmaAvailable()) {
+        if ((GetUrmaConnectionMode() == UrmaConnectionMode::POOLED)) {
+            _error = ENODEV;
+            Run();
+            return;
+        }
         // Fall back to TCP immediately.
         if (tp->_urma_ep) {
             tp->_urma_ep->_state = UrmaEndpoint::FALLBACK_TCP;
@@ -744,34 +838,35 @@ std::string UrmaEndpoint::GetStateStr() const {
 void UrmaEndpoint::DebugInfo(std::ostream& os, butil::StringPiece) const {
     os << "state=" << GetStateStr() << " handshake_version=" << _handshake_version
        << " read_buf=" << _input_processor.read_buf().size();
-    const auto resource = GetConnectionResource();
-    if (resource) resource->DebugInfo(os);
+    auto* connection = BorrowConnection();
+    if (connection) connection->DebugInfo(os);
 }
 
 int UrmaEndpoint::PollingModeInitialize(
         bthread_tag_t tag, std::function<void()> callback,
         std::function<void()> init_fn, std::function<void()> release_fn) {
     if (!FLAGS_urma_use_polling) return 0;
-    auto* provider = GetUrmaResourceProvider();
+    auto* provider = GetUrmaConnectionProvider();
     if (!provider) { errno = ENODEV; return -1; }
     return provider->InitializePollingMode(tag, callback, init_fn, release_fn);
 }
 
 void UrmaEndpoint::PollingModeRelease(bthread_tag_t tag) {
-    auto* provider = GetUrmaResourceProvider();
+    auto* provider = GetUrmaConnectionProvider();
     if (provider) provider->ReleasePollingMode(tag);
 }
 
 int UrmaEndpoint::GlobalInitialize() {
-    UrmaResourceCallbacks callbacks;
-    callbacks.lookup_connection = LookupConnectionResource;
-    callbacks.on_received = OnReceived;
-    callbacks.on_error = OnResourceError;
-    return InitializeUrmaResourceProvider(callbacks);
+    UrmaConnectionCallbacks callbacks;
+    callbacks.on_bytes = OnReceivedBytes;
+    callbacks.on_input_ready = OnInputReady;
+    callbacks.on_rx_error = OnRxError;
+    callbacks.on_error = OnConnectionError;
+    return InitializeUrmaConnectionProvider(callbacks);
 }
 
 bool UrmaEndpoint::GlobalRelease() {
-    return ShutdownUrmaResourceProvider();
+    return ShutdownUrmaConnectionProvider();
 }
 
 }  // namespace urma

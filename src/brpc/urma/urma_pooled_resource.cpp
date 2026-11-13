@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include "brpc/urma/urma_resource_pool.h"
+#include "brpc/urma/urma_pooled_resource.h"
 #include "bthread/butex.h"
 
 #if BRPC_WITH_URMA
@@ -43,7 +43,7 @@ DEFINE_bool(urma_io_jfr_lock_free, false,
             "Disable UMDK internal locking for pooled JFR; each JFR has one reposting executor");
 DEFINE_bool(urma_io_jfc_lock_free, false,
             "Disable UMDK internal locking for pooled JFC; each JFC has one polling executor");
-UrmaResourcePool* g_urma_pool = nullptr;
+UrmaPooledResource* g_urma_pool = nullptr;
 TxCompletionCtx::~TxCompletionCtx() {
     ClearResources();
 }
@@ -52,7 +52,7 @@ void TxCompletionCtx::ClearResources() {
     header_buf = nullptr;
     header_in_send_data = false;
     send_data.clear();
-    connection.reset();
+    connection_state.reset();
     TxBatch* owner = batch;
     batch = nullptr;
     if (owner) { owner->Release(); }
@@ -73,14 +73,14 @@ void TxCompletionCtx::Recycle() {
     ResetForUse();
     butil::return_object(this);
 }
-static UrmaResourcePoolFactory g_resource_factory = nullptr;
-bool SetUrmaResourcePoolFactory(UrmaResourcePoolFactory factory) {
+static UrmaPooledResourceFactory g_resource_factory = nullptr;
+bool SetUrmaPooledResourceFactory(UrmaPooledResourceFactory factory) {
     if (g_urma_pool) { errno = EBUSY; return false; }
     g_resource_factory = factory;
     return true;
 }
-UrmaResourcePool* CreateUrmaResourcePool() {
-    return g_resource_factory ? g_resource_factory() : new UrmaResourcePool;
+UrmaPooledResource* CreateUrmaPooledResource() {
+    return g_resource_factory ? g_resource_factory() : new UrmaPooledResource;
 }
 
 urma_target_jetty_t* ImportedJfrCache::Acquire(
@@ -125,14 +125,14 @@ size_t ImportedJfrCache::size() const {
     BAIDU_SCOPED_LOCK(_mutex);
     return _entries.size();
 }
-UrmaConnResource::~UrmaConnResource() {
+UrmaPooledConnectionState::~UrmaPooledConnectionState() {
     if (remote_jfr) { imports->Release(remote_jfr); }
     if (remote_seg && urma_unimport_seg(remote_seg) != URMA_SUCCESS) {
         LOG(ERROR) << "Failed to unimport URMA segment";
     }
 }
 
-int UrmaResourcePool::CreateCompletionQueue(
+int UrmaPooledResource::CreateCompletionQueue(
         urma_context_t* context, UrmaIoSlot* slot, uint32_t depth) {
     slot->jfce = urma_create_jfce(context);
     if (!slot->jfce || slot->jfce->fd < 0 ||
@@ -144,7 +144,7 @@ int UrmaResourcePool::CreateCompletionQueue(
     slot->jfc = urma_create_jfc(context, &cfg);
     return slot->jfc ? 0 : -1;
 }
-int UrmaResourcePool::Initialize(urma_context_t* context,
+int UrmaPooledResource::Initialize(urma_context_t* context,
                                  const EventAdapter& events) {
     if (!context || !io_jfs.empty() || !io_jfr.empty() ||
         FLAGS_urma_io_jfs_cnt <= 0 || FLAGS_urma_io_jfr_cnt <= 0 ||
@@ -200,7 +200,7 @@ int UrmaResourcePool::Initialize(urma_context_t* context,
     }
     return 0;
 }
-uint32_t UrmaResourcePool::PickJfr() {
+uint32_t UrmaPooledResource::PickJfr() {
     return jfr_rr_counter.fetch_add(1, std::memory_order_relaxed) % io_jfr.size();
 }
 namespace {
@@ -233,10 +233,10 @@ struct JfsRandom {
     uint64_t state[4];
 };
 }
-uint32_t UrmaResourcePool::PreferredJfs(SocketId sid, size_t count) {
+uint32_t UrmaPooledResource::PreferredJfs(SocketId sid, size_t count) {
     return count ? Mix64(sid) % count : 0;
 }
-std::array<uint32_t, 4> UrmaResourcePool::SampleBackups(uint32_t preferred) const {
+std::array<uint32_t, 4> UrmaPooledResource::SampleBackups(uint32_t preferred) const {
     std::array<uint32_t, 4> candidates{};
     preferred %= io_jfs.size();
     const size_t count = std::min<size_t>(4, io_jfs.size() - 1);
@@ -255,7 +255,7 @@ std::array<uint32_t, 4> UrmaResourcePool::SampleBackups(uint32_t preferred) cons
     }
     return candidates;
 }
-UrmaJfsSlot* UrmaResourcePool::PickBackup(uint32_t preferred) const {
+UrmaJfsSlot* UrmaPooledResource::PickBackup(uint32_t preferred) const {
     if (io_jfs.size() <= 1) { errno = EAGAIN; return nullptr; }
     const auto candidates = SampleBackups(preferred);
     const size_t count = std::min<size_t>(4, io_jfs.size() - 1);
@@ -269,12 +269,12 @@ UrmaJfsSlot* UrmaResourcePool::PickBackup(uint32_t preferred) const {
     if (!best || lowest >= best->sq_depth) { errno = EAGAIN; return nullptr; }
     return best;
 }
-bool UrmaResourcePool::IsWritable(uint32_t preferred) const {
+bool UrmaPooledResource::IsWritable(uint32_t preferred) const {
     if (_writers_closed.load() || io_jfs.empty()) { return false; }
     auto* slot = io_jfs[preferred % io_jfs.size()];
     return !slot->stopped.load() && slot->sq_inflight.load() < slot->sq_depth;
 }
-UrmaWriteWaiter::UrmaWriteWaiter(UrmaResourcePool* p, butil::atomic<int>* b,
+UrmaWriteWaiter::UrmaWriteWaiter(UrmaPooledResource* p, butil::atomic<int>* b,
                                UrmaJfsSlot* s)
     : pool(p), slot(s ? s : p->io_jfs[0]), butex(b) {
     pool->_active_writers.fetch_add(1);
@@ -288,7 +288,7 @@ UrmaWriteWaiter::~UrmaWriteWaiter() {
     pool->_active_writers.fetch_sub(1);
     errno = saved_errno;
 }
-void UrmaResourcePool::RemoveWriterLocked(WriteWaiter* waiter) {
+void UrmaPooledResource::RemoveWriterLocked(WriteWaiter* waiter) {
     if (!waiter->queued) { return; }
     auto* slot = waiter->slot;
     if (waiter->prev) { waiter->prev->next = waiter->next; }
@@ -297,7 +297,7 @@ void UrmaResourcePool::RemoveWriterLocked(WriteWaiter* waiter) {
     waiter->queued = false;
     slot->has_writers.store(slot->writers != nullptr);
 }
-void UrmaResourcePool::WakeWritersLocked(UrmaJfsSlot* slot, bool all) {
+void UrmaPooledResource::WakeWritersLocked(UrmaJfsSlot* slot, bool all) {
     while (slot->writers) {
         auto* waiter = slot->writers;
         RemoveWriterLocked(waiter);
@@ -306,7 +306,7 @@ void UrmaResourcePool::WakeWritersLocked(UrmaJfsSlot* slot, bool all) {
         if (!all) { break; }
     }
 }
-int UrmaResourcePool::WaitWritable(butil::atomic<int>* butex, int expected,
+int UrmaPooledResource::WaitWritable(butil::atomic<int>* butex, int expected,
                                  const timespec* deadline, uint32_t preferred) {
     UrmaOperation active(&operations);
     if (!active || io_jfs.empty()) { errno = EIO; return -1; }
@@ -325,7 +325,7 @@ int UrmaResourcePool::WaitWritable(butil::atomic<int>* butex, int expected,
     }
     return bthread::butex_wait(butex, expected, deadline);
 }
-int UrmaResourcePool::PostSend(UrmaJfsSlot* slot, urma_jfs_wr_t* wr,
+int UrmaPooledResource::PostSend(UrmaJfsSlot* slot, urma_jfs_wr_t* wr,
                                TxCompletionCtx*, urma_jfs_wr_t** bad) {
     urma_jfs_wr_t* first_bad = nullptr;
     const urma_status_t rc = urma_post_jfs_wr(slot->jfs, wr, &first_bad);
@@ -334,7 +334,7 @@ int UrmaResourcePool::PostSend(UrmaJfsSlot* slot, urma_jfs_wr_t* wr,
     return rc == URMA_SUCCESS ? 0 : -1;
 }
 
-int UrmaResourcePool::Enqueue(UrmaJfsSlot* slot, TxBatch* batch) {
+int UrmaPooledResource::Enqueue(UrmaJfsSlot* slot, TxBatch* batch) {
     UrmaOperation active(&slot->operations);
     if (!active || slot->stopped.load()) { errno = EIO; return -1; }
     slot->sq_inflight.fetch_add(batch->count, std::memory_order_acq_rel);
@@ -344,7 +344,7 @@ int UrmaResourcePool::Enqueue(UrmaJfsSlot* slot, TxBatch* batch) {
     return 0;
 }
 
-void UrmaResourcePool::CollectIncoming(UrmaJfsSlot* slot) {
+void UrmaPooledResource::CollectIncoming(UrmaJfsSlot* slot) {
     TxBatch* node = slot->incoming_head.exchange(nullptr, std::memory_order_acq_rel);
     if (!node) { return; }
     TxBatch* newest = node;
@@ -365,10 +365,10 @@ void UrmaResourcePool::CollectIncoming(UrmaJfsSlot* slot) {
 
 namespace {
 void FailTxContext(UrmaJfsSlot* slot, TxCompletionCtx* ctx, int error, const char*) {
-    if (ctx->connection) { ctx->connection->failed.store(true, std::memory_order_release); }
-    const auto source = ctx->connection ? ctx->connection->source.lock() : UrmaConnectionHandle();
-    if (source && slot->callbacks.on_error) {
-        slot->callbacks.on_error(ctx->self_socket_id, source, error);
+    if (ctx->connection_state) { ctx->connection_state->failed.store(true, std::memory_order_release); }
+    const auto owner_connection = ctx->connection_state ? ctx->connection_state->owner_connection.lock() : UrmaConnectionHandle();
+    if (owner_connection && slot->callbacks.on_error) {
+        slot->callbacks.on_error(ctx->self_socket_id, owner_connection, error);
     }
 }
 void RemoveQueueFront(UrmaJfsSlot* slot) {
@@ -382,7 +382,7 @@ void RemoveQueueFront(UrmaJfsSlot* slot) {
 }
 }
 
-void UrmaResourcePool::CancelQueued(UrmaJfsSlot* slot) {
+void UrmaPooledResource::CancelQueued(UrmaJfsSlot* slot) {
     CollectIncoming(slot);
     while (slot->pending_head) {
         auto* ctx = slot->pending_head->items[slot->pending_head->begin];
@@ -393,13 +393,13 @@ void UrmaResourcePool::CancelQueued(UrmaJfsSlot* slot) {
     }
 }
 
-void UrmaResourcePool::DrainSendQueue(UrmaJfsSlot* slot) {
+void UrmaPooledResource::DrainSendQueue(UrmaJfsSlot* slot) {
     for (;;) {
         if (slot->stopped.load()) { CancelQueued(slot); return; }
         if (!slot->pending_head) { CollectIncoming(slot); }
         if (!slot->pending_head) { return; }
         auto* first = slot->pending_head->items[slot->pending_head->begin];
-        if (first->connection && first->connection->failed.load(std::memory_order_acquire)) {
+        if (first->connection_state && first->connection_state->failed.load(std::memory_order_acquire)) {
             RemoveQueueFront(slot);
             slot->sq_inflight.fetch_sub(1);
             first->Release();
@@ -418,7 +418,7 @@ void UrmaResourcePool::DrainSendQueue(UrmaJfsSlot* slot) {
              node = node->next.load(std::memory_order_relaxed)) {
             for (size_t i = node->begin; i < node->count && count < limit; ++i) {
                 auto* ctx = node->items[i];
-                if (ctx->connection && ctx->connection->failed.load(std::memory_order_acquire)) {
+                if (ctx->connection_state && ctx->connection_state->failed.load(std::memory_order_acquire)) {
                     break;
                 }
                 entries[count++] = ctx;
@@ -482,7 +482,7 @@ void UrmaResourcePool::DrainSendQueue(UrmaJfsSlot* slot) {
     }
 }
 
-void UrmaResourcePool::KickDrain(UrmaJfsSlot* slot) {
+void UrmaPooledResource::KickDrain(UrmaJfsSlot* slot) {
     UrmaOperation active(&slot->operations);
     if (!active) { return; }
     const unsigned previous = slot->drain_state.fetch_or(
@@ -505,7 +505,7 @@ void UrmaResourcePool::KickDrain(UrmaJfsSlot* slot) {
     }
 }
 
-void UrmaResourcePool::CompleteSend(UrmaJfsSlot* slot, const urma_cr_t& cr) {
+void UrmaPooledResource::CompleteSend(UrmaJfsSlot* slot, const urma_cr_t& cr) {
     auto* ctx = reinterpret_cast<TxCompletionCtx*>(cr.user_ctx);
     slot->submitted[ctx->registry_index].store(nullptr, std::memory_order_release);
     slot->sq_device_inflight.fetch_sub(1, std::memory_order_acq_rel);
@@ -517,7 +517,7 @@ void UrmaResourcePool::CompleteSend(UrmaJfsSlot* slot, const urma_cr_t& cr) {
     KickDrain(slot);
 }
 
-int UrmaResourcePool::PostRecvToSlot(UrmaJfrSlot& slot, uint32_t num) {
+int UrmaPooledResource::PostRecvToSlot(UrmaJfrSlot& slot, uint32_t num) {
     if (slot.contexts || num != slot.rx_depth) { errno = EINVAL; return -1; }
     slot.contexts.reset(new RxRecvCtx[num]);
     for (uint32_t i = 0; i < num; ++i) {
@@ -531,7 +531,7 @@ int UrmaResourcePool::PostRecvToSlot(UrmaJfrSlot& slot, uint32_t num) {
     return 0;
 }
 
-int UrmaResourcePool::RepostRecv(UrmaJfrSlot& slot, RxRecvCtx* context) {
+int UrmaPooledResource::RepostRecv(UrmaJfrSlot& slot, RxRecvCtx* context) {
     const size_t block_size = GetUrmaRecvBlockSize();
     if (!context->data_block) {
         // The explicit 4 KiB size selects the CTP allocator and bypasses TLS.
@@ -573,7 +573,7 @@ int UrmaResourcePool::RepostRecv(UrmaJfrSlot& slot, RxRecvCtx* context) {
     return 0;
 }
 
-bool UrmaResourcePool::Shutdown() {
+bool UrmaPooledResource::Shutdown() {
     operations.Close();
     _writers_closed.store(true);
     for (auto* slot : io_jfs) {
@@ -648,7 +648,7 @@ bool UrmaResourcePool::Shutdown() {
     }
     return success;
 }
-UrmaResourcePool::~UrmaResourcePool() {
+UrmaPooledResource::~UrmaPooledResource() {
     if (!Shutdown()) {
         LOG(ERROR) << "Retain URMA slots because provider cleanup failed";
         return;

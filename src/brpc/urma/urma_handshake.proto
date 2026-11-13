@@ -29,7 +29,7 @@ option java_outer_classname = "UrmaHandshakeProto";
 message UrmaHello {
     required uint32 buffer_size = 1;      // recv buffer size in bytes (per WR)
     required uint32 recv_buffer_cnt = 2;  // number of recv buffers posted
-    required uint32 jetty_id = 3;         // local jetty id
+    required uint32 jetty_id = 3;         // Jetty, or shared JFR for resource_mode=2
     required bytes eid = 4;               // 16-byte local EID (network order)
     required uint32 uasid = 5;            // local uasid
     required uint32 tp_type = 6;          // urma_tp_type_t
@@ -44,4 +44,6 @@ message UrmaHello {
     required uint64 seg_va = 9;          // segment virtual address
     required uint64 seg_len = 10;        // segment length in bytes
     required uint32 seg_token_id = 11;   // segment token id
+    optional uint64 socket_id = 12;
+    optional uint32 resource_mode = 13 [default = 1]; // 1=exclusive, 2=pooled
 }
