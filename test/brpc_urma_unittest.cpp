@@ -34,7 +34,7 @@
 #include "brpc/urma/urma_handshake.h"
 #include "brpc/urma/urma_handshake.pb.h"
 #include "brpc/urma/urma_helper.h"
-#include "brpc/urma/urma_resource.h"
+#include "brpc/urma/urma_connection.h"
 #include "brpc/urma/urma_endpoint.h"
 #include "brpc/urma_transport.h"
 #include "brpc/server.h"
@@ -51,11 +51,29 @@ namespace brpc {
 namespace urma {
 
 DECLARE_int32(urma_client_handshake_version);
+DECLARE_string(urma_resource_mode);
 extern bool g_skip_urma_init;
 extern butil::atomic<bool> g_urma_available;
 
 }  // namespace urma
 }  // namespace brpc
+
+TEST(UrmaConnectionModeTest, mode_is_fixed_until_explicit_startup_configuration) {
+    const std::string saved = urma::FLAGS_urma_resource_mode;
+    urma::FLAGS_urma_resource_mode = "pooled";
+    EXPECT_EQ(0, urma::ConfigureUrmaConnectionMode());
+    EXPECT_EQ(urma::UrmaConnectionMode::POOLED, urma::GetUrmaConnectionMode());
+    urma::FLAGS_urma_resource_mode = "exclusive";
+    EXPECT_EQ(urma::UrmaConnectionMode::POOLED, urma::GetUrmaConnectionMode());
+    EXPECT_EQ(0, urma::ConfigureUrmaConnectionMode());
+    EXPECT_EQ(urma::UrmaConnectionMode::EXCLUSIVE, urma::GetUrmaConnectionMode());
+    urma::FLAGS_urma_resource_mode = "invalid";
+    EXPECT_EQ(-1, urma::ConfigureUrmaConnectionMode());
+    EXPECT_EQ(EINVAL, errno);
+    EXPECT_EQ(urma::UrmaConnectionMode::EXCLUSIVE, urma::GetUrmaConnectionMode());
+    urma::FLAGS_urma_resource_mode = saved;
+    EXPECT_EQ(0, urma::ConfigureUrmaConnectionMode());
+}
 
 // ---------------------------------------------------------------------------
 // v2 binary HelloMessage: serialize + deserialize round-trips.
@@ -618,23 +636,25 @@ TEST_F(UrmaMockTest,
 
 
 namespace {
-std::mutex resource_test_mutex;
-std::map<SocketId, butil::IOBuf> resource_received;
-std::map<SocketId, bthread_tag_t> resource_received_tag;
-int resource_errors = 0;
-bool close_resource_on_callback = false;
-butil::atomic<int> resource_user_buffer_released{0};
-void ResourceReceived(SocketId id, const urma::UrmaConnectionHandle& source,
+std::mutex connection_test_mutex;
+std::map<SocketId, butil::IOBuf> connection_received;
+std::map<SocketId, bthread_tag_t> connection_received_tag;
+int connection_errors = 0;
+bool close_connection_on_callback = false;
+butil::atomic<int> connection_user_buffer_released{0};
+bool ConnectionReceived(SocketUniquePtr& socket, const urma::UrmaConnection* connection,
                       butil::IOBuf data) {
-    std::lock_guard<std::mutex> lock(resource_test_mutex);
-    resource_received[id].append(data.movable());
-    resource_received_tag[id] = bthread_self_tag();
-    if (close_resource_on_callback) source->Close();
+    const SocketId id = socket->id();
+    std::lock_guard<std::mutex> lock(connection_test_mutex);
+    connection_received[id].append(data.movable());
+    connection_received_tag[id] = bthread_self_tag();
+    if (close_connection_on_callback) const_cast<urma::UrmaConnection*>(connection)->Close();
+    return true;
 }
-void ResourceError(SocketId, const urma::UrmaConnectionHandle& source, int) {
-    std::lock_guard<std::mutex> lock(resource_test_mutex);
-    ++resource_errors;
-    if (close_resource_on_callback) source->Close();
+void ConnectionError(SocketId, const urma::UrmaConnectionHandle& connection, int) {
+    std::lock_guard<std::mutex> lock(connection_test_mutex);
+    ++connection_errors;
+    if (close_connection_on_callback) connection->Close();
 }
 
 }
@@ -647,10 +667,10 @@ DECLARE_int32(urma_prepared_jetty_cnt);
 DECLARE_bool(urma_use_polling);
 }}
 
-class UrmaResourceTest : public ::testing::Test {
+class UrmaConnectionTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        // Use the real resource implementation with the link-time provider.
+        // Use the real connection implementation with the link-time provider.
         urma_init_attr_t attr{};
         urma_init(&attr);
         int n = 0;
@@ -665,32 +685,40 @@ protected:
         urma::FLAGS_urma_prepared_jetty_cnt = 0;
         urma::g_skip_urma_init = false;
         urma::GlobalUrmaInitializeOrDie();
-        ASSERT_EQ(0, urma::CreateUrmaResourceProvider(
-            urma::UrmaResourceMode::EXCLUSIVE, &provider));
-        urma::UrmaResourceCallbacks callbacks;
-        callbacks.lookup_connection = [](SocketId) { return urma::UrmaConnectionHandle(); };
-        callbacks.on_received = ResourceReceived;
-        callbacks.on_error = ResourceError;
+        ASSERT_EQ(0, urma::CreateUrmaConnectionProvider(
+            urma::UrmaConnectionMode::EXCLUSIVE, &provider));
+        urma::UrmaConnectionCallbacks callbacks;
+        callbacks.on_bytes = ConnectionReceived;
+        callbacks.on_input_ready = [](SocketUniquePtr&, InputMessageClosure&) {};
+        callbacks.on_error = ConnectionError;
         ASSERT_EQ(0, provider->Initialize(callbacks));
         ASSERT_EQ(0, provider->InitializePollingMode(0, nullptr, nullptr, nullptr));
         urma::UrmaConnectionOptions opts;
-        opts.socket_id = 100;
+        SocketOptions socket_options;
+        ASSERT_EQ(0, Socket::Create(socket_options, &a_id));
+        ASSERT_EQ(0, Socket::Address(a_id, &a_socket));
+        ASSERT_EQ(0, Socket::Create(socket_options, &b_id));
+        ASSERT_EQ(0, Socket::Address(b_id, &b_socket));
+        opts.socket_id = a_id;
         ASSERT_EQ(0, provider->CreateConnection(opts, &a));
-        opts.socket_id = 101;
+        opts.socket_id = b_id;
         opts.role = urma::UrmaConnectionRole::SERVER;
         ASSERT_EQ(0, provider->CreateConnection(opts, &b));
         ASSERT_EQ(0, a->GetLocalDescription(&ad));
         ASSERT_EQ(0, b->GetLocalDescription(&bd));
-        std::lock_guard<std::mutex> lock(resource_test_mutex);
-        resource_received.clear();
-        resource_received_tag.clear();
-        resource_errors = 0;
-        close_resource_on_callback = false;
+        std::lock_guard<std::mutex> lock(connection_test_mutex);
+        connection_received.clear();
+        connection_received_tag.clear();
+        connection_errors = 0;
+        close_connection_on_callback = false;
     }
     void TearDown() override {
         if (a) a->Close();
         if (b) b->Close();
         a.reset(); b.reset();
+        if (a_socket) a_socket->SetFailed();
+        if (b_socket) b_socket->SetFailed();
+        a_socket.reset(); b_socket.reset();
         if (provider) {
             bool stopped = false;
             for (int i = 0; i < 1000 && !stopped; ++i) {
@@ -701,8 +729,8 @@ protected:
         }
     }
     void Bind() {
-        ASSERT_EQ(0, a->BindPeer(bd));
-        ASSERT_EQ(0, b->BindPeer(ad));
+        ASSERT_EQ(0, a->ImportPeer(bd));
+        ASSERT_EQ(0, b->ImportPeer(ad));
     }
     void CreateSocketConnection(SocketUniquePtr* socket,
                                 urma::UrmaConnectionHandle* connection) {
@@ -714,30 +742,32 @@ protected:
         opts.socket_id = id;
         ASSERT_EQ(0, provider->CreateConnection(opts, connection));
     }
-    std::unique_ptr<urma::UrmaResourceProvider> provider;
+    std::unique_ptr<urma::UrmaConnectionProvider> provider;
     urma::UrmaConnectionHandle a, b;
-    urma::UrmaResourceDescription ad, bd;
+    SocketId a_id = INVALID_SOCKET_ID, b_id = INVALID_SOCKET_ID;
+    SocketUniquePtr a_socket, b_socket;
+    urma::UrmaConnectionDescription ad, bd;
 };
 
-TEST_F(UrmaResourceTest, send_consumes_input_and_transfers_bytes) {
+TEST_F(UrmaConnectionTest, send_consumes_input_and_transfers_bytes) {
     Bind();
     butil::IOBuf first, second;
     first.append("first"); second.append(std::string(9000, 'b'));
     butil::IOBuf* data[] = {&first, &second};
-    ASSERT_EQ(9005, a->Send(data, 2));
+    ASSERT_EQ(9005, a->CutFromIOBufList(data, 2));
     EXPECT_TRUE(first.empty());
     EXPECT_TRUE(second.empty());
     for (int i = 0; i < 1000; ++i) {
-        { std::lock_guard<std::mutex> lock(resource_test_mutex);
-          if (resource_received[101].size() == 9005) break; }
+        { std::lock_guard<std::mutex> lock(connection_test_mutex);
+          if (connection_received[b_id].size() == 9005) break; }
         usleep(1000);
     }
-    std::lock_guard<std::mutex> lock(resource_test_mutex);
-    EXPECT_EQ("first" + std::string(9000, 'b'), resource_received[101].to_string());
-    EXPECT_EQ(0, resource_errors);
+    std::lock_guard<std::mutex> lock(connection_test_mutex);
+    EXPECT_EQ("first" + std::string(9000, 'b'), connection_received[b_id].to_string());
+    EXPECT_EQ(0, connection_errors);
 }
 
-TEST_F(UrmaResourceTest, invalid_tail_consumes_only_accepted_prefix) {
+TEST_F(UrmaConnectionTest, invalid_tail_consumes_only_accepted_prefix) {
     bd.recv_buffer_size = 1024;
     Bind();
     butil::IOBuf good, bad;
@@ -745,12 +775,12 @@ TEST_F(UrmaResourceTest, invalid_tail_consumes_only_accepted_prefix) {
     char unregistered[32] = {};
     bad.append_user_data(unregistered, sizeof(unregistered), [](void*) {});
     butil::IOBuf* data[] = {&good, &bad};
-    EXPECT_EQ(1024, a->Send(data, 2));
+    EXPECT_EQ(1024, a->CutFromIOBufList(data, 2));
     EXPECT_TRUE(good.empty());
     EXPECT_EQ(32u, bad.size());
 }
 
-TEST_F(UrmaResourceTest, invalid_sge_restores_unsubmitted_wr_inputs) {
+TEST_F(UrmaConnectionTest, invalid_sge_restores_unsubmitted_wr_inputs) {
     if (urma::GetUrmaMaxSge() < 2) GTEST_SKIP() << "Requires multiple SGEs";
     Bind();
     butil::IOBuf good, bad;
@@ -758,12 +788,12 @@ TEST_F(UrmaResourceTest, invalid_sge_restores_unsubmitted_wr_inputs) {
     char unregistered[] = "unregistered-tail";
     bad.append_user_data(unregistered, sizeof(unregistered), [](void*) {});
     butil::IOBuf* data[] = {&good, &bad};
-    EXPECT_EQ(-1, a->Send(data, 2));
+    EXPECT_EQ(-1, a->CutFromIOBufList(data, 2));
     EXPECT_EQ("registered-prefix", good.to_string());
     EXPECT_EQ(sizeof(unregistered), bad.size());
 }
 
-TEST_F(UrmaResourceTest, rejected_wr_restores_multiple_input_buffers) {
+TEST_F(UrmaConnectionTest, rejected_wr_restores_multiple_input_buffers) {
     if (urma::GetUrmaMaxSge() < 3) GTEST_SKIP() << "Requires multiple SGEs";
     using FailSend = void (*)(int);
     auto fail = reinterpret_cast<FailSend>(dlsym(
@@ -775,7 +805,7 @@ TEST_F(UrmaResourceTest, rejected_wr_restores_multiple_input_buffers) {
     third.append(std::string(6000, 't'));
     butil::IOBuf* data[] = {&first, &empty, &second, &third};
     fail(0);
-    EXPECT_EQ(-1, a->Send(data, 4));
+    EXPECT_EQ(-1, a->CutFromIOBufList(data, 4));
     EXPECT_EQ(EIO, errno);
     EXPECT_EQ("first", first.to_string());
     EXPECT_TRUE(empty.empty());
@@ -783,7 +813,7 @@ TEST_F(UrmaResourceTest, rejected_wr_restores_multiple_input_buffers) {
     EXPECT_EQ(std::string(6000, 't'), third.to_string());
 }
 
-TEST_F(UrmaResourceTest, later_post_failure_preserves_only_unsent_user_data) {
+TEST_F(UrmaConnectionTest, later_post_failure_preserves_only_unsent_user_data) {
     using FailSend = void (*)(int);
     auto fail = reinterpret_cast<FailSend>(dlsym(
         RTLD_DEFAULT, "brpc_urma_mock_fail_send_after"));
@@ -802,18 +832,18 @@ TEST_F(UrmaResourceTest, later_post_failure_preserves_only_unsent_user_data) {
     }, segment);
     butil::IOBuf* data[] = {&payload};
     fail(1);
-    EXPECT_EQ(1024, a->Send(data, 1));
+    EXPECT_EQ(1024, a->CutFromIOBufList(data, 1));
     EXPECT_EQ(std::string(1024, 'b'), payload.to_string());
     for (int i = 0; i < 1000; ++i) {
-        { std::lock_guard<std::mutex> lock(resource_test_mutex);
-          if (resource_received[101].size() == 1024) break; }
+        { std::lock_guard<std::mutex> lock(connection_test_mutex);
+          if (connection_received[b_id].size() == 1024) break; }
         usleep(1000);
     }
-    std::lock_guard<std::mutex> lock(resource_test_mutex);
-    EXPECT_EQ(std::string(1024, 'a'), resource_received[101].to_string());
+    std::lock_guard<std::mutex> lock(connection_test_mutex);
+    EXPECT_EQ(std::string(1024, 'a'), connection_received[b_id].to_string());
 }
 
-TEST_F(UrmaResourceTest, close_does_not_wait_for_admitted_provider_send) {
+TEST_F(UrmaConnectionTest, close_does_not_wait_for_admitted_provider_send) {
     using Pause = void (*)(bool);
     using Entered = bool (*)();
     auto pause = reinterpret_cast<Pause>(dlsym(
@@ -827,7 +857,7 @@ TEST_F(UrmaResourceTest, close_does_not_wait_for_admitted_provider_send) {
     butil::IOBuf* data[] = {&payload};
     ssize_t sent = -1;
     pause(true);
-    std::thread sender([&, connection = a] { sent = connection->Send(data, 1); });
+    std::thread sender([&, connection = a] { sent = connection->CutFromIOBufList(data, 1); });
     for (int i = 0; i < 1000 && !entered(); ++i) usleep(1000);
     EXPECT_TRUE(entered());
     butil::atomic<bool> closed{false};
@@ -844,12 +874,12 @@ TEST_F(UrmaResourceTest, close_does_not_wait_for_admitted_provider_send) {
     EXPECT_TRUE(payload.empty());
     EXPECT_FALSE(a->IsWritable());
     payload.append("after-close");
-    EXPECT_EQ(-1, a->Send(data, 1));
+    EXPECT_EQ(-1, a->CutFromIOBufList(data, 1));
     EXPECT_EQ(EPIPE, errno);
     EXPECT_EQ("after-close", payload.to_string());
 }
 
-TEST_F(UrmaResourceTest, consumed_user_data_is_retained_until_provider_finishes) {
+TEST_F(UrmaConnectionTest, consumed_user_data_is_retained_until_provider_finishes) {
     using Pause = void (*)(bool);
     using Entered = bool (*)();
     auto pause = reinterpret_cast<Pause>(dlsym(
@@ -866,10 +896,10 @@ TEST_F(UrmaResourceTest, consumed_user_data_is_retained_until_provider_finishes)
     memset(memory, 'r', 64);
     const uint64_t segment = urma::RegisterMemoryForUrma(memory, 64);
     ASSERT_NE(0u, segment);
-    resource_user_buffer_released.store(0);
+    connection_user_buffer_released.store(0);
     butil::IOBuf payload;
     payload.append_user_data_with_meta(memory, 64, [](void* p) {
-        resource_user_buffer_released.fetch_add(1);
+        connection_user_buffer_released.fetch_add(1);
         // Keep allocation alive until the assertion to make premature release
         // deterministic rather than allowing the mock to read freed memory.
     }, segment);
@@ -877,59 +907,57 @@ TEST_F(UrmaResourceTest, consumed_user_data_is_retained_until_provider_finishes)
     pause(true);
     pause_return(true);
     ssize_t sent = -1;
-    std::thread sender([&, connection = a] { sent = connection->Send(data, 1); });
+    std::thread sender([&, connection = a] { sent = connection->CutFromIOBufList(data, 1); });
     for (int i = 0; i < 1000 && !entered(); ++i) usleep(1000);
     EXPECT_TRUE(entered());
     usleep(20000);  // Allow the CQ consumer to expose a premature completion.
-    EXPECT_EQ(0, resource_user_buffer_released.load());
+    EXPECT_EQ(0, connection_user_buffer_released.load());
     pause(false);
     for (int i = 0; i < 1000 && !return_entered(); ++i) usleep(1000);
     EXPECT_TRUE(return_entered());
     // CQ may release the staged payload before native post returns. The
     // successful sender must not inspect those references afterwards.
-    for (int i = 0; i < 1000 && !resource_user_buffer_released.load(); ++i) {
+    for (int i = 0; i < 1000 && !connection_user_buffer_released.load(); ++i) {
         usleep(1000);
     }
-    EXPECT_EQ(1, resource_user_buffer_released.load());
+    EXPECT_EQ(1, connection_user_buffer_released.load());
     pause_return(false);
     sender.join();
     EXPECT_EQ(64, sent);
     EXPECT_TRUE(payload.empty());
     for (int i = 0; i < 1000; ++i) {
-        { std::lock_guard<std::mutex> lock(resource_test_mutex);
-          if (resource_received[101].size() == 64) break; }
+        { std::lock_guard<std::mutex> lock(connection_test_mutex);
+          if (connection_received[b_id].size() == 64) break; }
         usleep(1000);
     }
     {
-        std::lock_guard<std::mutex> lock(resource_test_mutex);
-        EXPECT_EQ(std::string(64, 'r'), resource_received[101].to_string());
+        std::lock_guard<std::mutex> lock(connection_test_mutex);
+        EXPECT_EQ(std::string(64, 'r'), connection_received[b_id].to_string());
     }
     urma::DeregisterMemoryForUrma(memory);
     delete[] memory;
 }
 
-TEST_F(UrmaResourceTest, rejects_wrong_topology_before_binding) {
-    bd.resource_kind = urma::UrmaPeerResourceKind::JFR;
-    EXPECT_EQ(-1, a->BindPeer(bd));
+TEST_F(UrmaConnectionTest, rejects_wrong_topology_before_binding) {
+    bd.receive_target_kind = urma::UrmaReceiveTargetKind::JFR;
+    EXPECT_EQ(-1, a->ImportPeer(bd));
     EXPECT_EQ(EPROTO, errno);
     EXPECT_FALSE(a->IsWritable());
 }
 
-TEST_F(UrmaResourceTest, exclusive_provider_does_not_require_delivery_scope) {
-    std::unique_ptr<urma::UrmaResourceProvider> other;
-    ASSERT_EQ(0, urma::CreateUrmaResourceProvider(
-        urma::UrmaResourceMode::EXCLUSIVE, &other));
-    urma::UrmaResourceCallbacks callbacks;
-    callbacks.lookup_connection = [](SocketId) {
-        return urma::UrmaConnectionHandle();
-    };
-    callbacks.on_received = ResourceReceived;
-    callbacks.on_error = ResourceError;
+TEST_F(UrmaConnectionTest, exclusive_provider_does_not_require_delivery_scope) {
+    std::unique_ptr<urma::UrmaConnectionProvider> other;
+    ASSERT_EQ(0, urma::CreateUrmaConnectionProvider(
+        urma::UrmaConnectionMode::EXCLUSIVE, &other));
+    urma::UrmaConnectionCallbacks callbacks;
+    callbacks.on_bytes = ConnectionReceived;
+        callbacks.on_input_ready = [](SocketUniquePtr&, InputMessageClosure&) {};
+    callbacks.on_error = ConnectionError;
     EXPECT_EQ(0, other->Initialize(callbacks));
     EXPECT_TRUE(other->Shutdown());
 }
 
-TEST_F(UrmaResourceTest, writable_wait_rejects_unbound_resource) {
+TEST_F(UrmaConnectionTest, writable_wait_rejects_peer_not_imported) {
     auto* wait = bthread::butex_create_checked<butil::atomic<int>>();
     wait->store(0);
     const timespec deadline = butil::milliseconds_from_now(10);
@@ -938,7 +966,7 @@ TEST_F(UrmaResourceTest, writable_wait_rejects_unbound_resource) {
     bthread::butex_destroy(wait);
 }
 
-TEST_F(UrmaResourceTest, close_records_socket_wakeup_before_wait_registration) {
+TEST_F(UrmaConnectionTest, close_records_socket_wakeup_before_wait_registration) {
     SocketOptions options;
     SocketId id;
     ASSERT_EQ(0, Socket::Create(options, &id));
@@ -950,7 +978,7 @@ TEST_F(UrmaResourceTest, close_records_socket_wakeup_before_wait_registration) {
     ASSERT_EQ(0, provider->CreateConnection(opts, &connection));
     auto* wait = socket->_epollout_butex;
     const int expected = wait->load();
-    ASSERT_EQ(0, connection->BindPeer(bd));
+    ASSERT_EQ(0, connection->ImportPeer(bd));
     EXPECT_EQ(expected, wait->load());  // Binding is not write progress.
     connection->Close();
     connection->Close();
@@ -961,7 +989,7 @@ TEST_F(UrmaResourceTest, close_records_socket_wakeup_before_wait_registration) {
     socket->SetFailed();
 }
 
-TEST_F(UrmaResourceTest, resource_handle_does_not_retain_recycled_socket) {
+TEST_F(UrmaConnectionTest, connection_handle_does_not_retain_recycled_socket) {
     struct RecycleObserver : SocketUser {
         bool recycled = false;
         void BeforeRecycle(Socket*) override { recycled = true; }
@@ -976,22 +1004,22 @@ TEST_F(UrmaResourceTest, resource_handle_does_not_retain_recycled_socket) {
     opts.socket_id = id;
     urma::UrmaConnectionHandle connection;
     ASSERT_EQ(0, provider->CreateConnection(opts, &connection));
-    ASSERT_EQ(0, connection->BindPeer(bd));
+    ASSERT_EQ(0, connection->ImportPeer(bd));
     socket->SetFailed();
     socket.reset();
     EXPECT_TRUE(observer.recycled);
-    // The resource remains alive. Neither Close nor late CQ notifications
+    // The connection remains alive. Neither Close nor late CQ notifications
     // may dereference a Socket/butex pointer from its previous owner.
     connection->Close();
     connection.reset();
 }
 
-TEST_F(UrmaResourceTest, writable_wait_rejects_a_foreign_butex) {
+TEST_F(UrmaConnectionTest, writable_wait_rejects_a_foreign_butex) {
     SocketUniquePtr socket;
     urma::UrmaConnectionHandle connection;
     CreateSocketConnection(&socket, &connection);
     ASSERT_TRUE(socket && connection);
-    ASSERT_EQ(0, connection->BindPeer(bd));
+    ASSERT_EQ(0, connection->ImportPeer(bd));
     auto* wait = bthread::butex_create_checked<butil::atomic<int>>();
     wait->store(0);
     const timespec deadline = butil::milliseconds_from_now(10);
@@ -1001,7 +1029,7 @@ TEST_F(UrmaResourceTest, writable_wait_rejects_a_foreign_butex) {
     socket->SetFailed();
 }
 
-TEST_F(UrmaResourceTest, close_is_idempotent_and_wakes_socket_waiter) {
+TEST_F(UrmaConnectionTest, close_is_idempotent_and_wakes_socket_waiter) {
     SocketUniquePtr socket;
     urma::UrmaConnectionHandle connection;
     CreateSocketConnection(&socket, &connection);
@@ -1010,11 +1038,11 @@ TEST_F(UrmaResourceTest, close_is_idempotent_and_wakes_socket_waiter) {
     const int before_send = wait->load();
     auto peer = bd;
     peer.recv_buffer_count = 3;  // One data credit plus reserved ACK slots.
-    ASSERT_EQ(0, connection->BindPeer(peer));
+    ASSERT_EQ(0, connection->ImportPeer(peer));
     butil::IOBuf payload;
     payload.append("x");
     butil::IOBuf* data[] = {&payload};
-    ASSERT_EQ(1, connection->Send(data, 1));
+    ASSERT_EQ(1, connection->CutFromIOBufList(data, 1));
     // b is not bound, so its receive completion cannot return peer credit.
     // Wait for the local TX notification before testing a blocked waiter.
     for (int i = 0; i < 1000 && wait->load() == before_send; ++i) usleep(1000);
@@ -1036,12 +1064,12 @@ TEST_F(UrmaResourceTest, close_is_idempotent_and_wakes_socket_waiter) {
     EXPECT_EQ(EPIPE, error);
     EXPECT_FALSE(connection->IsWritable());
     payload.append("closed");
-    EXPECT_EQ(-1, connection->Send(data, 1));
+    EXPECT_EQ(-1, connection->CutFromIOBufList(data, 1));
     EXPECT_EQ("closed", payload.to_string());
     socket->SetFailed();
 }
 
-TEST_F(UrmaResourceTest, shutdown_retains_live_connections_and_rejects_creation) {
+TEST_F(UrmaConnectionTest, shutdown_retains_live_connections_and_rejects_creation) {
     EXPECT_FALSE(provider->Shutdown());
     urma::UrmaConnectionHandle other;
     urma::UrmaConnectionOptions opts;
@@ -1051,25 +1079,25 @@ TEST_F(UrmaResourceTest, shutdown_retains_live_connections_and_rejects_creation)
 }
 
 
-TEST_F(UrmaResourceTest, empty_input_is_zero_even_before_bind) {
+TEST_F(UrmaConnectionTest, empty_input_is_zero_even_before_bind) {
     butil::IOBuf empty;
     butil::IOBuf* data[] = {&empty};
-    EXPECT_EQ(0, a->Send(data, 1));
+    EXPECT_EQ(0, a->CutFromIOBufList(data, 1));
 }
 
-TEST_F(UrmaResourceTest, validates_description_before_import) {
+TEST_F(UrmaConnectionTest, validates_description_before_import) {
     const auto valid = bd;
     bd.recv_buffer_size = 1;
-    EXPECT_EQ(-1, a->BindPeer(bd));
+    EXPECT_EQ(-1, a->ImportPeer(bd));
     EXPECT_EQ(EPROTO, errno);
     bd = valid;
     bd.segment.va = std::numeric_limits<uint64_t>::max();
     bd.segment.length = 2;
-    EXPECT_EQ(-1, a->BindPeer(bd));
+    EXPECT_EQ(-1, a->ImportPeer(bd));
     EXPECT_EQ(EPROTO, errno);
 }
 
-TEST_F(UrmaResourceTest, endpoint_caches_early_rx_and_ignores_old_resource_callbacks) {
+TEST_F(UrmaConnectionTest, endpoint_caches_early_rx_and_ignores_old_connection_callbacks) {
     SocketOptions options;
     options.socket_mode = SOCKET_MODE_URMA;
     SocketId id;
@@ -1079,30 +1107,30 @@ TEST_F(UrmaResourceTest, endpoint_caches_early_rx_and_ignores_old_resource_callb
     auto* transport = static_cast<UrmaTransport*>(socket->_transport.get());
     auto* endpoint = transport->GetUrmaEp();
     ASSERT_EQ(0, endpoint->AllocateResources(urma::UrmaConnectionRole::SERVER));
-    auto old = urma::UrmaEndpoint::LookupConnectionResource(id);
+    auto old = endpoint->PinConnection();
     ASSERT_TRUE(old);
     butil::IOBuf first; first.append("early");
-    urma::UrmaEndpoint::OnReceived(id, old, first.movable());
+    urma::UrmaEndpoint::OnReceivedBytes(socket, old.get(), first.movable());
     EXPECT_EQ("early", endpoint->_input_processor.read_buf().to_string());
     EXPECT_EQ(5, endpoint->_pending_received_bytes.load());
     endpoint->Reset();
     butil::IOBuf no_source; no_source.append("unowned");
-    urma::UrmaEndpoint::OnReceived(id, {}, no_source.movable());
+    urma::UrmaEndpoint::OnReceivedBytes(socket, nullptr, no_source.movable());
     EXPECT_TRUE(endpoint->_input_processor.read_buf().empty());
-    urma::UrmaEndpoint::OnResourceError(id, {}, EIO);
+    urma::UrmaEndpoint::OnConnectionError(id, {}, EIO);
     EXPECT_FALSE(socket->Failed());
     ASSERT_EQ(0, endpoint->AllocateResources(urma::UrmaConnectionRole::SERVER));
-    auto current = urma::UrmaEndpoint::LookupConnectionResource(id);
+    auto current = endpoint->PinConnection();
     ASSERT_TRUE(current);
     ASSERT_NE(old, current);
     butil::IOBuf late; late.append("old data");
-    urma::UrmaEndpoint::OnReceived(id, old, late.movable());
-    urma::UrmaEndpoint::OnResourceError(id, old, EIO);
+    urma::UrmaEndpoint::OnReceivedBytes(socket, old.get(), late.movable());
+    urma::UrmaEndpoint::OnConnectionError(id, old, EIO);
     EXPECT_TRUE(endpoint->_input_processor.read_buf().empty());
     EXPECT_EQ(0, endpoint->_pending_received_bytes.load());
     EXPECT_FALSE(socket->Failed());
     current->Close();
-    EXPECT_FALSE(urma::UrmaEndpoint::LookupConnectionResource(id));
+    EXPECT_TRUE(endpoint->PinConnection());  // Close retains the stable binding.
     socket->SetFailed();
 }
 
@@ -1117,7 +1145,7 @@ public:
     }
 };
 
-TEST_F(UrmaResourceTest, multiconnection_rpc_preserves_v2_v3_and_credit_progress) {
+TEST_F(UrmaConnectionTest, multiconnection_rpc_preserves_v2_v3_and_credit_progress) {
     ResourceEchoService service;
     brpc::Server server;
     ASSERT_EQ(0, server.AddService(&service, brpc::SERVER_DOESNT_OWN_SERVICE));
@@ -1166,8 +1194,8 @@ TEST_F(UrmaResourceTest, multiconnection_rpc_preserves_v2_v3_and_credit_progress
 }
 
 
-TEST_F(UrmaResourceTest, binding_flushes_credit_for_early_rx_without_another_cqe) {
-    ASSERT_EQ(0, b->BindPeer(ad));
+TEST_F(UrmaConnectionTest, binding_flushes_credit_for_early_rx_without_another_cqe) {
+    ASSERT_EQ(0, b->ImportPeer(ad));
     butil::IOBuf payload;
     {
         butil::IOBufAsZeroCopyOutputStream stream(&payload);
@@ -1183,7 +1211,7 @@ TEST_F(UrmaResourceTest, binding_flushes_credit_for_early_rx_without_another_cqe
     size_t accepted = 0;
     for (int i = 0; i < 1000; ++i) {
         if (payload.empty()) payload = seed;
-        const ssize_t n = b->Send(data, 1);
+        const ssize_t n = b->CutFromIOBufList(data, 1);
         if (n > 0) accepted += n;
         else if (errno != EAGAIN) FAIL() << errno;
         if (accepted == 125 * 64) break;
@@ -1191,23 +1219,23 @@ TEST_F(UrmaResourceTest, binding_flushes_credit_for_early_rx_without_another_cqe
     }
     ASSERT_EQ(125u * 64, accepted);
     for (int i = 0; i < 1000; ++i) {
-        { std::lock_guard<std::mutex> lock(resource_test_mutex);
-          if (resource_received[100].size() == accepted) break; }
+        { std::lock_guard<std::mutex> lock(connection_test_mutex);
+          if (connection_received[a_id].size() == accepted) break; }
         usleep(1000);
     }
     ASSERT_FALSE(b->IsWritable());
     payload.clear();
     payload.append("credit-blocked");
-    EXPECT_EQ(-1, b->Send(data, 1));
+    EXPECT_EQ(-1, b->CutFromIOBufList(data, 1));
     EXPECT_EQ(EAGAIN, errno);
     EXPECT_EQ("credit-blocked", payload.to_string());
-    ASSERT_EQ(0, a->BindPeer(bd));
+    ASSERT_EQ(0, a->ImportPeer(bd));
     for (int i = 0; i < 1000 && !b->IsWritable(); ++i) usleep(1000);
     EXPECT_TRUE(b->IsWritable());
 }
 
 
-TEST_F(UrmaResourceTest, failed_hardware_delete_is_retained_until_shutdown_retry) {
+TEST_F(UrmaConnectionTest, failed_hardware_delete_is_retained_until_shutdown_retry) {
     using FailDelete = void (*)(int);
     auto fail_delete = reinterpret_cast<FailDelete>(dlsym(
         RTLD_DEFAULT, "brpc_urma_mock_fail_jetty_delete"));
@@ -1220,7 +1248,7 @@ TEST_F(UrmaResourceTest, failed_hardware_delete_is_retained_until_shutdown_retry
 }
 
 
-TEST_F(UrmaResourceTest, shutdown_waits_for_destructor_not_only_weak_expiration) {
+TEST_F(UrmaConnectionTest, shutdown_waits_for_destructor_not_only_weak_expiration) {
     using Pause = void (*)(bool);
     using Entered = bool (*)();
     auto pause = reinterpret_cast<Pause>(dlsym(
@@ -1244,38 +1272,38 @@ TEST_F(UrmaResourceTest, shutdown_waits_for_destructor_not_only_weak_expiration)
 }
 
 
-TEST_F(UrmaResourceTest, failed_import_terminates_connection_before_rebind) {
+TEST_F(UrmaConnectionTest, failed_import_terminates_connection_before_rebind) {
     using FailImport = void (*)();
     auto fail_import = reinterpret_cast<FailImport>(dlsym(
         RTLD_DEFAULT, "brpc_urma_mock_fail_next_jetty_import"));
     ASSERT_TRUE(fail_import);
     fail_import();
-    EXPECT_EQ(-1, a->BindPeer(bd));
-    EXPECT_EQ(-1, a->BindPeer(bd));
+    EXPECT_EQ(-1, a->ImportPeer(bd));
+    EXPECT_EQ(-1, a->ImportPeer(bd));
     EXPECT_EQ(EPIPE, errno);
     EXPECT_FALSE(a->IsWritable());
 }
 
-TEST_F(UrmaResourceTest, callbacks_can_close_their_own_connection) {
+TEST_F(UrmaConnectionTest, callbacks_can_close_their_own_connection) {
     Bind();
     {
-        std::lock_guard<std::mutex> lock(resource_test_mutex);
-        close_resource_on_callback = true;
+        std::lock_guard<std::mutex> lock(connection_test_mutex);
+        close_connection_on_callback = true;
     }
     butil::IOBuf payload; payload.append("close-from-receive");
     butil::IOBuf* data[] = {&payload};
-    ASSERT_EQ(18, a->Send(data, 1));
+    ASSERT_EQ(18, a->CutFromIOBufList(data, 1));
     for (int i = 0; i < 1000 && b->IsWritable(); ++i) usleep(1000);
     EXPECT_FALSE(b->IsWritable());
     char memory[32] = {};
     butil::IOBuf invalid;
     invalid.append_user_data(memory, sizeof(memory), [](void*) {});
     data[0] = &invalid;
-    EXPECT_EQ(-1, a->Send(data, 1));
+    EXPECT_EQ(-1, a->CutFromIOBufList(data, 1));
     EXPECT_FALSE(a->IsWritable());
 }
 
-TEST_F(UrmaResourceTest, shutdown_does_not_join_poller_while_holding_creation_lock) {
+TEST_F(UrmaConnectionTest, shutdown_does_not_join_poller_while_holding_creation_lock) {
     if (!urma::FLAGS_urma_use_polling) GTEST_SKIP() << "Polling lifecycle test";
     Bind();
     provider->ReleasePollingMode(0);
@@ -1301,33 +1329,47 @@ TEST_F(UrmaResourceTest, shutdown_does_not_join_poller_while_holding_creation_lo
 }
 
 
-TEST_F(UrmaResourceTest, carrier_honors_explicit_connection_tag) {
+TEST_F(UrmaConnectionTest, carrier_honors_explicit_connection_tag) {
     if (FLAGS_task_group_ntags < 2) GTEST_SKIP() << "Run with --task_group_ntags=2";
     ASSERT_EQ(0, bthread_setconcurrency_by_tag(8, 1));
     ASSERT_EQ(0, provider->InitializePollingMode(1, nullptr, nullptr, nullptr));
     urma::UrmaConnectionOptions options;
-    options.socket_id = 102;
+    SocketOptions socket_options;
+    SocketId tagged_id;
+    ASSERT_EQ(0, Socket::Create(socket_options, &tagged_id));
+    SocketUniquePtr tagged_socket;
+    ASSERT_EQ(0, Socket::Address(tagged_id, &tagged_socket));
+    options.socket_id = tagged_id;
     options.tag = 1;
     urma::UrmaConnectionHandle tagged;
     ASSERT_EQ(0, provider->CreateConnection(options, &tagged));
-    urma::UrmaResourceDescription description;
-    ASSERT_EQ(0, tagged->GetLocalDescription(&description));
-    ASSERT_EQ(0, b->BindPeer(description));
-    ASSERT_EQ(0, tagged->BindPeer(bd));
+    urma::UrmaConnectionDescription local_description;
+    ASSERT_EQ(0, tagged->GetLocalDescription(&local_description));
+    ASSERT_EQ(0, b->ImportPeer(local_description));
+    ASSERT_EQ(0, tagged->ImportPeer(bd));
     butil::IOBuf payload; payload.append("tagged");
     butil::IOBuf* data[] = {&payload};
-    ASSERT_EQ(6, b->Send(data, 1));
+    ASSERT_EQ(6, b->CutFromIOBufList(data, 1));
     for (int i = 0; i < 1000; ++i) {
-        { std::lock_guard<std::mutex> lock(resource_test_mutex);
-          if (resource_received[102].size() == 6) break; }
+        { std::lock_guard<std::mutex> lock(connection_test_mutex);
+          if (connection_received[tagged_id].size() == 6) break; }
         usleep(1000);
     }
     {
-        std::lock_guard<std::mutex> lock(resource_test_mutex);
-        EXPECT_EQ("tagged", resource_received[102].to_string());
-        EXPECT_EQ(1, resource_received_tag[102]);
+        std::lock_guard<std::mutex> lock(connection_test_mutex);
+        EXPECT_EQ("tagged", connection_received[tagged_id].to_string());
+        EXPECT_EQ(1, connection_received_tag[tagged_id]);
     }
     tagged->Close();
+    tagged_socket->SetFailed();
+}
+
+TEST(UrmaPooledConnectionTest, factory_selects_pooled_connection_backend) {
+    std::unique_ptr<urma::UrmaConnectionProvider> provider;
+    ASSERT_EQ(0, urma::CreateUrmaConnectionProvider(
+        urma::UrmaConnectionMode::POOLED, &provider));
+    ASSERT_NE(nullptr, provider);
+    EXPECT_TRUE(provider->Shutdown());
 }
 
 #else  // BRPC_WITH_URMA
