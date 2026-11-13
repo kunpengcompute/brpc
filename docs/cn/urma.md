@@ -1,195 +1,155 @@
-# UrmaTransport：基于 URMA 的远程内存 RPC
+# URMA 共享队列传输
 
-UrmaTransport 是使用 openEuler
-[URMA](https://atomgit.com/openeuler/umdk)（Unified Remote Memory Access）SDK
-实现的传输层。它是
-[#3217](https://github.com/apache/brpc/discussions/3217) 中提出的路线 B，
-与基于 OBMM 的 UBRing 传输（路线 A，
-[#3226](https://github.com/apache/brpc/issues/3226)）互补，承担大包/跨节点
-高吞吐场景，共同构成路线 C（双后端）。
+URMA 通过统一连接资源框架支持两种后端：`--urma_resource_mode=exclusive`（默认）保留每连接独占 Jetty 的实现；`--urma_resource_mode=pooled` 使用共享 JFS/JFR。下文池化架构、配置和示例均指显式选择 `pooled` 的情况。两种后端使用各自的资源描述；两端模式一致时建立 URMA，模式不匹配时协商回退到 TCP。
 
-## 技术背景
+UrmaTransport 使用 openEuler [UMDK](https://atomgit.com/openeuler/umdk) 的
+URMA 接口承载 brpc 消息。当前数据通路采用可靠消息模式 `URMA_TM_RM`、
+CTP 和独立的 JFS/JFR，通过共享硬件队列服务多个逻辑连接。
 
-URMA 在 UMDK 支持的设备上提供 verbs 风格接口。当前实现创建可靠消息
-（`URMA_TM_RM`）Jetty，并使用 CTP 传输路径；通过
-`urma_post_jetty_send_wr` 提交发送 WR，通过 `urma_post_jfr_wr` 提交接收
-WR。完成事件既可由 JFC 忙轮询获取，也可通过 JFCE 事件 fd 获取。
+## 资源组织
 
-## 编译配置
+`UrmaMemoryPool` 管理已注册内存，`UrmaPooledResource` 管理队列及其生命周期，
+`UrmaPooledConnection` 保存连接状态并负责共享 CQ 处理、接收路由、重排与有序交付；
+`UrmaExclusiveConnection` 封装社区独占实现。两者通过 `UrmaConnection` 共用连接接口，
+由 `UrmaConnectionProvider` 管理创建与运行环境。`UrmaEndpoint` 保留握手、输入缓存和消息解析，
+池化 Connection 内部的 `UrmaRxDispatchContext` 管理一次 CQ 处理中的解析批次和最后消息交付边界。
 
-### CMake 编译
+JFS 是发送队列，JFR 是接收队列。每个 slot 独立持有 JFC、JFCE 和用于
+事件分发的 Socket。进程默认创建 48 个 JFS、64 个 JFR，队列数量不随
+逻辑连接数量线性增长。每个连接保存分配的本地 JFR、对端资源引用、
+SocketId、收发序号以及重排状态，不单独创建一套硬件队列。
 
-```bash
-# 带 URMA 支持编译 brpc
-cmake -B build -DWITH_URMA=ON
-make -C build -j$(nproc)
+对端 JFR 导入缓存使用 EID、UASID 和 JFR ID 共同作为键，以引用计数
+共享导入结果。连接销毁后，未完成发送仍持有相关资源引用，直到完成处理
+释放它们。
 
-# 编译 urma_performance 示例
-cd example/urma_performance
-cmake -B build
-make -C build -j$(nproc)
-```
+## 注册内存池
 
-`WITH_URMA=ON` 使用上游 UMDK 头文件进行编译。CMake 优先使用系统安装的
-SDK；找不到头文件时，会参照 Mooncake 的 mock 构建方式下载固定版本的
-UMDK commit，可通过 `DOWNLOAD_URMA_HEADERS=OFF` 禁止下载。找到 `liburma` 时使用
-真实硬件数据通路，否则链接 brpc 的 mock，使 URMA 代码和测试仍可在无硬件
-环境编译。`URMA_USE_MOCK` 默认为 `AUTO`；设为 `ON` 可强制使用 mock，设为
-`OFF` 则要求找到 `liburma` 并排除 mock。
+默认内存池使用 mmap 分配连续内存并注册为 URMA segment，以固定大小的
+块进行分配和回收。数据池的默认块大小为 8KiB，供 IOBuf 使用；可用数据
+空间需扣除 IOBuf 的块头。CTP 池提供独立的 4KiB 块，用于接收
+body；扣除块内 IOBuf 元数据后仍可容纳完整的 4032B body。独立 header
+池的块大小为 64B，不经过 IOBuf 块分配器。发送直接引用已注册 IOBuf，
+包括 8KiB 数据块和收到的 4KiB CTP 块，不为切换内存池而复制 body。
 
-### Make 编译
+空闲块分为 64 个分片，每个分片分别加锁。分配从当前线程对应的分片开始，
+必要时扫描其他分片。内存池初始化后不自动扩容；耗尽时返回失败。
+注销注册内存前必须先结束 DMA。仍被应用 IOBuf 引用的数据块需要保留
+其映射及回收器；CTP 池在所有应用引用归还前同时保留注册信息。
 
-```bash
-sh config_brpc.sh --headers=/usr/include --libs=/usr/lib \
-    --with-urma
-make -j4
+`UrmaMemoryPool` 提供分配、回收、地址归属、segment 查询和注销接口。
+可在全局初始化前通过 `SetUrmaMemoryPoolFactory` 更换实现，由全局初始化
+创建并安装数据池、CTP 池与 header 池。替代实现必须保持内存注册及引用生命周期
+约束。用户注册数据通过 `RegisterMemoryForUrma` 和
+`DeregisterMemoryForUrma` 管理；发送期间不得注销仍被使用的内存。
 
-# 强制使用 mock，或强制使用真实 liburma
-sh config_brpc.sh --headers=/usr/include --libs=/usr/lib \
-    --with-urma --with-urma-mock
-sh config_brpc.sh --headers=/usr/include --libs=/usr/lib \
-    --with-urma --without-urma-mock
-```
+## 建链与协商
 
-默认根据 `liburma` 是否存在自动选择；`--without-urma-mock` 要求配置路径中
-存在 `liburma`。
+连接先通过 TCP 完成握手，再切换到 URMA 数据通路。握手交换接收块大小、
+接收队列信息、带版本的 SocketId、EID/UASID、传输路径类型和 segment
+描述。客户端支持二进制 v2 和 Protobuf v3 两种握手编码，默认使用 v2。
+共享队列在 v2 使用 implementation=2，在 v3 使用 resource_mode=2；
+独占模式对应值为1。双方校验远端资源及地址范围。
 
-### Bazel 编译
+协商与资源导入完成后才发布 `URMA_ON` 状态。模式不匹配时完整消费 Hello，
+通过拒绝响应或 ACK=0 协商 TCP 回退，避免握手残留字节进入业务解析。
+I/O 错误及非法资源描述仍按相应错误路径处理。并发连接各自持有握手对象，
+避免复用仍在进行中的回调状态。
 
-```bash
-# 编译带 URMA 支持的 brpc
-bazel build --define=BRPC_WITH_URMA=true //:brpc
+## 发送路径
 
-# 仅展示关闭下载的开关；头文件仍须由工具链或本地 BUILD 目标声明
-bazel build --define=BRPC_WITH_URMA=true \
-    --define=BRPC_DOWNLOAD_URMA_HEADERS=false //:brpc
+每个 SEND 分片带有 64B header，包含目标 SocketId、16位序号和消息类型，
+多字节字段使用网络字节序。CTP 的单次消息总长度不超过 4096B，因此
+header 之后最多承载 4032B body；实际长度还受双方接收能力约束。
 
-# 编译并运行 URMA 单元测试（使用 mock，不需要 URMA 硬件）
-bazel test --define=BRPC_WITH_URMA=true \
-    --define=BRPC_URMA_USE_MOCK=true //test:brpc_unittests
+多 SGE 发送使用一个 header SGE，加上一个或多个 body SGE。
+发送函数跨输入 IOBuf 及其数据块收集 body，直到达到总 SGE 上限或 body
+长度上限。已注册 body 直接引用原内存，不为拼接报文复制整个 payload。
+未注册的片段不能直接作为 DMA 源。
 
-# 使用真实 liburma；要求链接器可找到 -lurma
-bazel build --define=BRPC_WITH_URMA=true \
-    --define=BRPC_URMA_USE_MOCK=false //:brpc
-```
+接收采用 header/body 两个 SGE。
 
-Bazel 会自动获取固定 commit 的 UMDK 头文件，并通过 `@umdk//:urma_headers`
-提供给 URMA 目标。设置 `BRPC_DOWNLOAD_URMA_HEADERS=false` 后，Bazel 不再依赖
-该外部仓库；实际构建仍需通过工具链或本地 BUILD 目标声明
-`urma_api.h`、`urma_types.h` 和 `urma_ubagg.h`。仅通过
-`--copt=-I/path` 指向工作区外目录，在默认 Bazel 沙箱下不会把未声明的头文件
-带入编译输入。设置
-`BRPC_URMA_USE_MOCK=true` 强制加入 mock；设置为 `false` 则排除 mock 并链接
-`liburma`。未指定时，URMA 构建默认使用 mock。
+默认按 SocketId 哈希确定首选 JFS。首选容量不足时，从最多4个不重复备选中
+选择在途请求最少者，一次最多尝试首选和一个备选。关闭 `urma_jfs_affinity`
+时按批轮询首选。每个 JFS 的 MPSC 请求队列由单一执行者推进，单次最多
+链式提交 `urma_io_tx_batch_max` 个 WR；仅收集已发布请求，不等待凑满。
 
-## 使用
+请求发布到资源队列即视为接受，调用方移除对应的连续字节前缀。资源层持有
+header、SGE、数据和导入资源，直到提交及 CQE 引用均释放。暂未成功 post
+的后缀保留在队列中，由完成事件继续推进；若容量已在 post 返回前归还，
+直接重试后缀。共享 SQ 的等待者登记在首选 JFS，按容量通知，退出时全部唤醒。
 
-通过在 channel / server 上设置 `socket_mode` 选择传输层：
+## 接收、重排与交付
 
-```cpp
-// 客户端
-brpc::ChannelOptions opt;
-opt.socket_mode = brpc::SOCKET_MODE_URMA;
-opt.protocol = "baidu_std";   // URMA 仅支持 baidu_std
-brpc::Channel channel;
-channel.Init("127.0.0.1:8003", &opt);
+每个 JFR 预投递多个接收上下文。接收完成后检查 header 和数据长度，
+接收适配器使用目标 SocketId 查找逻辑连接，在池化连接资源中按分片序号
+恢复有序字节流，并在交付锁内再次核对资源身份后进入 Endpoint 输入缓存。
+顺序到达的分片走快速路径，不插入重排 map；乱序分片暂存，缺口补齐后
+连续交付。序号处理支持16位回绕，重复或非法分片会使连接失败。
 
-// 服务端
-brpc::ServerOptions sopt;
-sopt.socket_mode = brpc::SOCKET_MODE_URMA;
-server.Start(port, &sopt);
-```
+接收上下文及 header 可在补收时复用，已交给应用的 body 由 IOBuf 引用
+保活。IOBuf 交接使用 movable 转移引用，避免按值浅拷贝带来的额外引用
+维护；这不等同于复制 payload。
 
-若对端不支持 URMA（例如 TCP 客户端连接 URMA 服务端），在 4 字节 magic
-握手后透明回退到 TCP，应用代码无需改动。
+默认按一次 CQ poll 的结果收集需要解析的连接，完成该批次的接收处理后，
+每个连接调用一次消息解析入口。此批次按连接合并解析调用，不改变消息
+协议边界或同一连接内的字节顺序。
 
-## 架构
+完成事件处理支持延后执行最后一条消息：先完成 CQ 事件交接并释放相关锁，
+再允许整个交付范围内至多一条消息在当前 bthread 执行。其余消息通过
+消息调度机制处理，避免业务回调持有共享队列锁。
 
-UrmaTransport 沿用与 `RdmaTransport` / `UBShmTransport` 一致的两层设计：
+## 并发与退出
 
-```
-UrmaTransport : public Transport         (urma_transport.{h,cpp})
-  +-- std::shared_ptr<TcpTransport>      (回退路径)
-  +-- urma::UrmaEndpoint*                (URMA 数据路径)
-  +-- UrmaState { URMA_ON, URMA_OFF, URMA_UNKNOWN }
+JFS 的发送执行者串行提交 WR，JFR/JFC 使用各自的接收和完成执行者。
+操作屏障协调 post、poll 与销毁；TX 使用原子登记数组，RX 使用固定上下文
+数组和 posted 标记。Socket 和资源池共同持有 slot 引用，防止排队的事件
+回调访问已释放对象。逻辑连接仍使用重排锁和交付锁维护字节流顺序。
 
-urma::UrmaEndpoint : public SocketUser   (urma/urma_endpoint.{h,cpp})
-  +-- UrmaResource { jfc, jfce, jfr, jetty, remote_jetty, remote_seg }
-  +-- 握手状态机（C/S 对称，在 TCP fd 上驱动）
-  +-- 发送路径：urma_post_jetty_send_wr(URMA_OPC_SEND)
-  +-- 接收路径：urma_poll_jfc -> HandleCompletion -> InputMessenger
-  +-- 双窗口信用流控（_remote_rq_window_size / _sq_window_size）
-```
+关闭时先停止事件与队列活动，唤醒发送等待者，并按资源依赖释放本地队列、
+完成上下文和导入资源。内存注销以 DMA 结束为前提，存储释放还需保证应用引用不再使用它；不能
+为了回收对象而提前释放设备或应用仍可能访问的内存。
 
-### 建链流程（双平面）
+## 构建与启用
 
-与 RDMA / UBRing 一致，控制面为 TCP，数据面为 URMA：
+在真实设备上启用该模块需要 UMDK 头文件和 `liburma`。CMake 使用
+`WITH_URMA=ON`、`URMA_USE_MOCK=OFF`，
+优先查找安装的 SDK；找不到头文件时可下载固定版本的 UMDK 头文件，
+`DOWNLOAD_URMA_HEADERS=OFF` 可禁止下载。可通过 `URMA_ROOT`、
+`URMA_INCLUDE_PATH`、`URMA_BOND_INCLUDE_PATH` 和 `URMA_LIB` 指定 SDK。
 
-1. TCP 连接建立。
-2. `UrmaConnect::StartConnect` 起客户端握手 bthread。
-3. 双方在 TCP fd 上交换 `UrmaHello` 消息（v2 二进制 magic `URMA`，
-   v3 protobuf magic `URM3`），携带本地 EID、jetty id、recv buffer 数量、
-   以及扁平化的 buffer 池 segment。
-4. 双方先调用 `urma_import_seg` **再**调用 `urma_import_jetty`，为远端 EID
-   建立传输路径（TP）路由。跳过 `import_seg` 会导致首个 SEND 被硬件以
-   `URMA_CR_RNR_RETRY_CNT_EXC_ERR` 拒绝。
-5. 4 字节 ACK（`HELLO_ACK_URMA_OK = 0x1`）确认双方均要 URMA。
-6. 成功后 TCP fd 仅保留用于 epoll 生命周期和回退，数据走 URMA。
+Make 使用 `config_brpc.sh` 的 `--with-urma --without-urma-mock`，
+并通过 `--headers`、`--libs` 提供依赖路径。Bazel 使用 `BRPC_WITH_URMA=true`、
+`BRPC_URMA_USE_MOCK=false`，链接真实的 `liburma`；
+关闭 `BRPC_DOWNLOAD_URMA_HEADERS` 后，需要由工具链或本地依赖声明头文件。
 
-### 内存管理
+客户端和服务端分别通过 `ChannelOptions::use_urma` 与
+`ServerOptions::use_urma` 启用传输。当前支持 `baidu_std` 协议，使用
+非 bonding 设备及事件驱动模式；不支持忙轮询、端到端 credit/ACK 流控，
+也不提供大包单边 READ/WRITE。大于单次 CTP 上限的数据继续分片 SEND。
 
-申请一大段 `mmap` 内存，用 `urma_register_seg` 一次性注册，再切成固定大小
-buffer（默认 8KB）。劫持 `butil::iobuf::blockmem_allocate` 使每个 IOBuf
-block 都由注册 segment 支撑，发送路径可直接从 IOBuf block refs 构建
-`urma_sge_t`，无需逐消息注册（与 RDMA `block_pool` 设计一致）。用户注册
-内存通过 `urma::RegisterMemoryForUrma` / `DeregisterMemoryForUrma` 支持。
+## 主要运行参数
 
-## 配置
+| 参数 | 默认值 | 含义 |
+| --- | --- | --- |
+| `urma_device` | 空 | 指定设备；空值选择枚举到的首个设备 |
+| `urma_eid_index` | -1 | 启动时选择 EID；-1 使用 EID 列表第一项，非负值匹配设备返回的实际 `eid_index`；不存在或小于 -1 时初始化失败 |
+| `urma_io_jfs_cnt` | 48 | 进程共享发送队列数量 |
+| `urma_io_jfr_cnt` | 64 | 进程共享接收队列数量 |
+| `urma_io_sq_depth` | 128 | 每个发送队列的在途槽位数 |
+| `urma_io_rx_depth` | 512 | 每个接收队列的预投递深度 |
+| `urma_jfs_affinity` | true | 按 SocketId 哈希选择固定首选 JFS |
+| `urma_io_tx_batch_max` | 8 | 每批准备与链式提交的 WR 上限，范围1至32 |
+| `urma_io_jfs_lock_free` | false | 设置 UMDK JFS 单执行者属性 |
+| `urma_io_jfr_lock_free` | false | 设置 UMDK JFR 单执行者属性 |
+| `urma_io_jfc_lock_free` | false | 设置 UMDK JFC 单执行者属性 |
+| `urma_buffer_size` | 8192 | 数据池块大小，包含 IOBuf 块头 |
+| `urma_ctp_buf_count` | 48000 | 4KiB CTP 块数量；必须大于接收预投递总数 |
+| `urma_max_sge` | 0 | 0采用设备能力；正值限制发送 SGE 数 |
+| `urma_cqe_poll_once` | 32 | 每次 poll 最多取出的 CQE 数 |
+| `urma_rx_batch_parse` | true | 同一 poll 中按连接合并解析调用 |
+| `urma_client_handshake_version` | 2 | 客户端握手编码，支持2或3 |
 
-所有 flag 使用 `urma_` 前缀（对标 RDMA 的 `rdma_` 前缀）：
-
-| Flag | 默认 | 用途 |
-|------|------|------|
-| `--urma_use_polling` | false | 轮询 JFC 而非事件模式 |
-| `--urma_poller_num` | 1 | 每 bthread tag 的轮询器数（轮询模式） |
-| `--urma_disable_bthread` | false | 内联处理消息（不起 bthread） |
-| `--urma_sq_size` | 128 | 本地 JFS 深度 [16, 4096] |
-| `--urma_rq_size` | 128 | 本地 JFR 深度 [16, 4096] |
-| `--urma_cqe_poll_once` | 32 | 每次 `urma_poll_jfc` 的上限 |
-| `--urma_recv_zerocopy` | true | 大于 `--urma_zerocopy_min_size` 的接收零拷贝 |
-| `--urma_zerocopy_min_size` | 512 | 小于此值的接收拷贝 |
-| `--urma_device` | "" | URMA 设备名（空=首个） |
-| `--urma_max_sge` | 0 | 每 WR SGE 上限（0=设备上限） |
-| `--urma_bonding_mode` | 0 | bonding 模式：0=standalone，1=active-backup，2=balance |
-| `--urma_bonding_level` | 0 | bonding 层级：0=IODIE，1=port |
-| `--urma_prepared_jetty_cnt` | 8 | 预连接 Jetty+CQ 请求数量；会根据 `RLIMIT_NOFILE` 自动限制 |
-| `--urma_buffer_size` | 8192 | 池中每个 buffer 大小（字节） |
-| `--urma_buffer_count` | 65536 | 池中 buffer 数量 |
-| `--urma_poller_yield` | false | 忙轮询循环中主动让出 bthread |
-| `--urma_client_handshake_version` | 2 | 客户端握手版本（2=二进制，3=protobuf） |
-
-设备名以 `bonding` 开头时，brpc 会在创建 context 后、创建 segment 和队列
-前配置 provider。默认 standalone+IODIE 配置与 UMDK 性能工具保持一致。
-bonding 支持需要 provider 扩展头文件 `urma_ubagg.h`。
-
-## 与 UBRing 协同
-
-UrmaTransport 推荐用于**大包和跨节点**高吞吐路径，而 UBRing
-（`SOCKET_MODE_UBRING`）对**小包和同机 IPC**最优（亚微秒、零系统调用）。
-混合负载可按服务选择传输层：
-
-| 场景 | 建议 `socket_mode` |
-|------|---------------------|
-| 同机 IPC | `SOCKET_MODE_UBRING` |
-| 跨节点小包（< 64KB） | `SOCKET_MODE_UBRING`（UBS-Mem）或 `SOCKET_MODE_URMA` |
-| 跨节点大包（>= 64KB） | `SOCKET_MODE_URMA` |
-| 传统 RoCE/IB 数据中心 | `SOCKET_MODE_URMA` 或 `SOCKET_MODE_RDMA` |
-
-单连接内按包大小自动分流的方案（路线 C 方案 B）作为后续演进方向。
-
-## 限制
-
-- 仅支持 `baidu_std` 协议（与 RDMA 一致）。SSL、RTMP、NSHEAD、MONGO 在
-  `ContextInitOrDie` 阶段拒绝。
-- 硬件数据通路需要受支持的 UMDK provider 和 `liburma`。
-- 当前实现面向 Linux。
+队列数量、深度与内存池参数应在全局初始化前确定。接收预投递需要充足
+CTP 块，header 数量需要覆盖接收和发送在途槽位；初始化会校验组合是否
+可用。硬件能力同样约束队列深度、SGE 数和消息大小。
