@@ -27,6 +27,7 @@ option(WITH_BTHREAD_TRACER "With bthread tracer supported" OFF)
 option(WITH_SNAPPY "With snappy" OFF)
 option(WITH_RDMA "With RDMA" OFF)
 option(WITH_URMA "With URMA (openEuler Unified Remote Memory Access)" OFF)
+option(WITH_TCMALLOC "Link tcmalloc" OFF)
 set(URMA_USE_MOCK "AUTO" CACHE STRING
     "URMA mock mode: AUTO, ON, or OFF (OFF requires liburma)")
 set_property(CACHE URMA_USE_MOCK PROPERTY STRINGS AUTO ON OFF)
@@ -187,11 +188,24 @@ list(APPEND BRPC_COMMON_DEFINITIONS
     __const__=__unused__
     _GNU_SOURCE
     USE_SYMBOLIZE
-    NO_TCMALLOC
     __STDC_FORMAT_MACROS
     __STDC_LIMIT_MACROS
     __STDC_CONSTANT_MACROS
 )
+
+if(WITH_TCMALLOC)
+    find_path(TCMALLOC_INCLUDE_PATH NAMES gperftools/tcmalloc.h)
+    find_library(TCMALLOC_LIB NAMES tcmalloc)
+    if(NOT TCMALLOC_INCLUDE_PATH OR NOT TCMALLOC_LIB)
+        message(FATAL_ERROR "WITH_TCMALLOC requires gperftools headers and libtcmalloc")
+    endif()
+    if(WITH_ASAN)
+        message(FATAL_ERROR "tcmalloc and AddressSanitizer cannot be enabled together")
+    endif()
+    list(APPEND BRPC_COMMON_INCLUDE_DIRS ${TCMALLOC_INCLUDE_PATH})
+else()
+    list(APPEND BRPC_COMMON_DEFINITIONS NO_TCMALLOC)
+endif()
 
 if(WITH_ASAN)
     list(APPEND BRPC_COMMON_COMPILE_OPTIONS -fsanitize=address)
@@ -468,6 +482,9 @@ if(WITH_UBRING)
 endif()
 
 set(BRPC_PRIVATE_LIBS "-lgflags -lprotobuf -lleveldb -lprotoc -lssl -lcrypto -ldl -lz")
+if(WITH_TCMALLOC)
+    set(BRPC_PRIVATE_LIBS "${BRPC_PRIVATE_LIBS} -ltcmalloc")
+endif()
 
 if(WITH_GLOG)
     set(DYNAMIC_LIB ${GLOG_LIB} ${DYNAMIC_LIB})
@@ -508,6 +525,9 @@ endif()
 list(REMOVE_DUPLICATES BRPC_COMMON_INCLUDE_DIRS)
 
 add_library(brpc_common_config INTERFACE)
+if(WITH_TCMALLOC)
+    target_link_libraries(brpc_common_config INTERFACE ${TCMALLOC_LIB})
+endif()
 # Generated protobuf headers live in the build directory. Search it before src/
 # so leftover in-source *.pb.h (gitignored, produced by Make) cannot shadow
 # updated .proto files such as errno.proto.
