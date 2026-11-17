@@ -105,6 +105,7 @@ void HelloMessage::Serialize(void* buf) const {
     write64(seg_va);
     write64(seg_len);
     write32(seg_token_id);
+    if (impl_ver == IMPL_POOLED_VERSION) write64(socket_id);
 }
 
 void HelloMessage::Deserialize(const void* buf) {
@@ -145,6 +146,7 @@ void HelloMessage::Deserialize(const void* buf) {
     seg_va = read64();
     seg_len = read64();
     seg_token_id = read32();
+    if (impl_ver == IMPL_POOLED_VERSION) socket_id = read64();
 }
 
 }  // namespace v2_wire
@@ -165,10 +167,11 @@ constexpr uint32_t MAX_V3_PB_SIZE = 4096;
 }  // namespace
 
 bool ValidHello(const ParsedHello& h) {
-    if (h.buffer_size < MIN_BUFFER_SIZE) {
+    if (h.pooled && (h.socket_id == INVALID_SOCKET_ID || h.tp_type != URMA_CTP)) return false;
+    if (h.buffer_size < (h.pooled ? 1024 - sizeof(butil::IOBuf::Block) : MIN_BUFFER_SIZE)) {
         return false;
     }
-    if (h.recv_buffer_cnt < MIN_BUFFER_CNT || h.recv_buffer_cnt > MAX_BUFFER_CNT) {
+    if (h.recv_buffer_cnt < (h.pooled ? 1 : MIN_BUFFER_CNT) || h.recv_buffer_cnt > MAX_BUFFER_CNT) {
         return false;
     }
     if (h.jetty_id == 0) {
@@ -193,17 +196,29 @@ bool ValidHello(const ParsedHello& h) {
 // and translates it into ParsedHello.
 int ReadBodyAndNegotiate(UrmaEndpoint* ep, ParsedHello* out, bool* negotiated) {
     *negotiated = false;
-    uint8_t body[v2_wire::HELLO_BODY_LEN];
-    if (ep->ReadFromFd(body, v2_wire::HELLO_BODY_LEN) < 0) {
-        return -1;
+    uint8_t body[v2_wire::POOLED_BODY_LEN]{};
+    if (ep->ReadFromFd(body, 6) < 0) return -1;
+    uint16_t length, version, implementation;
+    std::memcpy(&length, body, 2);
+    std::memcpy(&version, body + 2, 2);
+    std::memcpy(&implementation, body + 4, 2);
+    length = butil::NetToHost16(length);
+    implementation = butil::NetToHost16(implementation);
+    const bool pooled = implementation == v2_wire::IMPL_POOLED_VERSION;
+    const size_t packet_size = pooled ? v2_wire::POOLED_PACKET_LEN : v2_wire::HELLO_PACKET_LEN;
+    if (length < packet_size || length > v2_wire::HELLO_MSG_LEN_MAX) {
+        errno = EPROTO; return -1;
     }
+    if (butil::NetToHost16(version) != v2_wire::HELLO_V2_VERSION ||
+        (implementation != v2_wire::IMPL_V2_VERSION && !pooled)) {
+        return DrainBytes(ep, length - 4 - 6);
+    }
+    if (ep->ReadFromFd(body + 6, packet_size - 4 - 6) < 0) return -1;
     v2_wire::HelloMessage m;
     m.Deserialize(body);
-    if (m.msg_len < v2_wire::HELLO_MSG_LEN_MIN ||
-        m.msg_len > v2_wire::HELLO_MSG_LEN_MAX ||
-        m.hello_ver != v2_wire::HELLO_V2_VERSION ||
-        m.impl_ver != v2_wire::IMPL_V2_VERSION) { return 0; }
     ParsedHello p;
+    p.pooled = pooled;
+    p.socket_id = m.socket_id;
     p.buffer_size = m.buffer_size;
     p.recv_buffer_cnt = m.recv_buffer_cnt;
     p.jetty_id = m.jetty_id;
@@ -215,15 +230,13 @@ int ReadBodyAndNegotiate(UrmaEndpoint* ep, ParsedHello* out, bool* negotiated) {
     p.seg_va = m.seg_va;
     p.seg_len = m.seg_len;
     p.seg_token_id = m.seg_token_id;
-    if (!ValidHello(p)) {
-        return 0;
-    }
     // Drain trailing bytes if msg_len advertises more than the fixed body.
-    if (m.msg_len > v2_wire::HELLO_PACKET_LEN) {
-        if (DrainBytes(ep, m.msg_len - v2_wire::HELLO_PACKET_LEN) < 0) {
+    if (m.msg_len > packet_size) {
+        if (DrainBytes(ep, m.msg_len - packet_size) < 0) {
             return -1;
         }
     }
+    if (!ValidHello(p)) return 0;
     *out = p;
     *negotiated = true;
     return 0;
@@ -248,10 +261,10 @@ int DrainBytes(UrmaEndpoint* ep, size_t n) {
 int UrmaHandshakeClientV2::SendLocalHello() {
     v2_wire::HelloMessage m;
     _ep->FillLocalHelloV2(&m);
-    uint8_t packet[v2_wire::HELLO_PACKET_LEN];
+    uint8_t packet[v2_wire::POOLED_PACKET_LEN]{};
     std::memcpy(packet, "URMA", 4);
     m.Serialize(packet + 4);
-    return _ep->WriteToFd(packet, v2_wire::HELLO_PACKET_LEN);
+    return _ep->WriteToFd(packet, m.msg_len);
 }
 
 int UrmaHandshakeClientV2::ReceiveAndParseRemoteHello(ParsedHello* out,
@@ -288,10 +301,10 @@ int UrmaHandshakeServerV2::SendLocalHello() {
         m.jetty_id = 0;
         m.buffer_size = 0;
     }
-    uint8_t packet[v2_wire::HELLO_PACKET_LEN];
+    uint8_t packet[v2_wire::POOLED_PACKET_LEN]{};
     std::memcpy(packet, "URMA", 4);
     m.Serialize(packet + 4);
-    return _ep->WriteToFd(packet, v2_wire::HELLO_PACKET_LEN);
+    return _ep->WriteToFd(packet, m.msg_len);
 }
 
 // ============================================================================

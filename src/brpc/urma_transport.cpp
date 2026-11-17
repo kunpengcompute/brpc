@@ -80,7 +80,10 @@ int UrmaTransport::Reset(int32_t /*expected_nref*/) {
 }
 
 std::shared_ptr<AppConnect> UrmaTransport::Connect() {
-    if (_default_connect == nullptr) {
+    // Each connecting Socket owns its handshake callback, including sockets
+    // cloned for pooled/short Channel connection types.
+    if (_default_connect == nullptr ||
+        dynamic_cast<urma::UrmaConnect*>(_default_connect.get()) != nullptr) {
         return std::make_shared<urma::UrmaConnect>();
     }
     return _default_connect;
@@ -118,7 +121,7 @@ int UrmaTransport::WaitEpollOut(butil::atomic<int>* epollout_butex,
             // Same caveat as RDMA: URMA cannot detect failure by writing, so
             // after a failed butex wait we must re-check _socket->Failed().
             int rc =
-                bthread::butex_wait(epollout_butex, expected_val, &duetime);
+                _urma_ep->WaitWritable(epollout_butex, expected_val, &duetime);
             if (rc < 0 && errno != EWOULDBLOCK && errno != ETIMEDOUT) {
                 const int saved_errno = errno;
                 PLOG(ERROR) << "Fail to wait epollout butex";
@@ -157,14 +160,16 @@ void UrmaTransport::ProcessEvent(bthread_attr_t attr) {
 
 void UrmaTransport::QueueMessage(InputMessageClosure& input_msg,
                                  int* num_bthread_created, bool last_msg) {
-    if (last_msg && !urma::FLAGS_urma_use_polling) {
-        return;
-    }
+    // Event receivers own the parser's final closure. Pooled receivers return
+    // it to their adapter so it cannot execute inside CQ processing.
+    const bool pooled = (urma::GetUrmaConnectionMode() == urma::UrmaConnectionMode::POOLED);
+    if (last_msg && !urma::FLAGS_urma_use_polling &&
+        (!pooled || !FLAGS_usercode_in_pthread)) return;
     InputMessageBase* to_run_msg = input_msg.release();
     if (!to_run_msg) {
         return;
     }
-    if (urma::FLAGS_urma_disable_bthread) {
+    if (!pooled && urma::FLAGS_urma_disable_bthread) {
         Transport::ProcessInputMessage(to_run_msg);
         return;
     }
@@ -175,7 +180,7 @@ void UrmaTransport::QueueMessage(InputMessageClosure& input_msg,
     tmp.keytable_pool = _socket->keytable_pool();
     tmp.tag = bthread_self_tag();
     bthread_attr_set_name(&tmp, "ProcessInputMessage");
-    if (!FLAGS_usercode_in_coroutine && bthread_start_background(
+    if ((pooled || !FLAGS_usercode_in_coroutine) && bthread_start_background(
             &th, &tmp, Transport::ProcessInputMessage, to_run_msg) == 0) {
         ++*num_bthread_created;
     } else {

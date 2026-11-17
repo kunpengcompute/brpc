@@ -35,6 +35,7 @@ namespace brpc {
 class UrmaTransport : public Transport {
     friend class TransportFactory;
     friend class urma::UrmaEndpoint;
+    friend class urma::UrmaPooledConnection;
     friend class urma::UrmaConnect;
     friend class urma::UrmaHandshakeServerV2;
     friend class urma::UrmaHandshakeClientV2;

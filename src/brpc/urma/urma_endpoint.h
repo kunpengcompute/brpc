@@ -18,13 +18,13 @@
 #ifndef BRPC_URMA_ENDPOINT_H
 #define BRPC_URMA_ENDPOINT_H
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <ostream>
 #include <vector>
 
 #include "butil/atomicops.h"
-#include "butil/containers/mpsc_queue.h"
 #include "butil/iobuf.h"
 #include "butil/macros.h"
 #include "butil/synchronization/lock.h"
@@ -34,8 +34,7 @@
 
 #if BRPC_WITH_URMA
 
-#include "urma_api.h"
-#include "urma_types.h"
+#include "brpc/urma/urma_connection.h"
 #include "brpc/urma/urma_handshake.h"
 #include "brpc/urma/urma_handshake.pb.h"
 
@@ -46,6 +45,7 @@ class UrmaTransport;
 namespace urma {
 
 class UrmaHandshake;
+class UrmaConnection;
 struct ParsedHello;
 
 DECLARE_bool(urma_use_polling);
@@ -75,34 +75,13 @@ private:
     int _error{0};
 };
 
-// POD holder for the URMA kernel objects backing one connection:
-//   - the send jetty (JFS), shared-JFR jetty, JFR, JFC, and (event mode) JFCE
-//   - the imported peer jetty and peer segment
-// Mirrors the role of rdma::RdmaResource, but the URMA object graph is a
-// little different (no separate QP/CQ split).
-struct UrmaResource {
-    UrmaResource* next{nullptr};  // singly-linked list for the prepared pool
-
-    urma_jfc_t* jfc{nullptr};
-    urma_jfce_t* jfce{nullptr};   // event mode only; null in polling mode
-    urma_jfr_t* jfr{nullptr};
-    urma_jetty_t* jetty{nullptr};
-    // Imported peer objects (created per-connection, not pooled).
-    urma_target_jetty_t* remote_jetty{nullptr};
-    urma_target_seg_t* remote_seg{nullptr};
-
-    UrmaResource() = default;
-    ~UrmaResource();
-    DISALLOW_COPY_AND_ASSIGN(UrmaResource);
-};
-
-// One per Socket. Carries the handshake state machine, the send/recv
-// windows, and the registered buffer bookkeeping. Cache-line padded to avoid
-// false sharing between connections.
-class BAIDU_CACHELINE_ALIGNMENT UrmaEndpoint : public SocketUser {
+// Per-Socket negotiation and brpc stream integration. Native resources live
+// behind the connection interface.
+class BAIDU_CACHELINE_ALIGNMENT UrmaEndpoint {
     friend class UrmaConnect;
+    friend class UrmaPooledConnection;
     friend class Socket;
-    friend class UrmaTransport;
+    friend class ::brpc::UrmaTransport;
     friend class UrmaHandshakeClientV2;
     friend class UrmaHandshakeServerV2;
     friend class UrmaHandshakeClientV3;
@@ -112,12 +91,12 @@ class BAIDU_CACHELINE_ALIGNMENT UrmaEndpoint : public SocketUser {
 
 public:
     explicit UrmaEndpoint(Socket* s);
-    ~UrmaEndpoint() override;
+    ~UrmaEndpoint();
 
     // ---- Global initialization / release ----
     // Pre-allocate the prepared Jetty pool. Called once at GlobalUrmaInitializeOrDie.
     static int GlobalInitialize();
-    static void GlobalRelease();
+    static bool GlobalRelease();
 
     // ---- Per-connection lifecycle ----
     // Reset the endpoint back to UNINIT for reuse.
@@ -131,6 +110,8 @@ public:
     // Whether the endpoint can post more sends (both windows non-empty).
     bool IsWritable() const;
 
+    int WaitWritable(butil::atomic<int>* butex, int expected,
+                     const timespec* deadline);
     // For debug: dump endpoint state to @os.
     void DebugInfo(std::ostream& os,
                    butil::StringPiece connector = "\n") const;
@@ -142,14 +123,6 @@ public:
     //   FALLBACK_TCP     -> hand off to InputMessenger::OnNewMessages
     //   ESTABLISHED      -> drain stray TCP bytes
     static void OnNewDataFromTcp(Socket* m);
-
-    // CQ completion poller: the edge-triggered callback for the CQ socket
-    // (whose user is this endpoint). Drains urma_poll_jfc and feeds the
-    // completions into HandleCompletion, then calls InputMessenger. Event mode
-    // also drains the aggregated JFCE until urma_wait_jfc reports no event,
-    // then calls Socket::MoreReadEvents so later JFCE edges can start the
-    // callback again.
-    static void PollCq(Socket* m);
 
     // Initialize the per-tag polling infrastructure (polling mode).
     static int PollingModeInitialize(bthread_tag_t tag,
@@ -182,9 +155,6 @@ public:
     // to false (returns 0) if the message is invalid.
     int ReadAndParseHelloV3(ParsedHello* out, bool* negotiated);
 
-    // Apply the peer's negotiated parameters (window sizes, peer jetty/seg).
-    void ApplyRemoteHello(const ParsedHello& remote);
-
 private:
     enum State {
         UNINIT = 0x0,
@@ -207,9 +177,10 @@ private:
     static void* ProcessHandshakeAtClient(void* arg);
     static void* ProcessHandshakeAtServer(void* arg);
 
-    // Allocate / deallocate the per-connection URMA resources (JFCE/JFC/JFR/
-    // Jetty, plus the CQ socket). Returns 0 on success.
-    int AllocateResources();
+    // Publish per-connection resources once. DeallocateResources logically
+    // closes without detaching; destruction/quiescent Reset releases ownership.
+    // AllocateResources returns 0 on success.
+    int AllocateResources(UrmaConnectionRole role);
     void DeallocateResources();
 
     // Import the peer's jetty and buffer-pool segment. CRITICAL:
@@ -219,47 +190,32 @@ private:
     // Returns 0 on success.
     int ImportPeer(const ParsedHello& peer);
 
-    // Post @num recv WRs into the local JFR. If @zerocopy, use a fresh pool
-    // buffer; otherwise reuse the fixed _rbuf slot. Returns 0 on success.
-    int PostRecv(uint32_t num, bool zerocopy);
-
-    // Post a single recv WR pointing at @block of @block_size.
-    int DoPostRecv(void* block, size_t block_size);
-
-    // Send a pure-ACK URMA_OPC_SEND_IMM WR with no payload. @imm carries the
-    // number of receive WRs reposted for peer-side flow-control credit.
-    int SendImm(uint32_t imm);
-    // Batched credit ack: if _new_rq_wrs is above the threshold, flush it via
-    // a standalone SendImm. @num is the number of new recv WRs to add.
-    int SendAck(int num);
-
-    // Handle one completion record. For SEND completions: reclaim the SQ
-    // window and wake the writer. For RECV completions: cut the payload into
-    // the URMA input processor, repost the recv WR, and ack. Returns bytes
-    // received
-    // (0 for send completions), or -1 on error (errno set).
-    ssize_t HandleCompletion(const urma_cr_t& cr);
-
     // Queue received bytes for InputMessenger. CQ receive completions can
     // arrive while the server is still waiting for the final TCP handshake
     // ACK. Keep those bytes in the URMA input processor and dispatch them only
     // after ESTABLISHED, matching the connection-ready boundary seen by user
     // code.
-    void DispatchReceivedBytes(SocketUniquePtr& s, ssize_t bytes);
-
-    // Consume one async event from the JFCE fd (event mode only). The caller
-    // drains completions before acknowledge/rearm because the bonding provider
-    // uses poll_jfc to record which physical JFCs must be rearmed.
-    int WaitCqEvent(SocketUniquePtr& s, urma_jfc_t** event_jfc);
-
-    // Request completion notification (event mode only).
-    int ReqNotifyCq();
-
-    // Add/remove the CQ socket id to/from the poller (polling mode only).
-    void PollerAddCqSid();
-    void PollerRemoveCqSid();
+    // Accept bytes only from the current, open URMA connection and append them
+    // to the input stream. Return false when the delivery is rejected.
+    bool AppendReceivedBytes(SocketUniquePtr&, const UrmaConnection*, butil::IOBuf);
+    // Parse accumulated input and return the last message for caller dispatch.
+    void ProcessReceivedBytes(SocketUniquePtr&, InputMessageClosure&);
+    // Forward on_bytes to the Endpoint using the already pinned Socket.
+    static bool OnReceivedBytes(SocketUniquePtr&, const UrmaConnection*, butil::IOBuf);
+    // Forward input readiness and return the last parsed message to the caller.
+    static void OnInputReady(SocketUniquePtr&, InputMessageClosure&);
+    // Resolve a receive error by SocketId; ignore sockets no longer using URMA.
+    static void OnRxError(SocketId, int);
+    // Report an asynchronous error only if its source is the current connection.
+    static void OnConnectionError(SocketId, const UrmaConnectionHandle&, int);
+    // Caller must keep the Socket alive. Reset requires quiescent old users.
+    UrmaConnection* BorrowConnection() const {
+        return _published_connection.load(std::memory_order_acquire);
+    }
+    UrmaConnectionHandle PinConnection() const;
 
     inline void TryReadOnTcp();
+    int SendFallbackHello(int version);
     void FallbackToTcp(UrmaTransport* transport, bool process_tcp);
     void FailHandshake(UrmaTransport* transport, int error,
                        const char* reason);
@@ -278,68 +234,17 @@ private:
     butil::atomic<int64_t> _pending_received_bytes{0};
     butil::Mutex _dispatch_mutex;
 
-    // The URMA resources (jetty / jfc / jfr / jfce / imported peer objects).
-    UrmaResource* _resource{nullptr};
-
-    // The SocketId wrapping the JFCE fd (event mode) or a synthetic carrier
-    // (polling mode). PollCq is the edge-triggered callback on this socket.
-    SocketId _cq_sid{INVALID_SOCKET_ID};
-
-    // ---- Send / recv window bookkeeping ----
-    uint16_t _sq_size{0};   // local JFS depth
-    uint16_t _rq_size{0};   // local JFR depth
-
-    // The input stream carried by the URMA jetty.
+    // Write once before release-publication; never detach on failure/fallback.
+    // Socket references pin this owner. Only destruction or quiescent Reset
+    // may release it. TX contexts retain their independent DMA/import owners.
+    UrmaConnectionHandle _connection;
+    std::atomic<UrmaConnection*> _published_connection{nullptr};
+    // Protected by _dispatch_mutex; prevents publication after logical close.
+    bool _connection_closed{false};
     InputMessengerProcessor _input_processor;
-
-    // Per-WR send buffers (own the IOBuf until the SEND completes).
-    std::vector<butil::IOBuf> _sbuf;
-    // Per-WR recv buffers (zero-copy targets).
-    std::vector<butil::IOBuf> _rbuf;
-    std::vector<void*> _rbuf_data;
-    // Peer's advertised recv buffer size (caps each WR's payload).
-    uint32_t _remote_recv_block_size{0};
-
-    // Flow-control windows (atomic; producer decrements, completion handler
-    // increments).
-    uint16_t _local_window_capacity{0};
-    uint16_t _remote_window_capacity{0};
-    butil::atomic<uint16_t> _remote_rq_window_size{0};  // WRs we can send
-    butil::atomic<uint16_t> _sq_window_size{0};          // WRs we can post
-    butil::atomic<uint16_t> _new_rq_wrs{0};              // new recv WRs (to ack)
-    uint16_t _sq_imm_window_size{0};                     // budget for pure-ack WRs
-
-    // SQ producer / consumer indices.
-    uint16_t _sq_current{0};
-    uint16_t _sq_sent{0};
-    // RQ consumer index.
-    uint16_t _rq_received{0};
 
     // Butex for waking the handshake bthread parked in ReadFromFd.
     butil::atomic<int>* _read_butex{nullptr};
-
-    // Reserved WR slots for pure-ack IMM WRs.
-    static constexpr uint16_t RESERVED_WR_NUM = 3;
-
-    // Cq socket id operation (polling mode registration queue).
-    struct CqSidOp {
-        enum OpType { ADD, REMOVE } type;
-        SocketId sid;
-    };
-    struct BAIDU_CACHELINE_ALIGNMENT Poller {
-        bthread_t tid{INVALID_BTHREAD};
-        butil::MPSCQueue<CqSidOp, butil::ObjectPoolAllocator<CqSidOp>> op_queue;
-        std::function<void()> callback;
-        std::function<void()> init_fn;
-        std::function<void()> release_fn;
-    };
-    struct BAIDU_CACHELINE_ALIGNMENT PollerGroup {
-        PollerGroup() : pollers(FLAGS_urma_poller_num), running(false) {}
-        std::vector<Poller> pollers;
-        butil::atomic<bool> running;
-    };
-    static std::vector<PollerGroup> _poller_groups;
-    bthread_tag_t _poller_tag{0};
 
     DISALLOW_COPY_AND_ASSIGN(UrmaEndpoint);
 };

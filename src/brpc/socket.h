@@ -64,7 +64,10 @@ class RdmaHandshakeServerV3;
 }
 
 namespace urma {
+class UrmaConnection;
 class UrmaEndpoint;
+class UrmaExclusiveConnection;
+class UrmaPooledConnection;
 class UrmaConnect;
 class UrmaHandshakeClientV2;
 class UrmaHandshakeServerV2;
@@ -351,6 +354,9 @@ friend class rdma::RdmaHandshakeServerV2;
 friend class rdma::RdmaHandshakeClientV3;
 friend class rdma::RdmaHandshakeServerV3;
 friend class urma::UrmaEndpoint;
+friend class urma::UrmaConnection;
+friend class urma::UrmaExclusiveConnection;
+friend class urma::UrmaPooledConnection;
 friend class urma::UrmaConnect;
 friend class urma::UrmaHandshakeClientV2;
 friend class urma::UrmaHandshakeServerV2;
