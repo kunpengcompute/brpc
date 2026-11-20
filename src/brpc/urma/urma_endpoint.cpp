@@ -173,6 +173,9 @@ void UrmaEndpoint::MakeLocalParsedHello(ParsedHello* out) const {
     out->jetty_id = local_description.receive_target_id;
     out->pooled = local_description.mode == UrmaConnectionMode::POOLED;
     out->socket_id = local_description.socket_id;
+    out->segments = local_description.segments;
+    out->big_capabilities = local_description.big_capabilities;
+    out->read_max_size = local_description.read_max_size;
     std::memcpy(out->eid, local_description.eid.data(), 16);
     out->uasid = local_description.uasid;
     out->tp_type = local_description.tp_type;
@@ -196,6 +199,9 @@ void UrmaEndpoint::FillLocalHelloV2(v2_wire::HelloMessage* out) const {
     out->recv_buffer_cnt = p.recv_buffer_cnt;
     out->jetty_id = p.jetty_id;
     out->socket_id = p.socket_id;
+    out->segments = p.segments;
+    out->big_capabilities = p.big_capabilities;
+    out->read_max_size = p.read_max_size;
     std::memcpy(out->eid, p.eid, 16);
     out->uasid = p.uasid;
     out->tp_type = p.tp_type;
@@ -215,6 +221,9 @@ void UrmaEndpoint::FillLocalHelloV3(UrmaHello* out) const {
     if (p.pooled) {
         out->set_socket_id(p.socket_id);
         out->set_resource_mode(v2_wire::IMPL_POOLED_VERSION);
+        out->set_big_capabilities(p.big_capabilities);
+        out->set_read_max_size(p.read_max_size);
+        for (const auto& seg : p.segments) FillUrmaMemorySegment(seg, out->add_segments());
     }
     out->set_eid(p.eid, 16);
     out->set_uasid(p.uasid);
@@ -286,6 +295,17 @@ int UrmaEndpoint::ReadAndParseHelloV3(ParsedHello* out, bool* negotiated) {
         (pooled && !msg.has_socket_id()) || (!pooled && msg.has_socket_id())) {
         errno = EPROTO; return -1;
     }
+    out->big_capabilities = pooled ? msg.big_capabilities() : 0;
+    out->read_max_size = pooled ? msg.read_max_size() : 0;
+    if (msg.segments_size() > 16) { errno = EPROTO; return -1; }
+    out->segments.clear();
+    if (pooled) {
+        for (const auto& item : msg.segments()) {
+            UrmaSegmentDescription seg;
+            if (!ParseUrmaMemorySegment(item, &seg)) { errno = EPROTO; return -1; }
+            out->segments.push_back(seg);
+        }
+    }
     out->pooled = pooled;
     out->socket_id = pooled ? msg.socket_id() : INVALID_SOCKET_ID;
     out->buffer_size = msg.buffer_size();
@@ -346,6 +366,9 @@ int UrmaEndpoint::ImportPeer(const ParsedHello& peer) {
     peer_description.recv_buffer_size = peer.buffer_size;
     peer_description.recv_buffer_count = peer.recv_buffer_cnt;
     peer_description.receive_target_id = peer.jetty_id;
+    peer_description.segments = peer.segments;
+    peer_description.big_capabilities = peer.big_capabilities;
+    peer_description.read_max_size = peer.read_max_size;
     if (peer.pooled) {
         peer_description.mode = UrmaConnectionMode::POOLED;
         peer_description.receive_target_kind = UrmaReceiveTargetKind::JFR;

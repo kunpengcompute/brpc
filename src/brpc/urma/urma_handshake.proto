@@ -46,4 +46,21 @@ message UrmaHello {
     required uint32 seg_token_id = 11;   // segment token id
     optional uint64 socket_id = 12;
     optional uint32 resource_mode = 13 [default = 1]; // 1=exclusive, 2=pooled
+    repeated UrmaMemorySegment segments = 14;
+    optional uint32 read_max_size = 16;
+    optional uint32 big_capabilities = 15; // READ bit1 only in this branch
+
+}
+
+message UrmaMemorySegment {
+    required bytes eid = 1;
+    required uint32 uasid = 2;
+    required uint64 va = 3;
+    required uint64 len = 4;
+    required uint32 token_id = 5;
+}
+message UrmaPoolInfo {
+    repeated UrmaMemorySegment segments = 1;
+    optional uint32 big_capabilities = 2;
+    optional uint32 read_max_size = 3;
 }

@@ -32,9 +32,9 @@ namespace brpc {
 namespace urma {
 DEFINE_bool(urma_jfs_affinity, true, "Prefer a stable shared JFS for each connection");
 DEFINE_int32(urma_io_jfs_cnt, 48, "Number of process-wide IO JFS slots");
-DEFINE_int32(urma_io_jfr_cnt, 64, "Number of process-wide shared IO JFR slots");
+DEFINE_int32(urma_io_jfr_cnt, 8, "Number of process-wide shared IO JFR slots");
 DEFINE_int32(urma_io_sq_depth, 128, "Depth of each pooled IO send queue");
-DEFINE_int32(urma_io_rx_depth, 512, "Depth of each shared IO receive queue");
+DEFINE_int32(urma_io_rx_depth, 256, "Depth of each shared IO receive queue");
 DEFINE_int32(urma_io_tx_batch_max, 8,
              "Maximum linked WRs in one pooled JFS post (valid range: 1-32)");
 DEFINE_bool(urma_io_jfs_lock_free, false,
@@ -53,6 +53,9 @@ void TxCompletionCtx::ClearResources() {
     header_in_send_data = false;
     send_data.clear();
     connection_state.reset();
+    read_batch.reset();
+    read_index = 0;
+    on_completed = nullptr;
     TxBatch* owner = batch;
     batch = nullptr;
     if (owner) { owner->Release(); }
@@ -125,7 +128,22 @@ size_t ImportedJfrCache::size() const {
     BAIDU_SCOPED_LOCK(_mutex);
     return _entries.size();
 }
+urma_target_seg_t* UrmaPooledConnectionState::SegmentFor(
+        uint64_t address, size_t length, uint32_t token) const {
+    if (!length || length > UINT64_MAX - address) return nullptr;
+    auto matches = [&](urma_target_seg_t* seg) {
+        return seg && seg->seg.token_id == token && address >= seg->seg.ubva.va &&
+            address - seg->seg.ubva.va <= seg->seg.len &&
+            length <= seg->seg.len - (address - seg->seg.ubva.va);
+    };
+    if (matches(remote_seg)) return remote_seg;
+    for (auto* seg : remote_segments) if (matches(seg)) return seg;
+    return nullptr;
+}
 UrmaPooledConnectionState::~UrmaPooledConnectionState() {
+    for (auto* seg : remote_segments) {
+        if (urma_unimport_seg(seg) != URMA_SUCCESS) LOG(ERROR) << "Failed to unimport READ segment";
+    }
     if (remote_jfr) { imports->Release(remote_jfr); }
     if (remote_seg && urma_unimport_seg(remote_seg) != URMA_SUCCESS) {
         LOG(ERROR) << "Failed to unimport URMA segment";
@@ -505,7 +523,7 @@ void UrmaPooledResource::KickDrain(UrmaJfsSlot* slot) {
     }
 }
 
-void UrmaPooledResource::CompleteSend(UrmaJfsSlot* slot, const urma_cr_t& cr) {
+void UrmaPooledResource::CompleteSend(UrmaJfsSlot* slot, const urma_cr_t& cr, void* dispatch_context) {
     auto* ctx = reinterpret_cast<TxCompletionCtx*>(cr.user_ctx);
     slot->submitted[ctx->registry_index].store(nullptr, std::memory_order_release);
     slot->sq_device_inflight.fetch_sub(1, std::memory_order_acq_rel);
@@ -513,6 +531,7 @@ void UrmaPooledResource::CompleteSend(UrmaJfsSlot* slot, const urma_cr_t& cr) {
     if (cr.status != URMA_CR_SUCCESS) {
         FailTxContext(slot, ctx, EIO, "URMA send completion failed");
     }
+    if (ctx->on_completed) ctx->on_completed(ctx, cr, dispatch_context);
     ctx->Release();
     KickDrain(slot);
 }

@@ -15,6 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#include <numeric>
 #include <cstring>
 #include <limits>
 #include <algorithm>
@@ -43,6 +44,7 @@
 #include "bthread/bthread.h"
 #include "bthread/unstable.h"
 #include "brpc/controller.h"
+#include "brpc/urma/urma_big_message.h"
 #include "echo.pb.h"
 #include "urma_types.h"
 
@@ -707,13 +709,20 @@ protected:
                 rc = UrmaPooledResource::PostSend(slot, wr, ctx, &rejected);
                 if (bad) *bad = rejected;
             }
-            const size_t before = sends.size();
+            size_t accepted_count = 0;
             for (auto* item = wr; item && item != rejected; item = item->next) {
+                ++accepted_count;
                 send_jfs_indices.push_back(slot->index);
-                sends.emplace_back(item->send.src.sge,
-                                   item->send.src.sge + item->send.src.num_sge);
+                if (item->opcode == URMA_OPC_READ) {
+                    ++read_posts;
+                    EXPECT_EQ(1u, item->rw.src.num_sge);
+                    EXPECT_EQ(1u, item->rw.dst.num_sge);
+                } else {
+                    sends.emplace_back(item->send.src.sge,
+                                       item->send.src.sge + item->send.src.num_sge);
+                }
             }
-            post_chain_sizes.push_back(sends.size() - before);
+            post_chain_sizes.push_back(accepted_count);
             const int saved_errno = errno;
             if (complete_before_return) {
                 urma_cr_t cr{};
@@ -725,6 +734,7 @@ protected:
             return rc;
         }
         std::function<void()> before_post;
+        size_t read_posts{0};
         bool complete_before_return{false};
         int fail_post_after{-1};
         int injected_post_error{URMA_EAGAIN};
@@ -776,6 +786,7 @@ protected:
         urma::FLAGS_urma_header_buf_count = 512;
         GFLAGS_NAMESPACE::SetCommandLineOption("urma_buffer_count", "2048");
         GFLAGS_NAMESPACE::SetCommandLineOption("urma_ctp_buf_count", "2048");
+        GFLAGS_NAMESPACE::SetCommandLineOption("urma_large_buffer_count", "64");
         GFLAGS_NAMESPACE::SetCommandLineOption("urma_use_polling", "false");
         urma::GlobalUrmaInitializeOrDie();
     }
@@ -1082,6 +1093,79 @@ TEST_F(UrmaPooledTest, registered_header_pool_exhaustion_and_concurrency) {
     EXPECT_EQ(nullptr, memory->Allocate(65));
     EXPECT_TRUE(memory->Unregister());
     EXPECT_EQ(nullptr, memory->Allocate(64));
+}
+
+TEST_F(UrmaPooledTest, memory_tls_cross_thread_return_and_thread_exit) {
+    auto memory = urma::CreateUrmaMemoryPool(urma::GetUrmaContext(), 65536, 128);
+    ASSERT_TRUE(memory);
+    std::vector<void*> blocks;
+    for (size_t i = 0; i < 128; ++i) {
+        void* p = memory->Allocate(65536);
+        ASSERT_TRUE(p);
+        blocks.push_back(p);
+    }
+    EXPECT_EQ(128u, memory->outstanding());
+    std::thread releaser([&] {
+        for (void* p : blocks) memory->Deallocate(p);
+    });
+    releaser.join();
+    EXPECT_EQ(0u, memory->outstanding());
+    // Every block, including the exiting pthread's cache, is reusable.
+    std::set<void*> unique;
+    for (size_t i = 0; i < 128; ++i) {
+        void* p = memory->Allocate(65536);
+        ASSERT_TRUE(p);
+        EXPECT_TRUE(unique.insert(p).second);
+    }
+    for (void* p : unique) memory->Deallocate(p);
+    EXPECT_TRUE(memory->Unregister());
+    EXPECT_EQ(nullptr, memory->Allocate(65536));
+}
+
+TEST_F(UrmaPooledTest, memory_tls_budget_keeps_shared_capacity) {
+    auto memory = urma::CreateUrmaMemoryPool(urma::GetUrmaContext(), 64, 128);
+    ASSERT_TRUE(memory);
+    std::atomic<int> ready{0};
+    std::atomic<bool> finish{false};
+    std::vector<std::thread> workers;
+    for (int i = 0; i < 32; ++i) {
+        workers.emplace_back([&] {
+            void* p = memory->Allocate(64);
+            EXPECT_NE(nullptr, p);
+            if (p) memory->Deallocate(p);
+            ready.fetch_add(1, std::memory_order_release);
+            while (!finish.load(std::memory_order_acquire)) usleep(100);
+        });
+    }
+    while (ready.load(std::memory_order_acquire) != 32) usleep(100);
+    std::vector<void*> remaining;
+    while (void* p = memory->Allocate(64)) remaining.push_back(p);
+    // Idle worker caches must never consume more than half of this pool.
+    EXPECT_GE(remaining.size(), 64u);
+    for (void* p : remaining) memory->Deallocate(p);
+    finish.store(true, std::memory_order_release);
+    for (auto& worker : workers) worker.join();
+    EXPECT_EQ(0u, memory->outstanding());
+}
+
+TEST_F(UrmaPooledTest, memory_tls_teardown_with_live_idle_thread) {
+    auto memory = urma::CreateUrmaMemoryPool(urma::GetUrmaContext(), 64, 128);
+    ASSERT_TRUE(memory);
+    std::atomic<bool> ready{false}, finish{false};
+    std::thread worker([&] {
+        void* p = memory->Allocate(64);
+        EXPECT_NE(nullptr, p);
+        if (p) memory->Deallocate(p);
+        ready.store(true, std::memory_order_release);
+        while (!finish.load(std::memory_order_acquire)) std::this_thread::yield();
+        // The thread-local destructor must tolerate a destroyed pool.
+    });
+    while (!ready.load(std::memory_order_acquire)) std::this_thread::yield();
+    EXPECT_EQ(0u, memory->outstanding());
+    memory->FlushThreadCaches();
+    memory.reset();
+    finish.store(true, std::memory_order_release);
+    worker.join();
 }
 
 TEST_F(UrmaPooledTest, independent_queues_and_import_cache) {
@@ -2833,6 +2917,397 @@ TEST_F(UrmaPooledTest, shutdown_waits_for_active_rx_operation_before_freeing_arr
     receiver.join(); shutdown.join();
     EXPECT_TRUE(finished.load());
     EXPECT_EQ(nullptr, slot->contexts.get());
+}
+
+// READ-only large-message migration: bytes stay registered until matching FREE.
+TEST_F(UrmaPooledTest, read_large_sources_survive_send_cqe_until_free) {
+    GFLAGS_NAMESPACE::FlagSaver flags;
+    GFLAGS_NAMESPACE::SetCommandLineOption("urma_large_transfer", "read");
+    auto* sender = Endpoint(); auto* receiver = Endpoint();
+    ASSERT_TRUE(sender && receiver);
+    Connect(sender, receiver); Connect(receiver, sender);
+    const auto before = urma::GetUrmaReadStats();
+    butil::IOBuf data;
+    {
+        butil::IOBufAsZeroCopyOutputStream stream(&data, 65536);
+        void* bytes; int size;
+        ASSERT_TRUE(stream.Next(&bytes, &size));
+        ASSERT_GE(size, 8192);
+        memset(bytes, 'r', 8192); stream.BackUp(size - 8192);
+    }
+    const void* source = data.fetch1();
+    butil::IOBuf* input[] = {&data};
+    ASSERT_EQ(8192, sender->CutFromIOBufList(input, 1));
+    ASSERT_TRUE(data.empty());
+    EXPECT_EQ(before.sources_outstanding + 1, urma::GetUrmaReadStats().sources_outstanding);
+    DrainTx(); // PULL SEND complete is not permission to recycle its source.
+    EXPECT_EQ('r', *static_cast<const char*>(source));
+    EXPECT_TRUE(receiver->_input_processor.read_buf().empty());
+    DrainRx(); // PULL -> post READ, no delivery before READ completion.
+    EXPECT_EQ(1u, _pool->read_posts);
+    EXPECT_TRUE(receiver->_input_processor.read_buf().empty());
+    DrainTx(); // READ -> FREE and byte delivery.
+    EXPECT_EQ(std::string(8192, 'r'), receiver->_input_processor.read_buf().to_string());
+    EXPECT_EQ(before.sources_outstanding + 1, urma::GetUrmaReadStats().sources_outstanding);
+    DrainRx(); DrainTx();
+    EXPECT_EQ(before.sources_outstanding, urma::GetUrmaReadStats().sources_outstanding);
+    EXPECT_EQ(before.reads_completed + 1, urma::GetUrmaReadStats().reads_completed);
+}
+
+TEST_F(UrmaPooledTest, read_multiple_iobufs_share_control_and_keep_stream_order) {
+    GFLAGS_NAMESPACE::FlagSaver flags;
+    GFLAGS_NAMESPACE::SetCommandLineOption("urma_large_transfer", "read");
+    GFLAGS_NAMESPACE::SetCommandLineOption("urma_read_items_per_control", "2");
+    auto* sender = Endpoint(); auto* receiver = Endpoint();
+    ASSERT_TRUE(sender && receiver);
+    Connect(sender, receiver); Connect(receiver, sender);
+    Connection(sender)->_next_send_seq = 65535;
+    Connection(receiver)->_deliver_base = 65535;
+    butil::IOBuf data[3];
+    for (size_t i = 0; i < 3; ++i) AppendBlock(&data[i], 5000, 'a' + i);
+    butil::IOBuf* input[] = {&data[0], &data[1], &data[2]};
+    auto before = urma::GetUrmaReadStats();
+    EXPECT_EQ(10000, sender->CutFromIOBufList(input, 3));
+    EXPECT_EQ(before.controls_sent + 1, urma::GetUrmaReadStats().controls_sent);
+    EXPECT_EQ(before.sources_outstanding + 1, urma::GetUrmaReadStats().sources_outstanding);
+    ASSERT_GE(_pool->sends.back().size(), 2u);
+    const auto& payload = _pool->sends.back()[1];
+    butil::IOBuf wire;
+    wire.append(reinterpret_cast<const void*>(payload.addr), payload.len);
+    urma::UrmaControl pull;
+    ASSERT_TRUE(pull.Decode(wire));
+    ASSERT_EQ(2u, pull.items_size());
+    EXPECT_EQ(pull.items().begin()[0].source_id(), pull.items().begin()[1].source_id());
+    EXPECT_EQ(65535u, pull.items().begin()[0].seq());
+    EXPECT_EQ(0u, pull.items().begin()[1].seq());
+    // A FREE for just one item must not release the batch's source buffers.
+    urma::UrmaControl partial;
+    auto* item = partial.add_items();
+    item->set_seq(65535); item->set_length(5000);
+    item->set_source_id(pull.items().begin()[0].source_id());
+    ASSERT_TRUE(partial.Encode(&wire));
+    EXPECT_EQ(-1, Connection(sender)->HandleControl(urma::MSG_FREE, wire));
+    EXPECT_EQ(before.sources_outstanding + 1, urma::GetUrmaReadStats().sources_outstanding);
+    EXPECT_TRUE(data[0].empty()); EXPECT_TRUE(data[1].empty()); EXPECT_EQ(5000u, data[2].size());
+    DrainRx(); DrainTx(); DrainRx(); DrainTx();
+    EXPECT_EQ(5000, sender->CutFromIOBufList(input, 3));
+    DrainRx(); DrainTx(); DrainRx(); DrainTx();
+    EXPECT_EQ(std::string(5000, 'a') + std::string(5000, 'b') + std::string(5000, 'c'),
+              receiver->_input_processor.read_buf().to_string());
+    EXPECT_EQ(before.sources_outstanding, urma::GetUrmaReadStats().sources_outstanding);
+    EXPECT_EQ(3u, _pool->read_posts);
+}
+
+TEST_F(UrmaPooledTest, read_batch_source_is_retired_when_control_enqueue_fails) {
+    auto* sender = Endpoint(); auto* receiver = Endpoint();
+    ASSERT_TRUE(sender && receiver);
+    Connect(sender, receiver); Connect(receiver, sender);
+    butil::IOBuf input;
+    AppendBlock(&input, 5000, 'a'); AppendBlock(&input, 5000, 'b');
+    auto* connection = Connection(sender);
+    auto* slot = _pool->io_jfs[connection->_preferred_jfs];
+    const auto before = urma::GetUrmaReadStats().sources_outstanding;
+    const auto seq = connection->_next_send_seq;
+    slot->stopped.store(true);
+    EXPECT_EQ(-1, connection->StartReadTransfer(input));
+    EXPECT_EQ(before, urma::GetUrmaReadStats().sources_outstanding);
+    EXPECT_EQ(10000u, input.size());
+    EXPECT_EQ(seq, connection->_next_send_seq);
+    slot->stopped.store(false);
+}
+
+TEST_F(UrmaPooledTest, read_100k_uses_multiple_large_blocks) {
+    GFLAGS_NAMESPACE::FlagSaver flags;
+    GFLAGS_NAMESPACE::SetCommandLineOption("urma_large_transfer", "read");
+    auto* sender = Endpoint(); auto* receiver = Endpoint();
+    ASSERT_TRUE(sender && receiver); Connect(sender, receiver); Connect(receiver, sender);
+    butil::IOBuf data;
+    {
+        butil::IOBufAsZeroCopyOutputStream stream(&data, 65536);
+        size_t remaining = 100 * 1024;
+        while (remaining) {
+            void* bytes; int capacity; ASSERT_TRUE(stream.Next(&bytes, &capacity));
+            ASSERT_GT(capacity, 0);
+            const size_t count = std::min<size_t>(remaining, capacity);
+            memset(bytes, 'L', count); stream.BackUp(capacity - count); remaining -= count;
+        }
+    }
+    butil::IOBuf* input[] = {&data};
+    EXPECT_EQ(100 * 1024, sender->CutFromIOBufList(input, 1));
+    for (int i = 0; i < 4; ++i) { DrainRx(); DrainTx(); }
+    EXPECT_EQ(2u, _pool->read_posts);
+    EXPECT_EQ(4u, std::accumulate(_pool->post_chain_sizes.begin(),
+                                 _pool->post_chain_sizes.end(), size_t(0)));
+    EXPECT_EQ(std::string(100 * 1024, 'L'), receiver->_input_processor.read_buf().to_string());
+}
+
+TEST_F(UrmaPooledTest, read_peer_small_blocks_split_local_large_block) {
+    GFLAGS_NAMESPACE::FlagSaver flags;
+    GFLAGS_NAMESPACE::SetCommandLineOption("urma_large_transfer", "read");
+    auto* sender = Endpoint(); auto* receiver = Endpoint();
+    ASSERT_TRUE(sender && receiver);
+    urma::UrmaConnectionDescription peer;
+    ASSERT_EQ(0, Connection(receiver)->GetLocalDescription(&peer));
+    peer.read_max_size = 8192 - sizeof(butil::IOBuf::Block);
+    ASSERT_EQ(0, Connection(sender)->ImportPeer(peer)); Connect(receiver, sender);
+    butil::IOBuf data;
+    {
+        butil::IOBufAsZeroCopyOutputStream stream(&data, 65536);
+        void* bytes; int capacity; ASSERT_TRUE(stream.Next(&bytes, &capacity));
+        ASSERT_GE(capacity, 32000);
+        memset(bytes, 'm', 32000); stream.BackUp(capacity - 32000);
+    }
+    butil::IOBuf* input[] = {&data};
+    EXPECT_EQ(32000, sender->CutFromIOBufList(input, 1));
+    for (int i = 0; i < 4; ++i) { DrainRx(); DrainTx(); }
+    EXPECT_EQ(4u, _pool->read_posts);
+    EXPECT_EQ(std::string(32000, 'm'), receiver->_input_processor.read_buf().to_string());
+}
+
+TEST_F(UrmaPooledTest, read_pull_routes_to_backup_and_early_read_cqe_is_safe) {
+    GFLAGS_NAMESPACE::FlagSaver flags;
+    GFLAGS_NAMESPACE::SetCommandLineOption("urma_large_transfer", "read");
+    auto* sender = Endpoint(); auto* receiver = Endpoint();
+    ASSERT_TRUE(sender && receiver); Connect(sender, receiver); Connect(receiver, sender);
+    Connection(sender)->_preferred_jfs = 0;
+    auto* preferred = _pool->io_jfs[0];
+    preferred->sq_inflight.store(preferred->sq_depth);
+    butil::IOBuf data; AppendBlock(&data, 8000, 'b');
+    butil::IOBuf* input[] = {&data};
+    ASSERT_EQ(8000, sender->CutFromIOBufList(input, 1));
+    EXPECT_EQ(1u, _pool->send_jfs_indices.back());
+    preferred->sq_inflight.store(0);
+    DrainTx();
+    _pool->complete_before_return = true;
+    DrainRx(); // READ CQE handled before post returns; its FREE may enqueue recursively.
+    _pool->complete_before_return = false;
+    DrainTx(); DrainRx(); DrainTx();
+    EXPECT_EQ(std::string(8000, 'b'), receiver->_input_processor.read_buf().to_string());
+    for (auto* slot : _pool->io_jfs) {
+        EXPECT_EQ(0u, slot->sq_inflight.load());
+        EXPECT_EQ(0u, slot->sq_device_inflight.load());
+    }
+}
+
+TEST_F(UrmaPooledTest, read_block_size_accounts_for_iobuf_metadata) {
+    GFLAGS_NAMESPACE::FlagSaver flags;
+    GFLAGS_NAMESPACE::SetCommandLineOption("urma_large_block_threshold", "20480");
+    EXPECT_EQ(0u, urma::GetUrmaSerializationBlockSize(20480));
+    EXPECT_EQ(65536u, urma::GetUrmaSerializationBlockSize(20481));
+    EXPECT_EQ(8192u, urma::GetUrmaBlockSizeForPayload(8192 - sizeof(butil::IOBuf::Block)));
+    EXPECT_EQ(65536u, urma::GetUrmaBlockSizeForPayload(8192));
+    EXPECT_EQ(65536u, urma::GetUrmaBlockSizeForPayload(65536 - sizeof(butil::IOBuf::Block)));
+    EXPECT_EQ(0u, urma::GetUrmaBlockSizeForPayload(65536));
+}
+
+TEST_F(UrmaPooledTest, read_invalid_segments_leave_import_retryable) {
+    auto* sender = Endpoint();
+    auto* receiver = Endpoint();
+    ASSERT_TRUE(sender && receiver);
+    urma::UrmaConnectionDescription peer;
+    ASSERT_EQ(0, Connection(receiver)->GetLocalDescription(&peer));
+    ASSERT_TRUE(peer.big_capabilities & urma::URMA_BIG_CAP_READ);
+    ASSERT_FALSE(peer.segments.empty());
+    for (int variant = 0; variant < 5; ++variant) {
+        SCOPED_TRACE(variant);
+        auto invalid = peer;
+        switch (variant) {
+        case 0: invalid.segments.clear(); break;
+        case 1: invalid.segments.resize(17, peer.segments.front()); break;
+        case 2: invalid.segments.back().va = 0; break;
+        case 3: invalid.segments.back().length = 0; break;
+        case 4:
+            invalid.segments.back().va = UINT64_MAX - 3;
+            invalid.segments.back().length = 8;
+            break;
+        }
+        EXPECT_EQ(-1, Connection(sender)->ImportPeer(invalid));
+        EXPECT_EQ(EPROTO, errno);
+        EXPECT_EQ(nullptr, Connection(sender)->_shared_state->remote_seg);
+        EXPECT_TRUE(Connection(sender)->_shared_state->remote_segments.empty());
+        EXPECT_FALSE(Connection(sender)->IsWritable());
+    }
+    // No partial import or terminal state may prevent a valid retry.
+    EXPECT_EQ(0, Connection(sender)->ImportPeer(peer));
+    EXPECT_TRUE(Connection(sender)->IsWritable());
+}
+
+TEST_F(UrmaPooledTest, read_missing_peer_capability_falls_back_to_send) {
+    GFLAGS_NAMESPACE::FlagSaver flags;
+    GFLAGS_NAMESPACE::SetCommandLineOption("urma_large_transfer", "read");
+    auto* sender = Endpoint(); auto* receiver = Endpoint();
+    ASSERT_TRUE(sender && receiver);
+    urma::UrmaConnectionDescription peer;
+    ASSERT_EQ(0, Connection(receiver)->GetLocalDescription(&peer));
+    peer.big_capabilities = 0; peer.segments.clear(); peer.read_max_size = 0;
+    ASSERT_EQ(0, Connection(sender)->ImportPeer(peer));
+    butil::IOBuf data; AppendBlock(&data, 8000, 's');
+    butil::IOBuf* input[] = {&data};
+    EXPECT_EQ(8000, sender->CutFromIOBufList(input, 1));
+    DrainTx(); DrainRx();
+    EXPECT_EQ(0u, _pool->read_posts);
+    EXPECT_EQ(std::string(8000, 's'), receiver->_input_processor.read_buf().to_string());
+}
+
+TEST_F(UrmaPooledTest, read_rejects_bad_source_and_free_before_post) {
+    auto* sender = Endpoint(); auto* receiver = Endpoint();
+    ASSERT_TRUE(sender && receiver); Connect(sender, receiver); Connect(receiver, sender);
+    urma::UrmaControl control;
+    auto* item = control.add_items(); item->set_seq(0); item->set_length(4096);
+    item->set_source_id(1); item->set_addr(UINT64_MAX - 3); item->set_token_id(1);
+    butil::IOBuf payload; ASSERT_TRUE(control.Encode(&payload));
+    EXPECT_EQ(-1, Connection(receiver)->HandleControl(urma::MSG_PULL_MEM, payload));
+    EXPECT_EQ(EPROTO, errno); EXPECT_EQ(0u, _pool->read_posts);
+    urma::UrmaControl free;
+    item = free.add_items(); item->set_seq(0); item->set_length(4096); item->set_source_id(1);
+    ASSERT_TRUE(free.Encode(&payload));
+    EXPECT_EQ(-1, Connection(sender)->HandleControl(urma::MSG_FREE, payload));
+    EXPECT_EQ(EPROTO, errno);
+}
+
+TEST(UrmaReadControlTest, max_items_and_truncated_reserved_fields) {
+    urma::UrmaControl control;
+    for (size_t i = 0; i < 99; ++i) {
+        auto* item = control.add_items(); ASSERT_NE(nullptr, item);
+        item->set_seq(i); item->set_length(8192); item->set_source_id(i + 1);
+        item->set_addr(0x1000 + i * 8192); item->set_token_id(17);
+    }
+    EXPECT_EQ(nullptr, control.add_items());
+    butil::IOBuf encoded; ASSERT_TRUE(control.Encode(&encoded)); EXPECT_EQ(4008u, encoded.size());
+    urma::UrmaControl decoded; ASSERT_TRUE(decoded.Decode(encoded)); EXPECT_EQ(99u, decoded.items_size());
+    encoded.pop_back(1); EXPECT_FALSE(decoded.Decode(encoded));
+    ASSERT_TRUE(control.Encode(&encoded));
+    auto bytes = encoded.to_string(); bytes[16] = 1;
+    encoded.clear(); encoded.append(bytes); EXPECT_FALSE(decoded.Decode(encoded));
+}
+
+TEST(UrmaHandshakeTest, read_segment_extension_roundtrip_and_legacy) {
+    urma::UrmaSegmentDescription segment;
+    segment.va = 0x10000; segment.length = 65536; segment.token_id = 7;
+    segment.eid[0] = 9; segment.uasid = 11;
+    auto extension = urma::EncodePoolSegments({segment}, urma::URMA_BIG_CAP_READ, 65512);
+    std::vector<urma::UrmaSegmentDescription> segments;
+    uint32_t caps = 0, size = 0;
+    ASSERT_TRUE(urma::DecodePoolSegments(extension, &segments, &caps, &size));
+    ASSERT_EQ(1u, segments.size()); EXPECT_EQ(segment.va, segments[0].va);
+    EXPECT_EQ(segment.length, segments[0].length); EXPECT_EQ(segment.eid, segments[0].eid);
+    EXPECT_EQ(urma::URMA_BIG_CAP_READ, caps); EXPECT_EQ(65512u, size);
+    ASSERT_TRUE(urma::DecodePoolSegments("", &segments, &caps, &size));
+    EXPECT_EQ(0u, caps); EXPECT_TRUE(segments.empty());
+    EXPECT_FALSE(urma::DecodePoolSegments("SEG1broken", &segments, &caps, &size));
+}
+
+TEST_F(UrmaPooledTest, event_driven_read_rpc_binary_and_protobuf_handshakes) {
+    // Use real epoll callbacks and the normal brpc handshake/message parser.
+    ASSERT_TRUE(_pool->Shutdown());
+    if (_state) _state->pool = nullptr;
+    _pool.reset();
+    urma::g_urma_pool = _original;
+    GFLAGS_NAMESPACE::FlagSaver flags;
+    GFLAGS_NAMESPACE::SetCommandLineOption("urma_large_transfer", "read");
+    PooledEchoService service;
+    Server server;
+    ASSERT_EQ(0, server.AddService(&service, SERVER_DOESNT_OWN_SERVICE));
+    ServerOptions server_options;
+    server_options.socket_mode = SOCKET_MODE_URMA;
+    ASSERT_EQ(0, server.Start("127.0.0.1:0", &server_options));
+    for (int version : {2, 3}) {
+        urma::FLAGS_urma_client_handshake_version = version;
+        Channel channel;
+        ChannelOptions options;
+        options.socket_mode = SOCKET_MODE_URMA;
+        options.connection_type = "single";
+        options.timeout_ms = 3000;
+        options.max_retry = 0;
+        ASSERT_EQ(0, channel.Init(server.listen_address(), &options));
+        test::EchoService_Stub stub(&channel);
+        for (int n = 0; n < 4; ++n) {
+            test::EchoRequest request;
+            test::EchoResponse response;
+            request.set_message(std::string(100 * 1024 + n, char('a' + n)));
+            Controller cntl;
+            cntl.request_attachment().append(std::string(11000, 'z'));
+            stub.Echo(&cntl, &request, &response, nullptr);
+            ASSERT_FALSE(cntl.Failed()) << cntl.ErrorText();
+            EXPECT_EQ(request.message(), response.message());
+            EXPECT_EQ(cntl.request_attachment().to_string(),
+                      cntl.response_attachment().to_string());
+        }
+    }
+    server.Stop(0);
+    server.Join();
+}
+
+
+TEST_F(UrmaPooledTest, auto_small_iobufs_do_not_trigger_read_by_total_size) {
+    GFLAGS_NAMESPACE::FlagSaver flags;
+    GFLAGS_NAMESPACE::SetCommandLineOption("urma_large_transfer", "auto");
+    GFLAGS_NAMESPACE::SetCommandLineOption("urma_large_block_threshold", "20480");
+    auto* sender = Endpoint(); auto* receiver = Endpoint();
+    ASSERT_TRUE(sender && receiver); Connect(sender, receiver); Connect(receiver, sender);
+    butil::IOBuf data[10]; butil::IOBuf* input[10];
+    for (size_t i = 0; i < 10; ++i) { AppendBlock(&data[i], 8000, 's'); input[i] = &data[i]; }
+    size_t total = 0;
+    while (total < 80000) {
+        const ssize_t n = sender->CutFromIOBufList(input, 10);
+        ASSERT_GT(n, 0); total += n;
+        DrainTx(); DrainRx();
+    }
+    EXPECT_EQ(0u, _pool->read_posts);
+    EXPECT_EQ(std::string(80000, 's'), receiver->_input_processor.read_buf().to_string());
+}
+
+TEST_F(UrmaPooledTest, auto_threshold_and_mixed_stream_preserve_order) {
+    GFLAGS_NAMESPACE::FlagSaver flags;
+    GFLAGS_NAMESPACE::SetCommandLineOption("urma_large_transfer", "auto");
+    GFLAGS_NAMESPACE::SetCommandLineOption("urma_large_block_threshold", "20480");
+    auto* sender = Endpoint(); auto* receiver = Endpoint();
+    ASSERT_TRUE(sender && receiver); Connect(sender, receiver); Connect(receiver, sender);
+    butil::IOBuf data[3];
+    for (int i = 0; i < 5; ++i) { AppendBlock(&data[0], 4096, 'a'); AppendBlock(&data[1], 4096, 'b'); }
+    AppendBlock(&data[1], 1, 'b'); AppendBlock(&data[2], 1000, 'c');
+    butil::IOBuf* input[] = {&data[0], &data[1], &data[2]};
+    size_t total = 0;
+    while (total < 41961) {
+        const ssize_t n = sender->CutFromIOBufList(input, 3);
+        ASSERT_GT(n, 0); total += n;
+        for (int i = 0; i < 4; ++i) { DrainRx(); DrainTx(); }
+    }
+    EXPECT_GT(_pool->read_posts, 0u);
+    EXPECT_EQ(std::string(20480, 'a') + std::string(20481, 'b') + std::string(1000, 'c'),
+              receiver->_input_processor.read_buf().to_string());
+    EXPECT_EQ(0u, Connection(sender)->_read_bytes_remaining);
+}
+
+TEST_F(UrmaPooledTest, auto_partial_read_keeps_short_tail_read_on_retry) {
+    GFLAGS_NAMESPACE::FlagSaver flags;
+    GFLAGS_NAMESPACE::SetCommandLineOption("urma_large_transfer", "auto");
+    GFLAGS_NAMESPACE::SetCommandLineOption("urma_large_block_threshold", "20480");
+    GFLAGS_NAMESPACE::SetCommandLineOption("urma_read_items_per_control", "1");
+    auto* sender = Endpoint(); auto* receiver = Endpoint();
+    ASSERT_TRUE(sender && receiver); Connect(sender, receiver); Connect(receiver, sender);
+    butil::IOBuf data, small;
+    AppendBlock(&data, 8000, 'a'); AppendBlock(&data, 8000, 'a'); AppendBlock(&data, 8000, 'a');
+    AppendBlock(&small, 1000, 's');
+    butil::IOBuf* input[] = {&data, &small};
+    ASSERT_EQ(8000, sender->CutFromIOBufList(input, 2));
+    EXPECT_EQ(16000u, data.size());
+    for (int i = 0; i < 4; ++i) { DrainRx(); DrainTx(); }
+    // EAGAIN must also retain the previous READ decision.
+    for (auto* slot : _pool->io_jfs) slot->sq_inflight.store(slot->sq_depth);
+    EXPECT_EQ(-1, sender->CutFromIOBufList(input, 2));
+    EXPECT_EQ(EAGAIN, errno);
+    for (auto* slot : _pool->io_jfs) slot->sq_inflight.store(0);
+    for (int n = 0; n < 2; ++n) {
+        ASSERT_EQ(8000, sender->CutFromIOBufList(input, 2));
+        for (int i = 0; i < 4; ++i) { DrainRx(); DrainTx(); }
+    }
+    EXPECT_EQ(3u, _pool->read_posts);
+    ASSERT_EQ(1000, sender->CutFromIOBufList(input, 2));
+    DrainTx(); DrainRx();
+    EXPECT_EQ(3u, _pool->read_posts);
+    EXPECT_EQ(std::string(24000, 'a') + std::string(1000, 's'),
+              receiver->_input_processor.read_buf().to_string());
 }
 
 #else  // BRPC_WITH_URMA

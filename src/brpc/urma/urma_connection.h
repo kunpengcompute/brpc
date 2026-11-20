@@ -25,6 +25,7 @@
 #include <functional>
 #include <memory>
 #include <ostream>
+#include <vector>
 #include <sys/types.h>
 #include "bthread/types.h"
 #include "butil/atomicops.h"
@@ -38,6 +39,8 @@ namespace urma {
 class UrmaConnection;
 class UrmaConnectionProvider;
 using UrmaConnectionHandle = std::shared_ptr<UrmaConnection>;
+
+constexpr uint32_t URMA_BIG_CAP_READ = 2;
 
 enum class UrmaConnectionMode : uint8_t { EXCLUSIVE = 0, POOLED = 1 };
 enum class UrmaReceiveTargetKind : uint8_t { JETTY = 0, JFR = 1 };
@@ -74,6 +77,9 @@ struct UrmaConnectionDescription {
     uint32_t recv_buffer_size = 0;
     uint32_t recv_buffer_count = 0;
     UrmaSegmentDescription segment;
+    uint32_t big_capabilities = 0;
+    uint32_t read_max_size = 0;
+    std::vector<UrmaSegmentDescription> segments;
     bool has_socket_id = false;
     SocketId socket_id = INVALID_SOCKET_ID;
 };

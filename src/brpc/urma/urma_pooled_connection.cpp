@@ -41,6 +41,8 @@ extern void return_keytable(bthread_keytable_pool_t*, KeyTable*);
 
 namespace brpc {
 namespace urma {
+DECLARE_string(urma_large_transfer);
+DECLARE_int32(urma_large_block_threshold);
 namespace {
 // A shared CQ carrier has no per-server keytable pool. Give its one inline
 // message the same fresh bthread-local context as QueueMessage would create.
@@ -179,6 +181,17 @@ int UrmaPooledConnection::GetLocalDescription(UrmaConnectionDescription* out) co
     out->receive_count_kind = UrmaReceiveCountKind::SHARED_JFR_DEPTH;
     out->has_socket_id = true;
     out->socket_id = _options.socket_id;
+    if (HasUrmaLargeBlockPool()) {
+        out->big_capabilities = URMA_BIG_CAP_READ;
+        out->read_max_size = GetUrmaLargeBlockSize() - sizeof(butil::IOBuf::Block);
+        for (const auto& seg : GetUrmaPoolSegments()) {
+            UrmaSegmentDescription desc;
+            std::memcpy(desc.eid.data(), seg.ubva.eid.raw, 16);
+            desc.uasid = seg.ubva.uasid; desc.va = seg.ubva.va;
+            desc.length = seg.len; desc.token_id = seg.token_id;
+            out->segments.push_back(desc);
+        }
+    }
     const auto* slot = _provider_state->pool->io_jfr[_shared_state->local_jfr_index];
     out->receive_target_id = slot->jfr_id;
     out->uasid = slot->jfr->jfr_id.uasid;
@@ -212,6 +225,20 @@ int UrmaPooledConnection::ImportPeer(const UrmaConnectionDescription& peer) {
         peer.segment.length > UINT64_MAX - peer.segment.va) {
         errno = EPROTO; return -1;
     }
+    // Reject malformed READ descriptions before importing any hardware resource.
+    // Like the base description checks, rejection leaves the connection retryable.
+    const bool enable_read = HasUrmaLargeBlockPool() &&
+        (peer.big_capabilities & URMA_BIG_CAP_READ);
+    if (enable_read) {
+        if (peer.segments.empty() || peer.segments.size() > 16) {
+            errno = EPROTO; return -1;
+        }
+        for (const auto& desc : peer.segments) {
+            if (!desc.va || !desc.length || desc.length > UINT64_MAX - desc.va) {
+                errno = EPROTO; return -1;
+            }
+        }
+    }
     urma_context_t* context = GetUrmaContext();
     if (!context) { errno = ENODEV; return -1; }
     urma_seg_t segment{};
@@ -227,6 +254,23 @@ int UrmaPooledConnection::ImportPeer(const UrmaConnectionDescription& peer) {
     flag.bs.mapping = URMA_SEG_NOMAP;
     _shared_state->remote_seg = urma_import_seg(context, &segment, &token, 0, flag);
     if (!_shared_state->remote_seg) { _closed.store(true); return -1; }
+    if (enable_read) {
+        for (const auto& desc : peer.segments) {
+            if (desc.va == peer.segment.va && desc.length == peer.segment.length &&
+                desc.token_id == peer.segment.token_id && desc.eid == peer.segment.eid &&
+                desc.uasid == peer.segment.uasid) continue;
+            urma_seg_t extra{};
+            std::memcpy(extra.ubva.eid.raw, desc.eid.data(), 16);
+            extra.ubva.uasid = desc.uasid; extra.ubva.va = desc.va;
+            extra.len = desc.length; extra.token_id = desc.token_id;
+            auto* imported = urma_import_seg(context, &extra, &token, 0, flag);
+            if (!imported) { _closed.store(true); return -1; }
+            _shared_state->remote_segments.push_back(imported);
+        }
+        _shared_state->big_capabilities = URMA_BIG_CAP_READ;
+        _shared_state->read_max_size = peer.read_max_size ? peer.read_max_size
+            : 8192 - sizeof(butil::IOBuf::Block);
+    }
     urma_rjfr_t remote{};
     std::memcpy(remote.jfr_id.eid.raw, peer.eid.data(), 16);
     remote.jfr_id.uasid = peer.uasid;
@@ -260,11 +304,46 @@ ssize_t UrmaPooledConnection::CutFromIOBufList(butil::IOBuf** from, size_t ndata
     if (!operation || _shared_state->failed.load(std::memory_order_acquire)) {
         errno = EIO; return -1;
     }
+    const bool read_available = (_shared_state->big_capabilities & URMA_BIG_CAP_READ) &&
+        _remote_recv_block_size >= UrmaControl::kHeaderSize + UrmaControl::kItemSize;
+    // Socket's write owner retries the unconsumed stream prefix before later
+    // writes. Remember its READ decision even when the tail falls below threshold.
+    const bool continuing_read = _read_bytes_remaining != 0;
+    butil::IOBuf remaining;
+    bool use_read = false;
+    bool selected = false;
+    for (size_t j = 0; j < ndata; ++j) {
+        if (from[j]->empty()) { continue; }
+        const bool item_read = continuing_read || (read_available &&
+            (FLAGS_urma_large_transfer == "read" ||
+             (FLAGS_urma_large_transfer == "auto" && from[j]->size() >
+                 static_cast<size_t>(FLAGS_urma_large_block_threshold))));
+        if (selected && item_read != use_read) { break; }
+        selected = true;
+        use_read = item_read;
+        if (continuing_read) {
+            const size_t count = std::min(from[j]->size(),
+                                         _read_bytes_remaining - remaining.size());
+            from[j]->append_to(&remaining, count);
+            if (remaining.size() == _read_bytes_remaining) { break; }
+        } else {
+            remaining.append(*from[j]);
+        }
+    }
+    // Only adjacent IOBufs with the same decision share a submission. A list
+    // of small IOBufs never becomes READ merely because its total is large.
+    if (use_read) {
+        const ssize_t accepted = StartReadTransfer(remaining);
+        if (accepted > 0) {
+            _read_bytes_remaining = (continuing_read ? _read_bytes_remaining
+                                                     : remaining.size()) - accepted;
+            size_t left = accepted;
+            for (size_t j = 0; j < ndata && left; ++j) left -= from[j]->pop_front(left);
+        }
+        return accepted;
+    }
     const uint32_t start = FLAGS_urma_jfs_affinity ? _preferred_jfs
         : _provider_state->pool->jfs_rr_counter.fetch_add(1);
-    butil::IOBuf remaining;
-    for (size_t j = 0; j < ndata; ++j) { remaining.append(*from[j]); }
-    if (remaining.empty()) { return 0; }
     const size_t max_wr_per_post = std::min<size_t>(
         std::max(1, FLAGS_urma_io_tx_batch_max), URMA_TX_BATCH_MAX);
     size_t total_bytes = 0;
@@ -419,8 +498,8 @@ int UrmaPooledConnection::WaitWritable(butil::atomic<int>* butex,
     return rc;
 }
 
-void UrmaPooledConnection::HandleTxCompletion(UrmaJfsSlot* slot, const urma_cr_t& cr) {
-    slot->pool->CompleteSend(slot, cr);
+void UrmaPooledConnection::HandleTxCompletion(UrmaJfsSlot* slot, const urma_cr_t& cr, UrmaRxDispatchContext* dispatch_context) {
+    slot->pool->CompleteSend(slot, cr, dispatch_context);
 }
 
 void UrmaPooledConnection::HandleRxCompletion(
@@ -436,11 +515,14 @@ void UrmaPooledConnection::HandleRxCompletion(
     --slot->rx_posted;
     SocketId id = INVALID_SOCKET_ID;
     uint16_t seq = 0;
+    uint8_t type = MSG_SMALL;
     butil::IOBuf data;
     if (cr.status == URMA_CR_SUCCESS && cr.opcode == URMA_CR_OPC_SEND &&
         cr.completion_len > sizeof(UrmaMsgHeader) &&
         cr.completion_len <= sizeof(UrmaMsgHeader) + GetUrmaRecvBlockSize() &&
-        ctx->header_buf->type == MSG_SMALL) {
+        (ctx->header_buf->type == MSG_SMALL || ctx->header_buf->type == MSG_PULL_MEM ||
+         ctx->header_buf->type == MSG_FREE)) {
+        type = ctx->header_buf->type;
         id = butil::NetToHost64(ctx->header_buf->dst_socket_id);
         seq = butil::NetToHost16(ctx->header_buf->seq);
         const size_t len = cr.completion_len - sizeof(UrmaMsgHeader);
@@ -457,6 +539,16 @@ void UrmaPooledConnection::HandleRxCompletion(
         slot->stopped.store(true);
         LOG(ERROR) << "Failed to replenish shared URMA JFR " << slot->index;
         slot->callbacks.on_rx_error(id, EIO);
+        return;
+    }
+    if (id != INVALID_SOCKET_ID && type != MSG_SMALL) {
+        SocketUniquePtr socket;
+        if (Socket::Address(id, &socket) != 0) return;
+        auto* connection = dynamic_cast<UrmaPooledConnection*>(FindConnection(socket));
+        if (!connection || !connection->ValidateReceiveQueue(slot->index)) return;
+        if (connection->HandleControl(type, data) != 0) {
+            slot->callbacks.on_error(id, connection->shared_from_this(), errno);
+        }
         return;
     }
     if (id != INVALID_SOCKET_ID) {
@@ -522,8 +614,10 @@ void UrmaPooledConnection::PollJfc(Socket* carrier) {
             if (!count) { return true; }
             if (slot->type == UrmaIoSlot::JFS_SLOT) {
                 for (int i = 0; i < count; ++i) {
-                    HandleTxCompletion(static_cast<UrmaJfsSlot*>(slot), cr[i]);
+                    HandleTxCompletion(static_cast<UrmaJfsSlot*>(slot), cr[i], dispatch_context_ptr);
                 }
+                UrmaRxDispatchContext::ProcessPendingInputs(&dispatch_context.batch,
+                    slot->callbacks, dispatch_context_ptr);
             } else if (FLAGS_urma_rx_batch_parse) {
                 UrmaRxParseBatch& batch = dispatch_context.batch;
                 for (int i = 0; i < count; ++i) {

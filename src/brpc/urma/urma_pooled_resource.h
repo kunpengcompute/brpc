@@ -55,7 +55,7 @@ constexpr size_t URMA_CTP_MAX_MESSAGE_SIZE = 4096;
 static_assert(URMA_CTP_BLOCK_SIZE >= sizeof(butil::IOBuf::Block) +
                   URMA_CTP_MAX_MESSAGE_SIZE - 64,
               "CTP block must hold IOBuf metadata and the complete body");
-enum UrmaMessageType { MSG_SMALL = 1 };
+enum UrmaMessageType { MSG_SMALL = 1, MSG_PULL_MEM = 4, MSG_FREE = 5, MSG_READ_DATA = 6 };
 struct UrmaMsgHeader {
     uint64_t dst_socket_id;
     uint16_t seq;
@@ -83,6 +83,10 @@ private:
 
 struct UrmaPooledConnectionState {
     std::atomic<bool> failed{false};
+    uint32_t big_capabilities{0};
+    uint32_t read_max_size{0};
+    std::vector<urma_target_seg_t*> remote_segments;
+    urma_target_seg_t* SegmentFor(uint64_t address, size_t length, uint32_t token) const;
     uint32_t local_jfr_index{0};
     urma_target_jetty_t* remote_jfr{nullptr};
     urma_target_seg_t* remote_seg{nullptr};
@@ -92,6 +96,7 @@ struct UrmaPooledConnectionState {
 };
 
 struct TxBatch;
+struct UrmaReadBatch;
 struct TxCompletionCtx {
     // The submitting path retains one reference through post result handling.
     // A second reference, armed before post, belongs to the expected CQE.
@@ -103,6 +108,11 @@ struct TxCompletionCtx {
     void Recycle();
     void ClearResources();
     std::atomic<uint32_t> refs{1};
+    std::shared_ptr<UrmaReadBatch> read_batch;
+    uint32_t read_index{0};
+    // The opaque callback context is borrowed only for this synchronous CQE
+    // invocation; the hardware pool does not interpret or retain it.
+    void (*on_completed)(TxCompletionCtx*, const urma_cr_t&, void*){nullptr};
     urma_jfs_wr_t wr{};
     butil::StackVector<urma_sge_t, 16> sge;
     SocketId self_socket_id{INVALID_SOCKET_ID};
@@ -303,7 +313,7 @@ public:
                          urma_jfs_wr_t** bad = nullptr);
     int Enqueue(UrmaJfsSlot*, TxBatch*);
     void KickDrain(UrmaJfsSlot*);
-    void CompleteSend(UrmaJfsSlot*, const urma_cr_t&);
+    void CompleteSend(UrmaJfsSlot*, const urma_cr_t&, void* dispatch_context = nullptr);
     UrmaOperationGate operations;
     // Startup only; subsequent RX state is owned by the single CQ consumer.
     virtual int PostRecvToSlot(UrmaJfrSlot&, uint32_t num);

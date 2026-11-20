@@ -126,7 +126,7 @@ Make 使用 `config_brpc.sh` 的 `--with-urma --without-urma-mock`，
 客户端和服务端分别通过 `ChannelOptions::use_urma` 与
 `ServerOptions::use_urma` 启用传输。当前支持 `baidu_std` 协议，使用
 非 bonding 设备及事件驱动模式；不支持忙轮询、端到端 credit/ACK 流控，
-也不提供大包单边 READ/WRITE。大于单次 CTP 上限的数据继续分片 SEND。
+池化模式新增可选的大包 READ，默认仍分片 SEND；不包含单边 WRITE。READ要求两端协商能力和注册内存段，不支持READ的对端继续使用SEND。
 
 ## 主要运行参数
 
@@ -135,16 +135,17 @@ Make 使用 `config_brpc.sh` 的 `--with-urma --without-urma-mock`，
 | `urma_device` | 空 | 指定设备；空值选择枚举到的首个设备 |
 | `urma_eid_index` | -1 | 启动时选择 EID；-1 使用 EID 列表第一项，非负值匹配设备返回的实际 `eid_index`；不存在或小于 -1 时初始化失败 |
 | `urma_io_jfs_cnt` | 48 | 进程共享发送队列数量 |
-| `urma_io_jfr_cnt` | 64 | 进程共享接收队列数量 |
+| `urma_io_jfr_cnt` | 8 | 进程共享接收队列数量 |
 | `urma_io_sq_depth` | 128 | 每个发送队列的在途槽位数 |
-| `urma_io_rx_depth` | 512 | 每个接收队列的预投递深度 |
+| `urma_io_rx_depth` | 256 | 每个接收队列的预投递深度 |
 | `urma_jfs_affinity` | true | 按 SocketId 哈希选择固定首选 JFS |
 | `urma_io_tx_batch_max` | 8 | 每批准备与链式提交的 WR 上限，范围1至32 |
 | `urma_io_jfs_lock_free` | false | 设置 UMDK JFS 单执行者属性 |
 | `urma_io_jfr_lock_free` | false | 设置 UMDK JFR 单执行者属性 |
 | `urma_io_jfc_lock_free` | false | 设置 UMDK JFC 单执行者属性 |
 | `urma_buffer_size` | 8192 | 数据池块大小，包含 IOBuf 块头 |
-| `urma_ctp_buf_count` | 48000 | 4KiB CTP 块数量；必须大于接收预投递总数 |
+| `urma_buffer_count` | 池化5120；独占65536 | 未显式设置时按模式选择；显式值覆盖池化默认 |
+| `urma_ctp_buf_count` | 10240 | 4KiB CTP 块数量；必须大于接收预投递总数 |
 | `urma_max_sge` | 0 | 0采用设备能力；正值限制发送 SGE 数 |
 | `urma_cqe_poll_once` | 32 | 每次 poll 最多取出的 CQE 数 |
 | `urma_rx_batch_parse` | true | 同一 poll 中按连接合并解析调用 |
@@ -153,3 +154,28 @@ Make 使用 `config_brpc.sh` 的 `--with-urma --without-urma-mock`，
 队列数量、深度与内存池参数应在全局初始化前确定。接收预投递需要充足
 CTP 块，header 数量需要覆盖接收和发送在途槽位；初始化会校验组合是否
 可用。硬件能力同样约束队列深度、SGE 数和消息大小。
+
+## 池化大包 READ
+
+| 参数 | 默认值 | 含义 |
+| --- | --- | --- |
+| `urma_large_transfer` | send | send/read/auto；auto在协商成功且消息超过单次SEND载荷上限时采用READ |
+| `urma_large_block_size` | 65536 | 注册大IOBuf块大小，包含IOBuf块头 |
+| `urma_large_block_threshold` | 4096 | 无压缩protobuf body超过该字节数时直接序列化到大块 |
+| `urma_large_buffer_count` | 2048 | 大块池数量；0禁用READ能力 |
+| `urma_read_items_per_control` | 32 | 每个PULL控制消息携带的描述符上限，范围1至99 |
+| `urma_memory_pool_limit_mb` | 512 | 池化注册内存总上限，包含新增大块池 |
+
+两端指定 `--urma_resource_mode=pooled --urma_large_transfer=read` 即可启用。PULL通过双边SEND发布源地址，接收方READ完成后提交FREE，随后通过现有有序字节流回调交付。FREE确认前源IOBuf一直保留，不能按控制SEND的TX CQE释放。每个源片段使用独立seq，多个IOBuf可共享一个控制消息。
+
+READ CQE由JFS执行者处理，SEND接收由JFR执行者处理；同一连接的两条交付路径继续使用现有重排/解析锁。READ完成时整批重排，再按CQ轮次批量解析，最后消息遵守现有回调退出后的交付约束。硬件资源池仅同步传递不透明的本轮完成调度参数，不持有池化连接的私有调度类型。
+
+本阶段未增加超时重传或失联源缓冲回收协议；断链后尚未收到FREE的源缓冲可能保留，以避免对端仍在READ时提前释放内存。非池化路径继续使用原有SEND/RECV。
+
+### READ 源数据按控制批次持有
+
+每个 StartReadTransfer 成功接受的前缀对应一个 SourceContext 和一个 versioned source ID，持有这一批全部源 IOBuf 引用。PULL 内的 item 共用 source ID，地址、长度和 seq 各自独立。一次调用达到描述符上限时，未接受的输入留待后续批次，不包含在当前 source 中。
+
+对端整批 READ 完成后发送一个 FREE item，携带批次 source ID、首 seq 和总长度；发送端校验 Socket/connection、首 seq 和完整长度后一次释放该 SourceContext。局部 FREE 不能提前释放源数据。PULL 入队失败时由未发布 guard 立即释放 context；入队成功后必须等匹配的 FREE，不能按本地 SEND CQE 提前回收。
+
+sources_outstanding 统计在途源批次数，不再统计 item 数。二进制布局不变，但 PULL/FREE 的 source ID 语义调整为批次，两端需一起更新。
