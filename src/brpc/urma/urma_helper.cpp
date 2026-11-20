@@ -108,7 +108,7 @@ static bool ValidateReadItemsPerControl(const char*, int32_t value) {
     return value >= 1 && value <= 99;
 }
 DEFINE_validator(urma_read_items_per_control, &ValidateReadItemsPerControl);
-DEFINE_int32(urma_ctp_buf_count, 48000, "Registered 4 KiB CTP blocks (pooled mode)");
+DEFINE_int32(urma_ctp_buf_count, 10240, "Registered 4 KiB CTP blocks (pooled mode)");
 DEFINE_int32(urma_header_buf_count, 65536, "Registered 64 B headers (pooled mode)");
 DEFINE_int32(urma_memory_pool_limit_mb, 512, "Registered pool limit in MiB (pooled mode)");
 DEFINE_int32(urma_buffer_count, 65536,
@@ -512,7 +512,7 @@ static bool GlobalUrmaInitializeImpl() {
     gflags::CommandLineFlagInfo count_info;
     const size_t pool_count = pooled &&
         gflags::GetCommandLineFlagInfo("urma_buffer_count", &count_info) &&
-        count_info.is_default ? 24000 : FLAGS_urma_buffer_count;
+        count_info.is_default ? 5120 : FLAGS_urma_buffer_count;
     if (pooled) {
     const int64_t rx_slots = int64_t(FLAGS_urma_io_jfr_cnt) * FLAGS_urma_io_rx_depth;
     const int64_t tx_slots = int64_t(FLAGS_urma_io_jfs_cnt) * FLAGS_urma_io_sq_depth;

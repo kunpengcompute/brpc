@@ -135,16 +135,17 @@ Make 使用 `config_brpc.sh` 的 `--with-urma --without-urma-mock`，
 | `urma_device` | 空 | 指定设备；空值选择枚举到的首个设备 |
 | `urma_eid_index` | -1 | 启动时选择 EID；-1 使用 EID 列表第一项，非负值匹配设备返回的实际 `eid_index`；不存在或小于 -1 时初始化失败 |
 | `urma_io_jfs_cnt` | 48 | 进程共享发送队列数量 |
-| `urma_io_jfr_cnt` | 64 | 进程共享接收队列数量 |
+| `urma_io_jfr_cnt` | 8 | 进程共享接收队列数量 |
 | `urma_io_sq_depth` | 128 | 每个发送队列的在途槽位数 |
-| `urma_io_rx_depth` | 512 | 每个接收队列的预投递深度 |
+| `urma_io_rx_depth` | 256 | 每个接收队列的预投递深度 |
 | `urma_jfs_affinity` | true | 按 SocketId 哈希选择固定首选 JFS |
 | `urma_io_tx_batch_max` | 8 | 每批准备与链式提交的 WR 上限，范围1至32 |
 | `urma_io_jfs_lock_free` | false | 设置 UMDK JFS 单执行者属性 |
 | `urma_io_jfr_lock_free` | false | 设置 UMDK JFR 单执行者属性 |
 | `urma_io_jfc_lock_free` | false | 设置 UMDK JFC 单执行者属性 |
 | `urma_buffer_size` | 8192 | 数据池块大小，包含 IOBuf 块头 |
-| `urma_ctp_buf_count` | 48000 | 4KiB CTP 块数量；必须大于接收预投递总数 |
+| `urma_buffer_count` | 池化5120；独占65536 | 未显式设置时按模式选择；显式值覆盖池化默认 |
+| `urma_ctp_buf_count` | 10240 | 4KiB CTP 块数量；必须大于接收预投递总数 |
 | `urma_max_sge` | 0 | 0采用设备能力；正值限制发送 SGE 数 |
 | `urma_cqe_poll_once` | 32 | 每次 poll 最多取出的 CQE 数 |
 | `urma_rx_batch_parse` | true | 同一 poll 中按连接合并解析调用 |

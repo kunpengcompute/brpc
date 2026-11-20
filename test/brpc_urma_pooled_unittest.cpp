@@ -1095,6 +1095,79 @@ TEST_F(UrmaPooledTest, registered_header_pool_exhaustion_and_concurrency) {
     EXPECT_EQ(nullptr, memory->Allocate(64));
 }
 
+TEST_F(UrmaPooledTest, memory_tls_cross_thread_return_and_thread_exit) {
+    auto memory = urma::CreateUrmaMemoryPool(urma::GetUrmaContext(), 65536, 128);
+    ASSERT_TRUE(memory);
+    std::vector<void*> blocks;
+    for (size_t i = 0; i < 128; ++i) {
+        void* p = memory->Allocate(65536);
+        ASSERT_TRUE(p);
+        blocks.push_back(p);
+    }
+    EXPECT_EQ(128u, memory->outstanding());
+    std::thread releaser([&] {
+        for (void* p : blocks) memory->Deallocate(p);
+    });
+    releaser.join();
+    EXPECT_EQ(0u, memory->outstanding());
+    // Every block, including the exiting pthread's cache, is reusable.
+    std::set<void*> unique;
+    for (size_t i = 0; i < 128; ++i) {
+        void* p = memory->Allocate(65536);
+        ASSERT_TRUE(p);
+        EXPECT_TRUE(unique.insert(p).second);
+    }
+    for (void* p : unique) memory->Deallocate(p);
+    EXPECT_TRUE(memory->Unregister());
+    EXPECT_EQ(nullptr, memory->Allocate(65536));
+}
+
+TEST_F(UrmaPooledTest, memory_tls_budget_keeps_shared_capacity) {
+    auto memory = urma::CreateUrmaMemoryPool(urma::GetUrmaContext(), 64, 128);
+    ASSERT_TRUE(memory);
+    std::atomic<int> ready{0};
+    std::atomic<bool> finish{false};
+    std::vector<std::thread> workers;
+    for (int i = 0; i < 32; ++i) {
+        workers.emplace_back([&] {
+            void* p = memory->Allocate(64);
+            EXPECT_NE(nullptr, p);
+            if (p) memory->Deallocate(p);
+            ready.fetch_add(1, std::memory_order_release);
+            while (!finish.load(std::memory_order_acquire)) usleep(100);
+        });
+    }
+    while (ready.load(std::memory_order_acquire) != 32) usleep(100);
+    std::vector<void*> remaining;
+    while (void* p = memory->Allocate(64)) remaining.push_back(p);
+    // Idle worker caches must never consume more than half of this pool.
+    EXPECT_GE(remaining.size(), 64u);
+    for (void* p : remaining) memory->Deallocate(p);
+    finish.store(true, std::memory_order_release);
+    for (auto& worker : workers) worker.join();
+    EXPECT_EQ(0u, memory->outstanding());
+}
+
+TEST_F(UrmaPooledTest, memory_tls_teardown_with_live_idle_thread) {
+    auto memory = urma::CreateUrmaMemoryPool(urma::GetUrmaContext(), 64, 128);
+    ASSERT_TRUE(memory);
+    std::atomic<bool> ready{false}, finish{false};
+    std::thread worker([&] {
+        void* p = memory->Allocate(64);
+        EXPECT_NE(nullptr, p);
+        if (p) memory->Deallocate(p);
+        ready.store(true, std::memory_order_release);
+        while (!finish.load(std::memory_order_acquire)) std::this_thread::yield();
+        // The thread-local destructor must tolerate a destroyed pool.
+    });
+    while (!ready.load(std::memory_order_acquire)) std::this_thread::yield();
+    EXPECT_EQ(0u, memory->outstanding());
+    memory->FlushThreadCaches();
+    memory.reset();
+    finish.store(true, std::memory_order_release);
+    worker.join();
+}
+
 TEST_F(UrmaPooledTest, independent_queues_and_import_cache) {
     auto* a = Endpoint();
     auto* b = Endpoint();

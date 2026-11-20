@@ -32,9 +32,9 @@ namespace brpc {
 namespace urma {
 DEFINE_bool(urma_jfs_affinity, true, "Prefer a stable shared JFS for each connection");
 DEFINE_int32(urma_io_jfs_cnt, 48, "Number of process-wide IO JFS slots");
-DEFINE_int32(urma_io_jfr_cnt, 64, "Number of process-wide shared IO JFR slots");
+DEFINE_int32(urma_io_jfr_cnt, 8, "Number of process-wide shared IO JFR slots");
 DEFINE_int32(urma_io_sq_depth, 128, "Depth of each pooled IO send queue");
-DEFINE_int32(urma_io_rx_depth, 512, "Depth of each shared IO receive queue");
+DEFINE_int32(urma_io_rx_depth, 256, "Depth of each shared IO receive queue");
 DEFINE_int32(urma_io_tx_batch_max, 8,
              "Maximum linked WRs in one pooled JFS post (valid range: 1-32)");
 DEFINE_bool(urma_io_jfs_lock_free, false,

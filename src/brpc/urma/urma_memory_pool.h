@@ -40,6 +40,9 @@ public:
     virtual bool Owns(const void* address) const = 0;
     virtual size_t outstanding() const = 0;
     virtual bool Unregister() = 0;
+    // Requires quiescent Allocate/Deallocate calls. Reclaim pthread-local idle
+    // blocks before teardown; outstanding() counts application-owned blocks.
+    virtual void FlushThreadCaches() {}
 };
 
 // Fixed-size, sharded, registered mmap allocator; also used for raw 64B
