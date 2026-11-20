@@ -42,6 +42,45 @@ namespace urma {
 DEFINE_int32(urma_client_handshake_version, 2,
               "Client handshake version: 2 = binary, 3 = protobuf");
 
+void FillUrmaMemorySegment(const UrmaSegmentDescription& src, UrmaMemorySegment* dst) {
+    dst->set_eid(src.eid.data(), src.eid.size());
+    dst->set_uasid(src.uasid); dst->set_va(src.va);
+    dst->set_len(src.length); dst->set_token_id(src.token_id);
+}
+bool ParseUrmaMemorySegment(const UrmaMemorySegment& src, UrmaSegmentDescription* dst) {
+    if (src.eid().size() != 16 || !src.va() || !src.len() ||
+        src.len() > UINT64_MAX - src.va()) return false;
+    std::memcpy(dst->eid.data(), src.eid().data(), 16);
+    dst->uasid = src.uasid(); dst->va = src.va(); dst->length = src.len();
+    dst->token_id = src.token_id();
+    return true;
+}
+std::string EncodePoolSegments(const std::vector<UrmaSegmentDescription>& segments,
+                               uint32_t capabilities, uint32_t read_max_size) {
+    if (segments.empty() && !capabilities) return {};
+    UrmaPoolInfo info; info.set_big_capabilities(capabilities); info.set_read_max_size(read_max_size);
+    for (const auto& seg : segments) FillUrmaMemorySegment(seg, info.add_segments());
+    std::string body;
+    if (!info.SerializeToString(&body)) return {};
+    return std::string("SEG1") + body;
+}
+bool DecodePoolSegments(const std::string& bytes,
+                        std::vector<UrmaSegmentDescription>* segments,
+                        uint32_t* capabilities, uint32_t* read_max_size) {
+    segments->clear(); *capabilities = 0; *read_max_size = 0;
+    if (bytes.size() < 4 || bytes.compare(0, 4, "SEG1") != 0) return true;
+    UrmaPoolInfo info;
+    if (!info.ParseFromArray(bytes.data() + 4, bytes.size() - 4) ||
+        info.segments_size() > 16) return false;
+    *capabilities = info.big_capabilities(); *read_max_size = info.read_max_size();
+    for (const auto& item : info.segments()) {
+        UrmaSegmentDescription seg;
+        if (!ParseUrmaMemorySegment(item, &seg)) return false;
+        segments->push_back(seg);
+    }
+    return true;
+}
+
 // ============================================================================
 // v2 binary HelloMessage.
 // On-wire layout (network byte order, tightly packed body of 82 bytes):
@@ -232,8 +271,10 @@ int ReadBodyAndNegotiate(UrmaEndpoint* ep, ParsedHello* out, bool* negotiated) {
     p.seg_token_id = m.seg_token_id;
     // Drain trailing bytes if msg_len advertises more than the fixed body.
     if (m.msg_len > packet_size) {
-        if (DrainBytes(ep, m.msg_len - packet_size) < 0) {
-            return -1;
+        std::string extension(m.msg_len - packet_size, '\0');
+        if (ep->ReadFromFd(&extension[0], extension.size()) < 0) return -1;
+        if (pooled && !DecodePoolSegments(extension, &p.segments, &p.big_capabilities, &p.read_max_size)) {
+            errno = EPROTO; return -1;
         }
     }
     if (!ValidHello(p)) return 0;
@@ -261,10 +302,17 @@ int DrainBytes(UrmaEndpoint* ep, size_t n) {
 int UrmaHandshakeClientV2::SendLocalHello() {
     v2_wire::HelloMessage m;
     _ep->FillLocalHelloV2(&m);
-    uint8_t packet[v2_wire::POOLED_PACKET_LEN]{};
-    std::memcpy(packet, "URMA", 4);
-    m.Serialize(packet + 4);
-    return _ep->WriteToFd(packet, m.msg_len);
+    const size_t fixed = m.impl_ver == v2_wire::IMPL_POOLED_VERSION
+        ? v2_wire::POOLED_PACKET_LEN : v2_wire::HELLO_PACKET_LEN;
+    const std::string extension = m.impl_ver == v2_wire::IMPL_POOLED_VERSION
+        ? EncodePoolSegments(m.segments, m.big_capabilities, m.read_max_size) : std::string();
+    if (fixed + extension.size() > v2_wire::HELLO_MSG_LEN_MAX) { errno = EMSGSIZE; return -1; }
+    m.msg_len = fixed + extension.size();
+    std::vector<uint8_t> packet(m.msg_len);
+    std::memcpy(packet.data(), "URMA", 4);
+    m.Serialize(packet.data() + 4);
+    if (!extension.empty()) std::memcpy(packet.data() + fixed, extension.data(), extension.size());
+    return _ep->WriteToFd(packet.data(), packet.size());
 }
 
 int UrmaHandshakeClientV2::ReceiveAndParseRemoteHello(ParsedHello* out,
@@ -301,10 +349,17 @@ int UrmaHandshakeServerV2::SendLocalHello() {
         m.jetty_id = 0;
         m.buffer_size = 0;
     }
-    uint8_t packet[v2_wire::POOLED_PACKET_LEN]{};
-    std::memcpy(packet, "URMA", 4);
-    m.Serialize(packet + 4);
-    return _ep->WriteToFd(packet, m.msg_len);
+    const size_t fixed = m.impl_ver == v2_wire::IMPL_POOLED_VERSION
+        ? v2_wire::POOLED_PACKET_LEN : v2_wire::HELLO_PACKET_LEN;
+    const std::string extension = m.impl_ver == v2_wire::IMPL_POOLED_VERSION
+        ? EncodePoolSegments(m.segments, m.big_capabilities, m.read_max_size) : std::string();
+    if (fixed + extension.size() > v2_wire::HELLO_MSG_LEN_MAX) { errno = EMSGSIZE; return -1; }
+    m.msg_len = fixed + extension.size();
+    std::vector<uint8_t> packet(m.msg_len);
+    std::memcpy(packet.data(), "URMA", 4);
+    m.Serialize(packet.data() + 4);
+    if (!extension.empty()) std::memcpy(packet.data() + fixed, extension.data(), extension.size());
+    return _ep->WriteToFd(packet.data(), packet.size());
 }
 
 // ============================================================================

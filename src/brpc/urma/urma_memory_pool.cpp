@@ -16,6 +16,7 @@
 // under the License.
 
 #include "brpc/urma/urma_memory_pool.h"
+#include <gflags/gflags.h>
 
 #if BRPC_WITH_URMA
 #include <sys/mman.h>
@@ -40,6 +41,7 @@ extern void (*blockmem_deallocate)(void*);
 
 namespace brpc {
 namespace urma {
+DECLARE_int32(urma_large_block_threshold);
 namespace {
 const size_t kShards = 64;
 class RegisteredPool : public UrmaMemoryPool {
@@ -160,17 +162,23 @@ UrmaMemoryPoolFactory g_factory = CreateUrmaMemoryPool;
 UrmaMemoryPool* g_data_pool = nullptr;
 UrmaMemoryPool* g_header_pool = nullptr;
 UrmaMemoryPool* g_ctp_pool = nullptr;
+UrmaMemoryPool* g_large_pool = nullptr;
+size_t g_data_block_size = 0;
+size_t g_large_block_size = 0;
 void* (*g_original_allocate)(size_t) = nullptr;
 void (*g_original_deallocate)(void*) = nullptr;
 size_t g_original_block_size = 0;
 void* AllocateIOBuf(size_t size) {
     // Explicit CTP blocks must remain registered; never fall back to malloc.
     if (size == URMA_CTP_BLOCK_SIZE && g_ctp_pool) { return AllocCtpBuffer(); }
+    if (g_large_pool && size == g_large_block_size) { return g_large_pool->Allocate(size); }
     void* p = g_data_pool->Allocate(size);
     return p ? p : g_original_allocate(size);
 }
 void DeallocateIOBuf(void* p) {
-    if (g_ctp_pool && g_ctp_pool->Owns(p)) {
+    if (g_large_pool && g_large_pool->Owns(p)) {
+        g_large_pool->Deallocate(p);
+    } else if (g_ctp_pool && g_ctp_pool->Owns(p)) {
         g_ctp_pool->Deallocate(p);
     } else if (g_data_pool->Owns(p)) {
         g_data_pool->Deallocate(p);
@@ -190,37 +198,43 @@ std::unique_ptr<UrmaMemoryPool> CreateUrmaMemoryPool(
 }
 
 bool SetUrmaMemoryPoolFactory(UrmaMemoryPoolFactory factory) {
-    if (g_data_pool || g_header_pool || g_ctp_pool) { errno = EBUSY; return false; }
+    if (g_data_pool || g_header_pool || g_ctp_pool || g_large_pool) { errno = EBUSY; return false; }
     g_factory = factory ? factory : CreateUrmaMemoryPool;
     return true;
 }
 bool InitializeUrmaMemoryPools(urma_context_t* context, size_t size,
-                               size_t count, size_t headers, size_t ctp_count) {
-    if (g_data_pool || g_header_pool || g_ctp_pool) {
+                               size_t count, size_t headers, size_t ctp_count,
+                               size_t large_count, size_t large_size) {
+    if (g_data_pool || g_header_pool || g_ctp_pool || g_large_pool) {
         errno = EALREADY;
         return false;
     }
     auto data = g_factory(context, size, count);
     auto header = g_factory(context, 64, headers);
     auto ctp = g_factory(context, URMA_CTP_BLOCK_SIZE, ctp_count);
-    if (!data || !header || !ctp) {
+    auto large = large_count ? g_factory(context, large_size, large_count) : nullptr;
+    if (!data || !header || !ctp || (large_count && !large)) {
         return false;
     }
     return InstallUrmaMemoryPools(std::move(data), std::move(header),
-                                  std::move(ctp), size);
+                                  std::move(ctp), size, std::move(large), large_size);
 }
 
 bool InstallUrmaMemoryPools(std::unique_ptr<UrmaMemoryPool> data,
                             std::unique_ptr<UrmaMemoryPool> header,
-                            std::unique_ptr<UrmaMemoryPool> ctp, size_t size) {
-    if (g_data_pool || g_header_pool || g_ctp_pool || !data || !header || !ctp ||
-        size <= sizeof(butil::IOBuf::Block)) {
+                            std::unique_ptr<UrmaMemoryPool> ctp, size_t size,
+                            std::unique_ptr<UrmaMemoryPool> large, size_t large_size) {
+    if (g_data_pool || g_header_pool || g_ctp_pool || g_large_pool || !data || !header || !ctp ||
+        size <= sizeof(butil::IOBuf::Block) || (large && large_size <= size)) {
         errno = EINVAL;
         return false;
     }
     g_data_pool = data.release();
     g_header_pool = header.release();
     g_ctp_pool = ctp.release();
+    g_large_pool = large.release();
+    g_data_block_size = size;
+    g_large_block_size = large_size;
     g_original_allocate = butil::iobuf::blockmem_allocate;
     g_original_deallocate = butil::iobuf::blockmem_deallocate;
     g_original_block_size = butil::GetDefaultBlockSize();
@@ -231,6 +245,11 @@ bool InstallUrmaMemoryPools(std::unique_ptr<UrmaMemoryPool> data,
 }
 
 bool ReleaseUrmaMemoryPools() {
+    if (g_large_pool) {
+        if (g_large_pool->outstanding() != 0 || !g_large_pool->Unregister()) return false;
+        delete g_large_pool;
+        g_large_pool = nullptr;
+    }
     // Delivered IOBufs may still own CTP blocks after queues have stopped.
     // Their deleters require both the pool object and its registration.
     if (g_ctp_pool) {
@@ -281,10 +300,36 @@ urma_target_seg_t* GetCtpPoolSegFor(void* p) {
 urma_target_seg_t* GetPooledMemorySegFor(void* p) {
     // nullptr keeps advertising the standard pool in the handshake. Address
     // lookup includes CTP buffers, so echoing received data stays zero-copy.
+    if (p && g_large_pool && g_large_pool->Owns(p)) {
+        return g_large_pool->SegmentFor(p);
+    }
     if (p && g_ctp_pool && g_ctp_pool->Owns(p)) {
         return g_ctp_pool->SegmentFor(p);
     }
     return g_data_pool ? g_data_pool->SegmentFor(p) : nullptr;
+}
+size_t GetUrmaSerializationBlockSize(size_t body_size) {
+    return HasUrmaLargeBlockPool() && body_size > static_cast<size_t>(FLAGS_urma_large_block_threshold)
+        ? g_large_block_size : 0;
+}
+size_t GetUrmaBlockSizeForPayload(size_t payload_size) {
+    const size_t header = sizeof(butil::IOBuf::Block);
+    if (g_data_pool && g_data_pool->SegmentFor(nullptr) &&
+        g_data_block_size > header && payload_size <= g_data_block_size - header) return g_data_block_size;
+    if (HasUrmaLargeBlockPool() && g_large_block_size > header &&
+        payload_size <= g_large_block_size - header) return g_large_block_size;
+    return 0;
+}
+size_t GetUrmaLargeBlockSize() { return g_large_block_size; }
+bool HasUrmaLargeBlockPool() {
+    return g_large_pool && g_large_pool->SegmentFor(nullptr);
+}
+std::vector<urma_seg_t> GetUrmaPoolSegments() {
+    std::vector<urma_seg_t> result;
+    for (auto* pool : {g_data_pool, g_ctp_pool, g_large_pool}) {
+        if (pool && pool->SegmentFor(nullptr)) result.push_back(pool->SegmentFor(nullptr)->seg);
+    }
+    return result;
 }
 }  // namespace urma
 }  // namespace brpc

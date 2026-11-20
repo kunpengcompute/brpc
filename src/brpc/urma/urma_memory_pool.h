@@ -21,6 +21,7 @@
 #if BRPC_WITH_URMA
 #include <cstddef>
 #include <memory>
+#include <vector>
 #include "urma_api.h"
 
 namespace brpc {
@@ -51,16 +52,25 @@ std::unique_ptr<UrmaMemoryPool> CreateUrmaMemoryPool(
 bool InstallUrmaMemoryPools(std::unique_ptr<UrmaMemoryPool> data,
                             std::unique_ptr<UrmaMemoryPool> headers,
                             std::unique_ptr<UrmaMemoryPool> ctp,
-                            size_t block_size);
+                            size_t block_size,
+                            std::unique_ptr<UrmaMemoryPool> large = nullptr,
+                            size_t large_block_size = 64 * 1024);
 typedef std::unique_ptr<UrmaMemoryPool> (*UrmaMemoryPoolFactory)(
     urma_context_t*, size_t, size_t);
 // Call before global initialization; nullptr restores the default allocator.
 bool SetUrmaMemoryPoolFactory(UrmaMemoryPoolFactory factory);
 bool InitializeUrmaMemoryPools(urma_context_t* context,
                                size_t block_size, size_t block_count,
-                               size_t header_count, size_t ctp_count);
+                               size_t header_count, size_t ctp_count,
+                               size_t large_count = 0,
+                               size_t large_block_size = 64 * 1024);
 // Returns false if a registered segment must remain alive.
 bool ReleaseUrmaMemoryPools();
+size_t GetUrmaSerializationBlockSize(size_t body_size);
+size_t GetUrmaBlockSizeForPayload(size_t payload_size);
+size_t GetUrmaLargeBlockSize();
+bool HasUrmaLargeBlockPool();
+std::vector<urma_seg_t> GetUrmaPoolSegments();
 void* AllocHeaderBuffer();
 void FreeHeaderBuffer(void* buffer);
 urma_target_seg_t* GetHeaderPoolSegFor(void* buffer);

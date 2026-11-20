@@ -20,6 +20,7 @@
 #include <unordered_map>
 #include <map>
 #include "brpc/urma/urma_pooled_resource.h"
+#include "brpc/urma/urma_control.h"
 #include "brpc/urma/urma_helper.h"
 #if BRPC_WITH_URMA
 namespace brpc {
@@ -69,6 +70,10 @@ public:
     int GetLocalDescription(UrmaConnectionDescription* out) const override;
     int ImportPeer(const UrmaConnectionDescription& peer) override;
     ssize_t CutFromIOBufList(butil::IOBuf**, size_t) override;
+    int HandleControl(uint8_t type, const butil::IOBuf& data);
+    int SendControl(uint8_t type, const UrmaControl& control, UrmaJfsSlot* selected = nullptr);
+    ssize_t StartReadTransfer(const butil::IOBuf& data);
+    static void CompleteRead(TxCompletionCtx* ctx, const urma_cr_t& completion, void* dispatch_context = nullptr);
     bool IsWritable() const override {
         return !_closed.load() && !_shared_state->failed.load() && _peer_imported.load() &&
             _provider_state->pool->IsWritable(_preferred_jfs);
@@ -117,7 +122,7 @@ private:
     static int AttachSlotSocket(UrmaIoSlot*);
     static void DetachSlotSocket(UrmaIoSlot*);
     static void PollJfc(Socket*);
-    static void HandleTxCompletion(UrmaJfsSlot*, const urma_cr_t&);
+    static void HandleTxCompletion(UrmaJfsSlot*, const urma_cr_t&, UrmaRxDispatchContext* = nullptr);
     static void HandleRxCompletion(UrmaJfrSlot*, const urma_cr_t&,
                                    UrmaRxDispatchContext* = nullptr, UrmaRxParseBatch* = nullptr);
 
@@ -135,6 +140,8 @@ private:
     uint32_t _remote_recv_block_size{0};
     SocketId _peer_socket_id{INVALID_SOCKET_ID};
     uint16_t _next_send_seq{0};
+    // Written only by the serialized Socket write owner. No IOBuf pointer retained.
+    size_t _read_bytes_remaining{0};
     // Serialize fragment assembly through ordered delivery. Close only marks
     // the resource closed: callback-held references keep this state alive,
     // avoiding a dispatch -> Close -> reorder lock inversion.

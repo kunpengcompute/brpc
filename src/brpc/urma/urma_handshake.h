@@ -20,6 +20,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
+#include <vector>
+#include "brpc/urma/urma_connection.h"
 
 #if BRPC_WITH_URMA
 
@@ -35,6 +38,9 @@ class UrmaEndpoint;
 // then uses ApplyRemoteHello to size its send/recv windows and to drive
 // urma_import_seg / urma_import_jetty.
 struct ParsedHello {
+    uint32_t big_capabilities = 0;
+    uint32_t read_max_size = 0;
+    std::vector<UrmaSegmentDescription> segments;
     bool pooled = false;
     uint64_t socket_id = UINT64_MAX;
     uint32_t buffer_size = 0;      // peer recv buffer size in bytes (per WR)
@@ -56,6 +62,15 @@ struct ParsedHello {
 // Both v2 and v3 handshakes must pass this check before negotiation succeeds.
 bool ValidHello(const ParsedHello& hello);
 
+class UrmaMemorySegment;
+void FillUrmaMemorySegment(const UrmaSegmentDescription& src, UrmaMemorySegment* dst);
+bool ParseUrmaMemorySegment(const UrmaMemorySegment& src, UrmaSegmentDescription* dst);
+std::string EncodePoolSegments(const std::vector<UrmaSegmentDescription>& segments,
+                               uint32_t capabilities, uint32_t read_max_size);
+bool DecodePoolSegments(const std::string& bytes,
+                        std::vector<UrmaSegmentDescription>* segments,
+                        uint32_t* capabilities, uint32_t* read_max_size);
+
 // v2 binary wire layout. The full on-wire packet is:
 //   [ "URMA" 4B ][ HelloMessage body 82B ]   => 86 bytes total.
 // (msg_len = 86 includes the magic prefix and the body, matching RDMA's
@@ -73,9 +88,12 @@ constexpr uint16_t IMPL_POOLED_VERSION = 2;
 constexpr size_t POOLED_BODY_LEN = HELLO_BODY_LEN + 8;
 constexpr size_t POOLED_PACKET_LEN = HELLO_PACKET_LEN + 8;
 
-// The serializable struct. Aligned so it can be reinterpreted as raw bytes.
+// Host-order fields and optional extensions; Serialize defines the wire layout.
 struct HelloMessage {
     uint64_t socket_id = UINT64_MAX;
+    uint32_t big_capabilities = 0;
+    uint32_t read_max_size = 0;
+    std::vector<UrmaSegmentDescription> segments;
     uint16_t msg_len;       // total packet length (incl. magic)
     uint16_t hello_ver;
     uint16_t impl_ver;

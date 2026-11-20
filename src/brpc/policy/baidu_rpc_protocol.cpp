@@ -52,6 +52,10 @@ void bthread_assign_data(void* data);
 }
 
 
+#if BRPC_WITH_URMA
+#include "brpc/urma/urma_memory_pool.h"
+#endif
+
 namespace brpc {
 namespace policy {
 
@@ -150,11 +154,23 @@ bool SerializeRpcMessage(const google::protobuf::Message& message,
                          CompressType compress_type, ChecksumType checksum_type,
                          butil::IOBuf* buf,
                          const butil::IOBuf* checksum_attachment) {
+    size_t urma_block_size = 0;
+#if BRPC_WITH_URMA
+    if (content_type == CONTENT_TYPE_PB && compress_type == COMPRESS_TYPE_NONE &&
+        urma::HasUrmaLargeBlockPool()) {
+        urma_block_size = urma::GetUrmaSerializationBlockSize(message.ByteSizeLong());
+    }
+#endif
     auto serialize = [&](Serializer& serializer) -> bool {
         bool ok;
         if (COMPRESS_TYPE_NONE == compress_type) {
-            butil::IOBufAsZeroCopyOutputStream stream(buf);
-            ok = serializer.SerializeTo(&stream);
+            if (urma_block_size) {
+                butil::IOBufAsZeroCopyOutputStream stream(buf, urma_block_size);
+                ok = serializer.SerializeTo(&stream);
+            } else {
+                butil::IOBufAsZeroCopyOutputStream stream(buf);
+                ok = serializer.SerializeTo(&stream);
+            }
         } else {
             const CompressHandler* handler = FindCompressHandler(compress_type);
             if (nullptr == handler) {

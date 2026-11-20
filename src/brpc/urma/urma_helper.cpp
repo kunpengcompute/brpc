@@ -99,9 +99,18 @@ DEFINE_int32(urma_prepared_jetty_cnt, 8,
 DEFINE_int32(urma_buffer_size, 8 * 1024,
              "Per-buffer size in the URMA buffer pool (bytes). "
              "Must match IOBuf block size to keep zero-copy working.");
+DEFINE_int32(urma_large_block_size, 64 * 1024, "Registered large IOBuf block size (pooled READ)");
+DEFINE_int32(urma_large_block_threshold, 20 * 1024,
+             "Uncompressed PB bodies strictly larger than this byte threshold use large registered IOBuf blocks");
+DEFINE_int32(urma_large_buffer_count, 2048, "Large registered blocks; 0 disables READ capability");
+DEFINE_int32(urma_read_items_per_control, 32, "READ descriptors per control, valid range 1-99");
+static bool ValidateReadItemsPerControl(const char*, int32_t value) {
+    return value >= 1 && value <= 99;
+}
+DEFINE_validator(urma_read_items_per_control, &ValidateReadItemsPerControl);
 DEFINE_int32(urma_ctp_buf_count, 48000, "Registered 4 KiB CTP blocks (pooled mode)");
 DEFINE_int32(urma_header_buf_count, 65536, "Registered 64 B headers (pooled mode)");
-DEFINE_int32(urma_memory_pool_limit_mb, 400, "Registered pool limit in MiB (pooled mode)");
+DEFINE_int32(urma_memory_pool_limit_mb, 512, "Registered pool limit in MiB (pooled mode)");
 DEFINE_int32(urma_buffer_count, 65536,
              "Number of buffers in the URMA buffer pool.");
 
@@ -509,12 +518,18 @@ static bool GlobalUrmaInitializeImpl() {
     const int64_t tx_slots = int64_t(FLAGS_urma_io_jfs_cnt) * FLAGS_urma_io_sq_depth;
     const int64_t pool_bytes = int64_t(FLAGS_urma_buffer_size) * pool_count +
                               int64_t(64) * FLAGS_urma_header_buf_count +
-                              int64_t(URMA_CTP_BLOCK_SIZE) * FLAGS_urma_ctp_buf_count;
+                              int64_t(URMA_CTP_BLOCK_SIZE) * FLAGS_urma_ctp_buf_count +
+                              int64_t(FLAGS_urma_large_block_size) * FLAGS_urma_large_buffer_count;
     if (FLAGS_urma_io_jfs_cnt <= 0 || FLAGS_urma_io_jfr_cnt <= 0 ||
         FLAGS_urma_io_sq_depth <= 0 || FLAGS_urma_io_rx_depth <= 0 ||
         FLAGS_urma_io_sq_depth > 65535 || FLAGS_urma_io_rx_depth > 65535 ||
         FLAGS_urma_buffer_size <= static_cast<int>(URMA_CTP_BLOCK_SIZE) ||
         FLAGS_urma_buffer_size % 64 != 0 ||
+        FLAGS_urma_large_buffer_count < 0 ||
+        (FLAGS_urma_large_buffer_count > 0 &&
+         (FLAGS_urma_large_block_size <= FLAGS_urma_buffer_size ||
+          FLAGS_urma_large_block_size % 64 != 0)) || FLAGS_urma_large_block_threshold < 0 ||
+        FLAGS_urma_read_items_per_control < 1 || FLAGS_urma_read_items_per_control > 99 ||
         pool_count <= 0 || FLAGS_urma_ctp_buf_count <= rx_slots ||
         FLAGS_urma_header_buf_count < rx_slots + tx_slots ||
         FLAGS_urma_memory_pool_limit_mb <= 0 ||
@@ -666,7 +681,8 @@ static bool GlobalUrmaInitializeImpl() {
     if (pooled) {
         if (g_max_sge < 2 || IsUrmaBondingDevice() ||
             !InitializeUrmaMemoryPools(g_context, FLAGS_urma_buffer_size,
-                pool_count, FLAGS_urma_header_buf_count, FLAGS_urma_ctp_buf_count)) {
+                pool_count, FLAGS_urma_header_buf_count, FLAGS_urma_ctp_buf_count,
+                FLAGS_urma_large_buffer_count, FLAGS_urma_large_block_size)) {
             return false;
         }
     } else {

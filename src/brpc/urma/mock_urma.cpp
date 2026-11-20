@@ -758,6 +758,36 @@ static urma_status_t PostSend(urma_jfc_t* local_jfc, urma_jfs_wr_t* wr,
             auto it = jetty_id_map.find(target->id.id);
             if (it != jetty_id_map.end()) { remote = it->second->jetty_cfg.shared.jfr; }
         }
+        if (current->opcode == URMA_OPC_READ) {
+            const auto& src = current->rw.src;
+            const auto& dst = current->rw.dst;
+            if (src.num_sge != 1 || !dst.num_sge || dst.num_sge > 6 ||
+                !src.sge || !dst.sge || !src.sge[0].tseg) {
+                if (bad) *bad = current;
+                return URMA_EINVAL;
+            }
+            size_t capacity = 0;
+            for (uint32_t i = 0; i < dst.num_sge; ++i) capacity += dst.sge[i].len;
+            if (capacity < src.sge[0].len) {
+                if (bad) *bad = current;
+                return URMA_EINVAL;
+            }
+            size_t offset = 0;
+            for (uint32_t i = 0; i < dst.num_sge && offset < src.sge[0].len; ++i) {
+                const auto& target_sge = dst.sge[i];
+                const size_t count = std::min<size_t>(target_sge.len, src.sge[0].len - offset);
+                if (!target_sge.tseg) { if (bad) *bad = current; return URMA_EINVAL; }
+                std::memcpy(reinterpret_cast<void*>(target_sge.addr),
+                            reinterpret_cast<const void*>(src.sge[0].addr + offset), count);
+                offset += count;
+            }
+            if (current->flag.bs.complete_enable) {
+                urma_cr_t tx{}; tx.status = URMA_CR_SUCCESS;
+                tx.user_ctx = current->user_ctx; // opcode is only defined on RX completions.
+                PushCompletion(local_jfc, jfc_state_map[local_jfc], tx);
+            }
+            continue;
+        }
         auto recv_it = jfr_recv_map.find(remote);
         if (recv_it == jfr_recv_map.end() || recv_it->second.empty()) {
             if (bad) { *bad = current; }
