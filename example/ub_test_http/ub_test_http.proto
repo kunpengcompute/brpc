@@ -1,0 +1,86 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
+syntax="proto2";
+package ub_test_http;
+
+option cc_generic_services = true;
+
+message HttpRequest {};
+message HttpResponse {};
+
+message StartTestRequest {
+  optional int32  thread_num              = 1;
+  optional int32  queue_depth             = 2;
+  optional int32  expected_qps            = 3;
+  optional int32  test_seconds            = 4;
+  optional int32  test_iterations         = 5;
+  optional string connection_type         = 6;
+  optional string protocol                = 7;
+  repeated string servers                 = 8;
+  optional int32  attachment_size         = 9;
+  optional bool   echo_attachment         = 10;
+  optional bool   use_rdma                = 11;
+  optional bool   ubsocket_use_ub         = 12;
+  optional int32  rpc_timeout_ms          = 13;
+  optional int32  connect_timeout_ms      = 14;
+  optional int32  batch_size              = 15;
+  optional int32  batch_interval_ms       = 16;
+  optional int32  thread_pool_size        = 17;
+  optional int32  test_connections_per_round = 18;
+  optional int32  round_period_ms         = 19;
+  optional int32  max_retry               = 20;
+  optional int32  connect_retry_interval  = 21;
+  optional string req_size                = 22;  // comma-separated multiple sizes, e.g. "128,1024,4096"
+  optional bool   client_ignore_oc        = 23;
+  optional bool   use_connection_group    = 24;
+  optional int32  max_random_delay_us     = 25;
+  optional int32  token_interval_period   = 26;
+  optional int64  initial_tokens          = 27;
+  optional bool   only_first_rpc          = 28;
+  optional bool   debug_latency           = 29;
+  optional bool   test_keep_alive         = 30;
+  optional string export_percentile_file  = 31;
+  optional bool   warmup                  = 32;
+  optional int32  warmup_connections      = 33;
+  optional int32  max_thread_num          = 34;
+  optional int32  link_num                = 35;  // Takes precedence over thread_num when >= 0
+  optional int32  sender_thread_num       = 36;  // Number of sender pump bthreads (0 means auto: min(queue_depth, 16))
+  optional int32  token_tick_us           = 37;  // Token generation tick interval in microseconds
+  optional int32  error_log_interval_ms   = 38;  // Min interval between error logs (0 = log every error)
+  optional int32  latency_window_seconds  = 39;  // Percentile window (s) for latency recorder; 0/unset = auto (test_seconds, capped 3600)
+  optional bool   allow_stop_burst        = 40;  // true = legacy end-of-test send burst; false = drain only
+  // ---- QPS 阶梯爬坡 (staircase ramp): 非空 list 优先, 否则用算术式; 两者都空则 ramp 不启用 ----
+  optional string qps_ramp_list           = 41;  // comma-separated step QPS, e.g. "100,200,400" (highest priority)
+  optional int32  qps_ramp_start          = 42;  // arithmetic form: starting QPS (>0 enables ramp)
+  optional int32  qps_ramp_step           = 43;  // arithmetic form: QPS increment per step
+  optional int32  qps_ramp_step_seconds   = 44;  // seconds per step (shared by both forms)
+  optional int32  qps_ramp_max            = 45;  // arithmetic form: QPS ceiling (0 = derive step count from test_seconds)
+};
+
+message ProxyConfigRequest {
+  repeated string servers = 1;  // 后端 ServerC 列表 (B→C 转发目标)。空列表 = 不转发。
+};
+
+service UbTestHttpService {
+  rpc start(StartTestRequest) returns (HttpResponse);
+  rpc result(HttpRequest) returns (HttpResponse);
+  rpc status(HttpRequest) returns (HttpResponse);
+  rpc proxy_config(ProxyConfigRequest) returns (HttpResponse);
+  rpc proxy_stats(HttpRequest) returns (HttpResponse);
+  rpc server_stats(HttpRequest) returns (HttpResponse);
+};

@@ -27,6 +27,7 @@
 #include <cstdlib>
 #include <functional>
 #include <limits>
+#include <string>
 #include <vector>
 #include "butil/iobuf.h"
 #include "butil/logging.h"
@@ -109,7 +110,12 @@ public:
         _base = mmap(nullptr, _block_size * _count, PROT_READ | PROT_WRITE,
                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         if (_base == MAP_FAILED) {
+            const int error = errno;
+            LOG(ERROR) << "URMA registered pool mmap failed: block_size=" << _block_size
+                       << " block_count=" << _count << " bytes=" << _block_size * _count
+                       << " errno=" << error;
             _base = nullptr;
+            errno = error;
             return false;
         }
         urma_seg_cfg_t cfg{};
@@ -119,8 +125,14 @@ public:
         cfg.flag.bs.cacheable = URMA_NON_CACHEABLE;
         cfg.flag.bs.access = URMA_ACCESS_READ | URMA_ACCESS_WRITE |
                              URMA_ACCESS_ATOMIC;
+        errno = 0;
         _seg = urma_register_seg(context, &cfg);
         if (!_seg) {
+            const int error = errno ? errno : EIO;
+            LOG(ERROR) << "URMA registered pool urma_register_seg failed: block_size="
+                       << _block_size << " block_count=" << _count
+                       << " bytes=" << cfg.len << " errno=" << error;
+            errno = error;
             return false;
         }
         _used.assign(_count, 0);
@@ -325,6 +337,9 @@ std::unique_ptr<UrmaMemoryPool> CreateUrmaMemoryPool(
         urma_context_t* context, size_t size, size_t count) {
     std::unique_ptr<RegisteredPool> pool(new RegisteredPool(size, count));
     if (!pool->Init(context)) {
+        const int error = errno;
+        pool.reset();
+        errno = error;
         return nullptr;
     }
     return std::unique_ptr<UrmaMemoryPool>(pool.release());
@@ -342,10 +357,26 @@ bool InitializeUrmaMemoryPools(urma_context_t* context, size_t size,
         errno = EALREADY;
         return false;
     }
-    auto data = g_factory(context, size, count);
-    auto header = g_factory(context, 64, headers);
-    auto ctp = g_factory(context, URMA_CTP_BLOCK_SIZE, ctp_count);
-    auto large = large_count ? g_factory(context, large_size, large_count) : nullptr;
+    auto create = [&](const char* name, const char* count_flag,
+                      size_t block_size, size_t block_count) {
+        auto pool = g_factory(context, block_size, block_count);
+        if (!pool) {
+            const int error = errno;
+            const std::string bytes = block_size &&
+                block_count > std::numeric_limits<size_t>::max() / block_size
+                ? "overflow" : std::to_string(block_size * block_count);
+            LOG(ERROR) << "Failed to initialize URMA registered pool: pool=" << name
+                       << " block_size=" << block_size << " " << count_flag << "="
+                       << block_count << " bytes=" << bytes << " errno=" << error;
+            errno = error;
+        }
+        return pool;
+    };
+    auto data = create("data", "urma_buffer_count", size, count);
+    auto header = create("header", "urma_header_buf_count", 64, headers);
+    auto ctp = create("ctp", "urma_ctp_buf_count", URMA_CTP_BLOCK_SIZE, ctp_count);
+    auto large = large_count
+        ? create("large", "urma_large_buffer_count", large_size, large_count) : nullptr;
     if (!data || !header || !ctp || (large_count && !large)) {
         return false;
     }

@@ -49,6 +49,10 @@ DECLARE_int32(urma_io_rx_depth);
 DECLARE_int32(urma_io_tx_batch_max);
 DECLARE_int32(urma_header_buf_count);
 
+// Validate pooled queue flags before creating resources; log the invalid flag
+// and its accepted range, and set errno to EINVAL on failure.
+bool ValidatePooledQueueConfiguration();
+
 // Fixed 64-byte wire header. Multi-byte fields use network byte order.
 // CTP limits the complete SEND message, including every SGE, to 4 KiB.
 constexpr size_t URMA_CTP_MAX_MESSAGE_SIZE = 4096;
