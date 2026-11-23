@@ -30,6 +30,7 @@
 
 #if BRPC_WITH_URMA
 #include "butil/atomicops.h"
+#include "butil/logging.h"
 #include "butil/sys_byteorder.h"
 #include "urma_api.h"
 #include "brpc/urma/urma_handshake.h"
@@ -678,6 +679,31 @@ TEST_F(UrmaMockTest, pool_release_preserves_outstanding_iobuf_and_heap_fallback)
     urma_free_device_list(devices);
 }
 
+TEST(UrmaMemoryPoolInitTest, factory_failure_reports_pool_and_capacity) {
+    ASSERT_TRUE(urma::SetUrmaMemoryPoolFactory(
+        +[](urma_context_t*, size_t, size_t) -> std::unique_ptr<urma::UrmaMemoryPool> {
+            errno = ENOMEM;
+            return nullptr;
+        }));
+    struct RestoreFactory {
+        ~RestoreFactory() { urma::SetUrmaMemoryPoolFactory(nullptr); }
+    } restore;
+    logging::StringSink diagnostic;
+    logging::LogSink* previous = logging::SetLogSink(&diagnostic);
+    const bool initialized = urma::InitializeUrmaMemoryPools(
+        nullptr, 8192, 16, 16, 16, 64, 65536);
+    logging::SetLogSink(previous);
+    EXPECT_FALSE(initialized);
+    EXPECT_FALSE(urma::HasUrmaLargeBlockPool());
+    for (const char* pool : {"data", "header", "ctp", "large"}) {
+        EXPECT_NE(std::string::npos, diagnostic.find(std::string("pool=") + pool));
+    }
+    EXPECT_NE(std::string::npos, diagnostic.find("block_size=65536"));
+    EXPECT_NE(std::string::npos, diagnostic.find("urma_large_buffer_count=64"));
+    EXPECT_NE(std::string::npos, diagnostic.find("bytes=4194304"));
+    EXPECT_NE(std::string::npos, diagnostic.find("errno=" + std::to_string(ENOMEM)));
+}
+
 // End-to-end software-provider tests. Each test uses a small pool without an
 // event adapter so completions can be delivered in a controlled order.
 class UrmaPooledTest : public ::testing::Test {
@@ -783,7 +809,7 @@ protected:
         urma::FLAGS_urma_io_jfs_cnt = 2;
         urma::FLAGS_urma_io_jfr_cnt = 1;
         urma::FLAGS_urma_io_sq_depth = 16;
-        urma::FLAGS_urma_io_rx_depth = 8;
+        urma::FLAGS_urma_io_rx_depth = 16;
         urma::FLAGS_urma_header_buf_count = 512;
         GFLAGS_NAMESPACE::SetCommandLineOption("urma_buffer_count", "2048");
         GFLAGS_NAMESPACE::SetCommandLineOption("urma_ctp_buf_count", "2048");
@@ -881,6 +907,62 @@ protected:
     urma::UrmaPooledResource* _original{nullptr};
     std::vector<SocketUniquePtr> _sockets;
 };
+
+TEST(UrmaIoQueueFlagTest, queue_configuration_boundaries) {
+    GFLAGS_NAMESPACE::FlagSaver flags;
+    struct Range { const char* name; int minimum; int maximum; };
+    const Range ranges[] = {
+        {"urma_io_jfs_cnt", 1, 64},
+        {"urma_io_jfr_cnt", 1, 64},
+        {"urma_io_sq_depth", 16, 1024},
+        {"urma_io_rx_depth", 16, 1024},
+    };
+    for (const auto& range : ranges) {
+        SCOPED_TRACE(range.name);
+        for (int valid : {range.minimum, range.maximum}) {
+            EXPECT_FALSE(GFLAGS_NAMESPACE::SetCommandLineOption(
+                range.name, std::to_string(valid).c_str()).empty());
+        }
+        for (int invalid : {-1, 0, range.minimum - 1, range.maximum + 1}) {
+            EXPECT_TRUE(GFLAGS_NAMESPACE::SetCommandLineOption(
+                range.name, std::to_string(invalid).c_str()).empty());
+        }
+    }
+}
+
+TEST_F(UrmaPooledTest, invalid_queue_configuration_creates_no_resources) {
+    GFLAGS_NAMESPACE::FlagSaver flags;
+    struct Setting { const char* name; int32_t* flag; int minimum; int maximum; };
+    const Setting settings[] = {
+        {"urma_io_jfs_cnt", &urma::FLAGS_urma_io_jfs_cnt, 1, 64},
+        {"urma_io_jfr_cnt", &urma::FLAGS_urma_io_jfr_cnt, 1, 64},
+        {"urma_io_sq_depth", &urma::FLAGS_urma_io_sq_depth, 16, 1024},
+        {"urma_io_rx_depth", &urma::FLAGS_urma_io_rx_depth, 16, 1024},
+    };
+    for (const auto& setting : settings) {
+        const int32_t saved = *setting.flag;
+        for (int invalid : {-1, 0, setting.minimum - 1, setting.maximum + 1}) {
+            *setting.flag = invalid;  // Exercise callers bypassing gflags validators.
+            urma::UrmaPooledResource rejected;
+            logging::StringSink diagnostic;
+            logging::LogSink* previous = logging::SetLogSink(&diagnostic);
+            errno = 0;
+            const int result = rejected.Initialize(urma::GetUrmaContext(), {});
+            const int error = errno;
+            logging::SetLogSink(previous);
+            EXPECT_EQ(-1, result);
+            EXPECT_EQ(EINVAL, error);
+            EXPECT_NE(std::string::npos, diagnostic.find(
+                std::string(setting.name) + "=" + std::to_string(invalid)));
+            EXPECT_NE(std::string::npos, diagnostic.find(
+                "expected [" + std::to_string(setting.minimum) + ", " +
+                std::to_string(setting.maximum) + "]"));
+            EXPECT_TRUE(rejected.io_jfs.empty());
+            EXPECT_TRUE(rejected.io_jfr.empty());
+        }
+        *setting.flag = saved;
+    }
+}
 
 TEST_F(UrmaPooledTest, provider_owns_shared_queues_until_last_handle_releases) {
     std::unique_ptr<urma::UrmaConnectionProvider> provider;
@@ -1271,12 +1353,12 @@ TEST_F(UrmaPooledTest, independent_queues_and_import_cache) {
         EXPECT_EQ(urma::GetUrmaMaxSge(),
                   slot->jfs->jfs_cfg.max_sge);
     }
-    EXPECT_EQ(8u, Contexts(_pool->io_jfr[0]).size());
+    EXPECT_EQ(16u, Contexts(_pool->io_jfr[0]).size());
     a->Reset();
     EXPECT_EQ(1u, _pool->imports->size());
     c->Reset();
     EXPECT_EQ(0u, _pool->imports->size());
-    EXPECT_EQ(8u, Contexts(_pool->io_jfr[0]).size());
+    EXPECT_EQ(16u, Contexts(_pool->io_jfr[0]).size());
 }
 
 TEST_F(UrmaPooledTest, pooled_send_reorder_and_wrap_preserve_stream) {
@@ -1563,7 +1645,7 @@ TEST_F(UrmaPooledTest, disconnect_keeps_dma_and_imports_alive_until_completion) 
     EXPECT_TRUE(connection.expired());
     EXPECT_EQ(0u, _pool->imports->size());
     DrainRx();
-    EXPECT_EQ(8u, Contexts(_pool->io_jfr[0]).size());
+    EXPECT_EQ(16u, Contexts(_pool->io_jfr[0]).size());
 }
 
 TEST_F(UrmaPooledTest, receive_errors_repost_and_reset_only_connection_state) {
@@ -1580,7 +1662,7 @@ TEST_F(UrmaPooledTest, receive_errors_repost_and_reset_only_connection_state) {
     ep->Reset();
     EXPECT_TRUE(old.expired());
     EXPECT_FALSE(ep->PinConnection());
-    EXPECT_EQ(8u, Contexts(_pool->io_jfr[0]).size());
+    EXPECT_EQ(16u, Contexts(_pool->io_jfr[0]).size());
 }
 
 TEST_F(UrmaPooledTest, duplicate_sequence_fails_connection) {
@@ -2078,7 +2160,7 @@ TEST_F(UrmaPooledTest, failed_and_short_rx_completions_reclaim_and_repost) {
     cr[1].completion_len = 3;
     urma::UrmaPooledConnection::HandleRxCompletion(slot, cr[0]);
     urma::UrmaPooledConnection::HandleRxCompletion(slot, cr[1]);
-    EXPECT_EQ(8u, Contexts(slot).size());
+    EXPECT_EQ(16u, Contexts(slot).size());
     EXPECT_TRUE(receiver->_input_processor.read_buf().empty());
     DrainTx();
 }

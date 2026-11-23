@@ -31,12 +31,32 @@
 namespace brpc {
 namespace urma {
 DEFINE_bool(urma_jfs_affinity, true, "Prefer a stable shared JFS for each connection");
-DEFINE_int32(urma_io_jfs_cnt, 48, "Number of process-wide IO JFS slots");
-DEFINE_int32(urma_io_jfr_cnt, 8, "Number of process-wide shared IO JFR slots");
-DEFINE_int32(urma_io_sq_depth, 128, "Depth of each pooled IO send queue");
+DEFINE_int32(urma_io_jfs_cnt, 48, "Number of process-wide IO JFS slots (valid range: 1-64)");
+DEFINE_int32(urma_io_jfr_cnt, 8, "Number of process-wide shared IO JFR slots (valid range: 1-64)");
+DEFINE_int32(urma_io_sq_depth, 128, "Depth of each pooled IO send queue (valid range: 16-1024)");
 DEFINE_int32(urma_io_jfs_err_timeout, URMA_TYPICAL_ERR_TIMEOUT,
              "Error timeout exponent for shared send queues (0-31, provider-specific timing)");
-DEFINE_int32(urma_io_rx_depth, 256, "Depth of each shared IO receive queue");
+DEFINE_int32(urma_io_rx_depth, 256, "Depth of each shared IO receive queue (valid range: 16-1024)");
+namespace {
+bool ValidateQueueCount(const char*, int32_t value) {
+    return value >= 1 && value <= 64;
+}
+bool ValidateQueueDepth(const char*, int32_t value) {
+    return value >= 16 && value <= 1024;
+}
+bool CheckQueueRange(const char* name, int32_t value, int32_t minimum,
+                     int32_t maximum) {
+    if (value >= minimum && value <= maximum) return true;
+    LOG(ERROR) << "Invalid " << name << "=" << value
+               << "; expected [" << minimum << ", " << maximum << "]";
+    errno = EINVAL;
+    return false;
+}
+}  // namespace
+DEFINE_validator(urma_io_jfs_cnt, &ValidateQueueCount);
+DEFINE_validator(urma_io_jfr_cnt, &ValidateQueueCount);
+DEFINE_validator(urma_io_sq_depth, &ValidateQueueDepth);
+DEFINE_validator(urma_io_rx_depth, &ValidateQueueDepth);
 DEFINE_int32(urma_io_tx_batch_max, 8,
              "Maximum linked WRs in one pooled JFS post (valid range: 1-32)");
 DEFINE_bool(urma_io_jfs_lock_free, false,
@@ -45,6 +65,14 @@ DEFINE_bool(urma_io_jfr_lock_free, false,
             "Disable UMDK internal locking for pooled JFR; each JFR has one reposting executor");
 DEFINE_bool(urma_io_jfc_lock_free, false,
             "Disable UMDK internal locking for pooled JFC; each JFC has one polling executor");
+bool ValidatePooledQueueConfiguration() {
+    return CheckQueueRange("urma_io_jfs_cnt", FLAGS_urma_io_jfs_cnt, 1, 64) &&
+           CheckQueueRange("urma_io_jfr_cnt", FLAGS_urma_io_jfr_cnt, 1, 64) &&
+           CheckQueueRange("urma_io_sq_depth", FLAGS_urma_io_sq_depth, 16, 1024) &&
+           CheckQueueRange("urma_io_rx_depth", FLAGS_urma_io_rx_depth, 16, 1024) &&
+           CheckQueueRange("urma_io_tx_batch_max", FLAGS_urma_io_tx_batch_max,
+                           1, URMA_TX_BATCH_MAX);
+}
 UrmaPooledResource* g_urma_pool = nullptr;
 TxCompletionCtx::~TxCompletionCtx() {
     ClearResources();
@@ -166,14 +194,15 @@ int UrmaPooledResource::CreateCompletionQueue(
 }
 int UrmaPooledResource::Initialize(urma_context_t* context,
                                  const EventAdapter& events) {
-    if (!context || !io_jfs.empty() || !io_jfr.empty() ||
-        FLAGS_urma_io_jfs_cnt <= 0 || FLAGS_urma_io_jfr_cnt <= 0 ||
-        FLAGS_urma_io_sq_depth <= 0 || FLAGS_urma_io_rx_depth <= 0 ||
-        FLAGS_urma_io_jfs_err_timeout < 0 || FLAGS_urma_io_jfs_err_timeout > 31 ||
-        FLAGS_urma_io_tx_batch_max <= 0 ||
-        FLAGS_urma_io_tx_batch_max > static_cast<int>(URMA_TX_BATCH_MAX) ||
-        FLAGS_urma_io_sq_depth > 65535 || FLAGS_urma_io_rx_depth > 65535) {
+    if (!context || !io_jfs.empty() || !io_jfr.empty()) {
+        LOG(ERROR) << "Cannot initialize URMA pool: context=" << context
+                   << " existing_jfs=" << io_jfs.size()
+                   << " existing_jfr=" << io_jfr.size();
         errno = EINVAL;
+        return -1;
+    }
+    if (!ValidatePooledQueueConfiguration() ||
+        !CheckQueueRange("urma_io_jfs_err_timeout", FLAGS_urma_io_jfs_err_timeout, 0, 31)) {
         return -1;
     }
     _events = events;

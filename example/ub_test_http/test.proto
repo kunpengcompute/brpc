@@ -1,0 +1,42 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
+syntax="proto2";
+option cc_generic_services = true;
+
+package test;
+
+message PerfTestRequest {
+      required bool echo_attachment = 1;
+      required bytes name = 2;
+      // 建连探针标记: 客户端在建连首包 RPC 上置位。服务端据此保证"长尾注入永远不作用于
+      // 建连首包"(也不占用到达序号), 使建连质量与人工注入的长尾互不干扰。
+      optional bool is_probe = 3;
+};
+
+message PerfTestResponse {
+      required string cpu_usage = 1;
+      required bytes name = 2;
+      // 长尾标记: 仅服务端按 srv_tail_permille 命中时置位 (未命中不 set, 不上线)。
+      // 客户端据此把长尾请求从主时延统计中剥离, 单独统计。
+      // 必须保持 optional 且只能追加新号: 旧二进制收到该字段会当未知字段丢弃。
+      optional bool is_tail = 3;
+};
+
+service PerfTestService {
+      rpc Test(PerfTestRequest) returns (PerfTestResponse);
+};

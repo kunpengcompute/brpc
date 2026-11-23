@@ -61,6 +61,7 @@ extern void  (*blockmem_deallocate)(void*);
 
 namespace brpc {
 namespace urma {
+DECLARE_string(urma_resource_mode);
 
 DEFINE_bool(urma_use_polling, false,
             "Use busy polling to poll JFC, instead of event mode");
@@ -102,7 +103,7 @@ DEFINE_int32(urma_buffer_size, 8 * 1024,
 DEFINE_int32(urma_large_block_size, 64 * 1024, "Registered large IOBuf block size (pooled READ)");
 DEFINE_int32(urma_large_block_threshold, 20 * 1024,
              "Uncompressed PB bodies strictly larger than this byte threshold use large registered IOBuf blocks");
-DEFINE_int32(urma_large_buffer_count, 2048, "Large registered blocks; 0 disables READ capability");
+DEFINE_int32(urma_large_buffer_count, 4096, "Large registered blocks; 0 disables READ capability");
 DEFINE_int32(urma_read_items_per_control, 32, "READ descriptors per control, valid range 1-99");
 static bool ValidateReadItemsPerControl(const char*, int32_t value) {
     return value >= 1 && value <= 99;
@@ -110,7 +111,7 @@ static bool ValidateReadItemsPerControl(const char*, int32_t value) {
 DEFINE_validator(urma_read_items_per_control, &ValidateReadItemsPerControl);
 DEFINE_int32(urma_ctp_buf_count, 10240, "Registered 4 KiB CTP blocks (pooled mode)");
 DEFINE_int32(urma_header_buf_count, 65536, "Registered 64 B headers (pooled mode)");
-DEFINE_int32(urma_memory_pool_limit_mb, 512, "Registered pool limit in MiB (pooled mode)");
+DEFINE_int32(urma_memory_pool_limit_mb, 400, "Registered pool limit in MiB (pooled mode)");
 DEFINE_int32(urma_buffer_count, 65536,
              "Number of buffers in the URMA buffer pool.");
 
@@ -499,14 +500,23 @@ static bool GlobalUrmaInitializeImpl() {
         g_urma_available.store(true, butil::memory_order_release);
         return true;
     }
-    if (FLAGS_urma_sq_size < 16 || FLAGS_urma_sq_size > 4096 ||
-        FLAGS_urma_rq_size < 16 || FLAGS_urma_rq_size > 4096 ||
-        FLAGS_urma_buffer_size < 1024 || FLAGS_urma_buffer_count <= 0 ||
-        FLAGS_urma_poller_num <= 0) {
-        LOG(ERROR) << "Invalid URMA queue, buffer, or poller configuration";
+    auto invalid = [](const char* name, int64_t value,
+                      const std::string& expected) {
+        LOG(ERROR) << "Invalid " << name << "=" << value
+                   << "; expected " << expected;
         errno = EINVAL;
         return false;
-    }
+    };
+    if (FLAGS_urma_sq_size < 16 || FLAGS_urma_sq_size > 4096)
+        return invalid("urma_sq_size", FLAGS_urma_sq_size, "[16, 4096]");
+    if (FLAGS_urma_rq_size < 16 || FLAGS_urma_rq_size > 4096)
+        return invalid("urma_rq_size", FLAGS_urma_rq_size, "[16, 4096]");
+    if (FLAGS_urma_buffer_size < 1024)
+        return invalid("urma_buffer_size", FLAGS_urma_buffer_size, ">= 1024");
+    if (FLAGS_urma_buffer_count <= 0)
+        return invalid("urma_buffer_count", FLAGS_urma_buffer_count, "> 0");
+    if (FLAGS_urma_poller_num <= 0)
+        return invalid("urma_poller_num", FLAGS_urma_poller_num, "> 0");
 
     const bool pooled = (GetUrmaConnectionMode() == UrmaConnectionMode::POOLED);
     gflags::CommandLineFlagInfo count_info;
@@ -514,32 +524,60 @@ static bool GlobalUrmaInitializeImpl() {
         gflags::GetCommandLineFlagInfo("urma_buffer_count", &count_info) &&
         count_info.is_default ? 5120 : FLAGS_urma_buffer_count;
     if (pooled) {
-    const int64_t rx_slots = int64_t(FLAGS_urma_io_jfr_cnt) * FLAGS_urma_io_rx_depth;
-    const int64_t tx_slots = int64_t(FLAGS_urma_io_jfs_cnt) * FLAGS_urma_io_sq_depth;
-    const int64_t pool_bytes = int64_t(FLAGS_urma_buffer_size) * pool_count +
-                              int64_t(64) * FLAGS_urma_header_buf_count +
-                              int64_t(URMA_CTP_BLOCK_SIZE) * FLAGS_urma_ctp_buf_count +
-                              int64_t(FLAGS_urma_large_block_size) * FLAGS_urma_large_buffer_count;
-    if (FLAGS_urma_io_jfs_cnt <= 0 || FLAGS_urma_io_jfr_cnt <= 0 ||
-        FLAGS_urma_io_sq_depth <= 0 || FLAGS_urma_io_rx_depth <= 0 ||
-        FLAGS_urma_io_sq_depth > 65535 || FLAGS_urma_io_rx_depth > 65535 ||
-        FLAGS_urma_buffer_size <= static_cast<int>(URMA_CTP_BLOCK_SIZE) ||
-        FLAGS_urma_buffer_size % 64 != 0 ||
-        FLAGS_urma_large_buffer_count < 0 ||
-        (FLAGS_urma_large_buffer_count > 0 &&
-         (FLAGS_urma_large_block_size <= FLAGS_urma_buffer_size ||
-          FLAGS_urma_large_block_size % 64 != 0)) || FLAGS_urma_large_block_threshold < 0 ||
-        FLAGS_urma_read_items_per_control < 1 || FLAGS_urma_read_items_per_control > 99 ||
-        pool_count <= 0 || FLAGS_urma_ctp_buf_count <= rx_slots ||
-        FLAGS_urma_header_buf_count < rx_slots + tx_slots ||
-        FLAGS_urma_memory_pool_limit_mb <= 0 ||
-        pool_bytes > int64_t(FLAGS_urma_memory_pool_limit_mb) * 1024 * 1024) {
-        LOG(ERROR) << "Invalid URMA queue, buffer, or poller configuration";
-        errno = EINVAL;
-        return false;
-    }
+        if (!ValidatePooledQueueConfiguration()) return false;
+        if (FLAGS_urma_buffer_size <= static_cast<int>(URMA_CTP_BLOCK_SIZE) ||
+            FLAGS_urma_buffer_size % 64 != 0) {
+            return invalid("urma_buffer_size", FLAGS_urma_buffer_size,
+                           "> " + std::to_string(URMA_CTP_BLOCK_SIZE) +
+                           " and a multiple of 64");
+        }
+        if (FLAGS_urma_large_buffer_count < 0)
+            return invalid("urma_large_buffer_count", FLAGS_urma_large_buffer_count, ">= 0");
+        if (FLAGS_urma_large_buffer_count > 0 &&
+            (FLAGS_urma_large_block_size <= FLAGS_urma_buffer_size ||
+             FLAGS_urma_large_block_size % 64 != 0)) {
+            return invalid("urma_large_block_size", FLAGS_urma_large_block_size,
+                           "> urma_buffer_size=" + std::to_string(FLAGS_urma_buffer_size) +
+                           " and a multiple of 64");
+        }
+        if (FLAGS_urma_large_block_threshold < 0)
+            return invalid("urma_large_block_threshold", FLAGS_urma_large_block_threshold, ">= 0");
+        if (FLAGS_urma_read_items_per_control < 1 || FLAGS_urma_read_items_per_control > 99)
+            return invalid("urma_read_items_per_control", FLAGS_urma_read_items_per_control, "[1, 99]");
+        if (FLAGS_urma_memory_pool_limit_mb <= 0)
+            return invalid("urma_memory_pool_limit_mb", FLAGS_urma_memory_pool_limit_mb, "> 0");
 
+        // Queue ranges are checked before computing slot and memory budgets.
+        const int64_t rx_slots = int64_t(FLAGS_urma_io_jfr_cnt) * FLAGS_urma_io_rx_depth;
+        const int64_t tx_slots = int64_t(FLAGS_urma_io_jfs_cnt) * FLAGS_urma_io_sq_depth;
+        if (FLAGS_urma_ctp_buf_count <= rx_slots) {
+            return invalid("urma_ctp_buf_count", FLAGS_urma_ctp_buf_count,
+                           "> urma_io_jfr_cnt * urma_io_rx_depth = " + std::to_string(rx_slots));
+        }
+        if (FLAGS_urma_header_buf_count < rx_slots + tx_slots) {
+            return invalid("urma_header_buf_count", FLAGS_urma_header_buf_count,
+                           ">= RX slots + TX slots = " + std::to_string(rx_slots + tx_slots));
+        }
+        // Each size/count flag is int32 and is validated above. The four
+        // nonnegative products fit uint64_t together, including extreme inputs.
+        const uint64_t data_bytes = uint64_t(FLAGS_urma_buffer_size) * pool_count;
+        const uint64_t header_bytes = uint64_t(64) * FLAGS_urma_header_buf_count;
+        const uint64_t ctp_bytes = uint64_t(URMA_CTP_BLOCK_SIZE) * FLAGS_urma_ctp_buf_count;
+        const uint64_t large_bytes = uint64_t(FLAGS_urma_large_block_size) * FLAGS_urma_large_buffer_count;
+        const uint64_t pool_bytes = data_bytes + header_bytes + ctp_bytes + large_bytes;
+        const uint64_t limit_bytes = uint64_t(FLAGS_urma_memory_pool_limit_mb) * 1024 * 1024;
+        if (pool_bytes > limit_bytes) {
+            LOG(ERROR) << "URMA registered pool budget exceeded: required_bytes=" << pool_bytes
+                       << " (data=" << data_bytes << ", header=" << header_bytes
+                       << ", ctp=" << ctp_bytes << ", large=" << large_bytes
+                       << "); urma_memory_pool_limit_mb=" << FLAGS_urma_memory_pool_limit_mb
+                       << " (limit_bytes=" << limit_bytes << ")";
+            errno = EINVAL;
+            return false;
+        }
         if (FLAGS_urma_use_polling || IsBondingDeviceName(FLAGS_urma_device.c_str())) {
+            LOG(ERROR) << "Unsupported pooled URMA configuration: urma_use_polling="
+                       << FLAGS_urma_use_polling << " urma_device=" << FLAGS_urma_device;
             errno = ENOTSUP;
             return false;
         }
@@ -744,7 +782,9 @@ void GlobalUrmaInitializeOrDie() {
                                              butil::memory_order_acq_rel)) {
         BAIDU_SCOPED_LOCK(g_init_mutex);
         if (!GlobalUrmaInitializeImpl()) {
-            LOG(WARNING) << "URMA initialization failed; falling back to TCP";
+            LOG(WARNING) << "URMA initialization failed; falling back to TCP"
+                         << " resource_mode=" << FLAGS_urma_resource_mode
+                         << " errno=" << errno << "; see preceding ERROR logs";
             GlobalRelease();
         }
         g_init_once.store(2, butil::memory_order_release);

@@ -136,19 +136,20 @@ Make 使用 `config_brpc.sh` 的 `--with-urma --without-urma-mock`，
 | --- | --- | --- |
 | `urma_device` | 空 | 指定设备；空值选择枚举到的首个设备 |
 | `urma_eid_index` | -1 | 启动时选择 EID；-1 使用 EID 列表第一项，非负值匹配设备返回的实际 `eid_index`；不存在或小于 -1 时初始化失败 |
-| `urma_io_jfs_cnt` | 48 | 进程共享发送队列数量 |
-| `urma_io_jfr_cnt` | 8 | 进程共享接收队列数量 |
-| `urma_io_sq_depth` | 128 | 每个发送队列的在途槽位数 |
+| `urma_io_jfs_cnt` | 48 | 进程共享发送队列数量，范围1–64 |
+| `urma_io_jfr_cnt` | 8 | 进程共享接收队列数量，范围1–64 |
+| `urma_io_sq_depth` | 128 | 每个发送队列的在途槽位数，范围16–1024 |
 | `urma_io_jfs_err_timeout` | 17 | 池化 JFS 错误超时指数（0–31）。调低可更快检测 ACK 超时，调高可容忍更长的 ACK 延迟。 |
-| `urma_io_rx_depth` | 256 | 每个接收队列的预投递深度 |
+| `urma_io_rx_depth` | 256 | 每个接收队列的预投递深度，范围16–1024 |
 | `urma_jfs_affinity` | true | 按 SocketId 哈希选择固定首选 JFS |
 | `urma_io_tx_batch_max` | 8 | 每批准备与链式提交的 WR 上限，范围1至32 |
 | `urma_io_jfs_lock_free` | false | 设置 UMDK JFS 单执行者属性 |
 | `urma_io_jfr_lock_free` | false | 设置 UMDK JFR 单执行者属性 |
 | `urma_io_jfc_lock_free` | false | 设置 UMDK JFC 单执行者属性 |
 | `urma_buffer_size` | 8192 | 数据池块大小，包含 IOBuf 块头 |
-| `urma_buffer_count` | 池化5120；独占65536 | 未显式设置时按模式选择；显式值覆盖池化默认 |
-| `urma_ctp_buf_count` | 10240 | 4KiB CTP 块数量；必须大于接收预投递总数 |
+| `urma_buffer_count` | 池化5120；独占65536 | 必须大于0；未显式设置时按模式选择，显式值覆盖池化默认；池化模式下按块大小×块数计入总预算，与其他池合计不得超过 `urma_memory_pool_limit_mb` |
+| `urma_ctp_buf_count` | 10240 | 4KiB CTP 块数量；必须大于 `urma_io_jfr_cnt × urma_io_rx_depth`；按4096B×块数计入总预算，与其他池合计不得超过 `urma_memory_pool_limit_mb` |
+| `urma_header_buf_count` | 65536 | 64B header 块数量；至少为 `urma_io_jfr_cnt × urma_io_rx_depth + urma_io_jfs_cnt × urma_io_sq_depth`；按64B×块数计入总预算，与其他池合计不得超过 `urma_memory_pool_limit_mb` |
 | `urma_max_sge` | 0 | 0采用设备能力；正值限制发送 SGE 数 |
 | `urma_cqe_poll_once` | 32 | 每次 poll 最多取出的 CQE 数 |
 | `urma_rx_batch_parse` | true | 同一 poll 中按连接合并解析调用 |
@@ -158,6 +159,20 @@ Make 使用 `config_brpc.sh` 的 `--with-urma --without-urma-mock`，
 CTP 块，header 数量需要覆盖接收和发送在途槽位；初始化会校验组合是否
 可用。硬件能力同样约束队列深度、SGE 数和消息大小。
 
+池化队列数量上限64、深度上限1024是单项范围，不保证所有参数同时取上限
+时仍可使用默认内存池。命令行越界值由validator拒绝；范围内的配置还需通过
+CTP/header容量及总注册内存预算检查。默认JFS/JFR数量仍为48/8，SQ/RQ深度
+仍为128/256；本次只收紧上限，不改变默认队列配置，也不改变独占模式的队列深度范围。
+
+- 实际JFS/JFR数量为48/8、SQ/RQ深度都配置1024时，CTP预投递8192块，
+  默认10240块可满足初始化检查，剩余2048块供数据交付期间周转；header至少
+  57344块，默认65536块足够。注册池仍合计340MiB，低于400MiB默认上限。
+  这只说明配置容量合法，不保证任意流量下接收块都不会耗尽。
+- JFS/JFR数量都取64、SQ/RQ深度都取1024时，CTP至少需要65537块，header
+  至少需要131072块。补足这两类池、其余池保持默认后，注册池总容量约560MiB，
+  超过400MiB默认上限；需要减少队列/深度或其他池容量，或者显式提高总预算，
+  并确认运行环境具备相应内存和设备注册资源。
+
 ## 池化大包 READ
 
 | 参数 | 默认值 | 含义 |
@@ -165,9 +180,43 @@ CTP 块，header 数量需要覆盖接收和发送在途槽位；初始化会校
 | `urma_large_transfer` | send | send/read/auto；auto在协商成功且消息超过单次SEND载荷上限时采用READ |
 | `urma_large_block_size` | 65536 | 注册大IOBuf块大小，包含IOBuf块头 |
 | `urma_large_block_threshold` | 4096 | 无压缩protobuf body超过该字节数时直接序列化到大块 |
-| `urma_large_buffer_count` | 2048 | 大块池数量；0禁用READ能力 |
+| `urma_large_buffer_count` | 4096 | 大块池数量，必须大于等于0；0禁用READ能力；按大块大小×块数计入总预算，与其他池合计不得超过 `urma_memory_pool_limit_mb` |
 | `urma_read_items_per_control` | 32 | 每个PULL控制消息携带的描述符上限，范围1至99 |
-| `urma_memory_pool_limit_mb` | 512 | 池化注册内存总上限，包含新增大块池 |
+| `urma_memory_pool_limit_mb` | 400 | 池化注册内存总上限，包含新增大块池 |
+
+上述四类块数没有独立的固定上限；在满足各自下限的同时，池化模式下的
+注册内存总容量必须满足以下约束。所有大小以字节计，`urma_buffer_count`
+使用初始化时按模式确定的实际值。
+
+```text
+urma_buffer_size × urma_buffer_count
+  + 4096 × urma_ctp_buf_count
+  + 64 × urma_header_buf_count
+  + urma_large_block_size × urma_large_buffer_count
+  <= urma_memory_pool_limit_mb × 1024 × 1024
+```
+
+该限制是四类池的合计上限，不是每个池各自可使用的额度；任一块数的可用
+上限取决于其块大小以及其他池已配置的容量。超过预算时初始化失败，不自动缩容。
+
+### 大块池默认容量升级说明
+
+`urma_large_buffer_count` 的默认值由2048增加到4096。按默认64KiB块大小，
+大块注册池由128MiB增加到256MiB；加上普通8KiB池40MiB、CTP池40MiB和
+header池4MiB，每进程默认注册池合计由212MiB增加到340MiB。
+`urma_memory_pool_limit_mb=400` 是配置校验上限，不会直接预分配400MiB，
+也不会让超预算配置自动缩容。
+
+升级时应核对自定义内存上限、block大小，以及设备/provider的注册资源限制。
+例如，将block改成128KiB而保留4096块时，总注册池为596MiB，会超过默认上限。
+需要维持原默认容量的部署，可以显式设置 `--urma_large_buffer_count=2048`；
+该参数应在客户端和服务端分别配置。通过总预算检查也不保证mmap或设备注册成功。
+
+预算不足会输出所需总字节数、各池字节数和配置上限；内存池创建失败会输出
+池类型、块大小、块数，以及mmap或urma_register_seg失败阶段和errno。
+全局URMA初始化失败仍保留现有TCP回退行为，不保证业务进程退出；应检查ERROR日志
+及随后带资源模式和errno的回退WARNING，并核对实际连接的URMA状态。
+这与命令行范围validator拒绝非法参数并退出是不同路径。
 
 两端指定 `--urma_resource_mode=pooled --urma_large_transfer=read` 即可启用。PULL通过双边SEND发布源地址，接收方READ完成后提交FREE，随后通过现有有序字节流回调交付。FREE确认前源IOBuf一直保留，不能按控制SEND的TX CQE释放。每个源片段使用独立seq，多个IOBuf可共享一个控制消息。
 
