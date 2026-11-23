@@ -85,6 +85,7 @@ std::atomic<uint32_t> next_jetty_id{1};
 // Deterministic teardown fault injection, exported only by the link-time mock.
 std::atomic<int> fail_jetty_delete{0};
 std::atomic<bool> fail_jetty_import{false};
+std::atomic<bool> fail_jfs_create{false};
 std::atomic<bool> pause_jetty_delete{false};
 std::atomic<bool> jetty_delete_entered{false};
 std::atomic<int> fail_send_after{-1};
@@ -842,9 +843,17 @@ static urma_status_t PostSend(urma_jfc_t* local_jfc, urma_jfs_wr_t* wr,
     return URMA_SUCCESS;
 }
 
+void brpc_urma_mock_fail_next_jfs_create() {
+    fail_jfs_create.store(true);
+}
+
 urma_jfs_t* urma_create_jfs(urma_context_t* ctx, urma_jfs_cfg_t* cfg) {
     std::unique_lock<std::shared_mutex> lock(g_rw_mutex);
     if (!ctx || !cfg || !context_map.count(ctx) || !jfc_state_map.count(cfg->jfc)) {
+        return nullptr;
+    }
+    if (fail_jfs_create.exchange(false)) {
+        errno = ENOMEM;
         return nullptr;
     }
     auto* jfs = new urma_jfs_t{};

@@ -34,6 +34,8 @@ DEFINE_bool(urma_jfs_affinity, true, "Prefer a stable shared JFS for each connec
 DEFINE_int32(urma_io_jfs_cnt, 48, "Number of process-wide IO JFS slots");
 DEFINE_int32(urma_io_jfr_cnt, 8, "Number of process-wide shared IO JFR slots");
 DEFINE_int32(urma_io_sq_depth, 128, "Depth of each pooled IO send queue");
+DEFINE_int32(urma_io_jfs_err_timeout, URMA_TYPICAL_ERR_TIMEOUT,
+             "Error timeout exponent for shared send queues (0-31, provider-specific timing)");
 DEFINE_int32(urma_io_rx_depth, 256, "Depth of each shared IO receive queue");
 DEFINE_int32(urma_io_tx_batch_max, 8,
              "Maximum linked WRs in one pooled JFS post (valid range: 1-32)");
@@ -167,6 +169,7 @@ int UrmaPooledResource::Initialize(urma_context_t* context,
     if (!context || !io_jfs.empty() || !io_jfr.empty() ||
         FLAGS_urma_io_jfs_cnt <= 0 || FLAGS_urma_io_jfr_cnt <= 0 ||
         FLAGS_urma_io_sq_depth <= 0 || FLAGS_urma_io_rx_depth <= 0 ||
+        FLAGS_urma_io_jfs_err_timeout < 0 || FLAGS_urma_io_jfs_err_timeout > 31 ||
         FLAGS_urma_io_tx_batch_max <= 0 ||
         FLAGS_urma_io_tx_batch_max > static_cast<int>(URMA_TX_BATCH_MAX) ||
         FLAGS_urma_io_sq_depth > 65535 || FLAGS_urma_io_rx_depth > 65535) {
@@ -210,9 +213,10 @@ int UrmaPooledResource::Initialize(urma_context_t* context,
         cfg.priority = GetUrmaJettyPriority();
         cfg.max_sge = GetUrmaMaxSge();
         cfg.rnr_retry = URMA_TYPICAL_RNR_RETRY;
-        cfg.err_timeout = URMA_TYPICAL_ERR_TIMEOUT;
+        cfg.err_timeout = static_cast<uint8_t>(FLAGS_urma_io_jfs_err_timeout);
         cfg.jfc = slot->jfc;
         slot->jfs = urma_create_jfs(context, &cfg);
+        if (slot->jfs) { slot->max_sge = slot->jfs->jfs_cfg.max_sge; }
         if (!slot->jfs || urma_rearm_jfc(slot->jfc, false) != URMA_SUCCESS ||
             (_events.attach && _events.attach(slot) != 0)) { return -1; }
     }
@@ -389,6 +393,27 @@ void FailTxContext(UrmaJfsSlot* slot, TxCompletionCtx* ctx, int error, const cha
         slot->callbacks.on_error(ctx->self_socket_id, owner_connection, error);
     }
 }
+// The drain owner is the only poster. Once all submitted WRs have completed,
+// their user contexts and the old JFS can no longer be used by the device.
+bool ReplaceDrainedJfs(UrmaJfsSlot* slot) {
+    BAIDU_SCOPED_LOCK(slot->writers_mutex);
+    auto* context = slot->jfs->urma_ctx;
+    auto cfg = slot->jfs->jfs_cfg;
+    const uint32_t old_id = slot->jfs->jfs_id.id;
+    if (urma_delete_jfs(slot->jfs) != URMA_SUCCESS) {
+        LOG(ERROR) << "Failed to retire URMA JFS " << old_id;
+        return false;
+    }
+    slot->jfs = urma_create_jfs(context, &cfg);
+    if (!slot->jfs || slot->jfs->jfs_cfg.max_sge < slot->max_sge) {
+        LOG(ERROR) << "Failed to replace URMA JFS " << old_id;
+        return false;
+    }
+    LOG(INFO) << "Replaced timed-out URMA JFS " << old_id
+              << " with " << slot->jfs->jfs_id.id << " in slot " << slot->index;
+    return true;
+}
+
 void RemoveQueueFront(UrmaJfsSlot* slot) {
     TxBatch* node = slot->pending_head;
     node->items[node->begin++] = nullptr;
@@ -414,6 +439,15 @@ void UrmaPooledResource::CancelQueued(UrmaJfsSlot* slot) {
 void UrmaPooledResource::DrainSendQueue(UrmaJfsSlot* slot) {
     for (;;) {
         if (slot->stopped.load()) { CancelQueued(slot); return; }
+        if (slot->replace_on_drain.load(std::memory_order_acquire)) {
+            if (slot->sq_device_inflight.load(std::memory_order_acquire) != 0) { return; }
+            if (!ReplaceDrainedJfs(slot)) {
+                slot->stopped.store(true);
+                CancelQueued(slot);
+                return;
+            }
+            slot->replace_on_drain.store(false, std::memory_order_release);
+        }
         if (!slot->pending_head) { CollectIncoming(slot); }
         if (!slot->pending_head) { return; }
         auto* first = slot->pending_head->items[slot->pending_head->begin];
@@ -525,6 +559,9 @@ void UrmaPooledResource::KickDrain(UrmaJfsSlot* slot) {
 
 void UrmaPooledResource::CompleteSend(UrmaJfsSlot* slot, const urma_cr_t& cr, void* dispatch_context) {
     auto* ctx = reinterpret_cast<TxCompletionCtx*>(cr.user_ctx);
+    if (cr.status == URMA_CR_ACK_TIMEOUT_ERR) {
+        slot->replace_on_drain.store(true, std::memory_order_release);
+    }
     slot->submitted[ctx->registry_index].store(nullptr, std::memory_order_release);
     slot->sq_device_inflight.fetch_sub(1, std::memory_order_acq_rel);
     slot->sq_inflight.fetch_sub(1);

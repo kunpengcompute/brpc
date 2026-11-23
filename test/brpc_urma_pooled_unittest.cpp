@@ -22,6 +22,7 @@
 #include <atomic>
 #include <set>
 #include <thread>
+#include <dlfcn.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #include <gtest/gtest.h>
@@ -875,6 +876,7 @@ protected:
     }
     std::shared_ptr<urma::UrmaPooledProviderState> _state;
     void CheckBlockingCallback();
+    void CheckJfsRecovery(void (*fail_next_create)());
     std::unique_ptr<RecordingPool> _pool;
     urma::UrmaPooledResource* _original{nullptr};
     std::vector<SocketUniquePtr> _sockets;
@@ -948,6 +950,90 @@ TEST_F(UrmaPooledTest, cq_callback_shutdown_does_not_reenter_slot_lock) {
     provider._state.reset();
     callback_shutdown_provider = nullptr;
     DrainTx();
+}
+
+void UrmaPooledTest::CheckJfsRecovery(void (*fail_next_create)()) {
+    auto* first = Endpoint();
+    auto* receiver = Endpoint();
+    auto* next = Endpoint();
+    auto* other = Endpoint();
+    ASSERT_TRUE(first && receiver && next && other);
+    Connect(first, receiver);
+    Connect(next, other);
+    Connection(first)->_preferred_jfs = Connection(next)->_preferred_jfs = 0;
+    auto* slot = _pool->io_jfs[0];
+    const uint32_t old_id = slot->jfs->jfs_id.id;
+    butil::IOBuf data;
+    data.append(std::string(5000, 'a'));
+    butil::IOBuf* input[] = {&data};
+    ASSERT_EQ(5000, first->CutFromIOBufList(input, 1));
+    urma_cr_t completions[2];
+    ASSERT_EQ(2, urma_poll_jfc(slot->jfc, 2, completions));
+    completions[0].status = URMA_CR_ACK_TIMEOUT_ERR;
+    _pool->CompleteSend(slot, completions[0]);
+    ASSERT_EQ(old_id, slot->jfs->jfs_id.id);
+    data.append("b");
+    ASSERT_EQ(1, next->CutFromIOBufList(input, 1));
+    EXPECT_EQ(1u, slot->sq_device_inflight.load());
+    if (fail_next_create) {
+        fail_next_create();
+    }
+    _pool->CompleteSend(slot, completions[1]);
+    if (fail_next_create) {
+        EXPECT_EQ(nullptr, slot->jfs);
+        ASSERT_TRUE(slot->stopped.load());
+        EXPECT_TRUE(next->_socket->Failed());
+        EXPECT_EQ(EIO, next->_socket->non_zero_error_code());
+        _pool->KickDrain(slot);
+        EXPECT_EQ(nullptr, slot->jfs);
+        EXPECT_FALSE(_pool->io_jfs[1]->stopped.load());
+    } else {
+        ASSERT_NE(nullptr, slot->jfs);
+        EXPECT_NE(old_id, slot->jfs->jfs_id.id);
+    }
+    DrainTx();
+    DrainRx();
+    EXPECT_EQ(fail_next_create ? "" : "b", other->_input_processor.read_buf().to_string());
+    EXPECT_EQ(0u, slot->sq_inflight.load());
+}
+
+TEST_F(UrmaPooledTest, replaces_ack_timed_out_send_queue_after_last_completion) {
+    CheckJfsRecovery(nullptr);
+}
+
+TEST_F(UrmaPooledTest, fails_queued_connection_when_jfs_recreation_fails) {
+    auto fail_next_create = reinterpret_cast<void (*)()>(
+        dlsym(RTLD_DEFAULT, "brpc_urma_mock_fail_next_jfs_create"));
+    ASSERT_NE(nullptr, fail_next_create);
+    CheckJfsRecovery(fail_next_create);
+}
+
+TEST_F(UrmaPooledTest, shared_send_queues_use_the_configured_error_timeout) {
+    const auto info = gflags::GetCommandLineFlagInfoOrDie("urma_io_jfs_err_timeout");
+    EXPECT_EQ(std::to_string(URMA_TYPICAL_ERR_TIMEOUT), info.default_value);
+    for (const auto* slot : _pool->io_jfs) {
+        EXPECT_EQ(info.current_value, std::to_string(slot->jfs->jfs_cfg.err_timeout));
+    }
+    gflags::FlagSaver flags;
+    ASSERT_FALSE(gflags::SetCommandLineOption("urma_io_jfs_err_timeout", "7").empty());
+    urma::UrmaPooledResource pool;
+    ASSERT_EQ(0, pool.Initialize(urma::GetUrmaContext(), {}));
+    for (const auto* slot : pool.io_jfs) {
+        EXPECT_EQ(7, slot->jfs->jfs_cfg.err_timeout);
+    }
+    EXPECT_TRUE(pool.Shutdown());
+}
+
+TEST_F(UrmaPooledTest, rejects_out_of_range_shared_send_error_timeouts) {
+    gflags::FlagSaver flags;
+    for (const char* value : {"-1", "32"}) {
+        ASSERT_FALSE(gflags::SetCommandLineOption("urma_io_jfs_err_timeout", value).empty());
+        urma::UrmaPooledResource pool;
+        EXPECT_EQ(-1, pool.Initialize(urma::GetUrmaContext(), {}));
+        EXPECT_EQ(EINVAL, errno);
+        EXPECT_TRUE(pool.io_jfs.empty());
+        EXPECT_TRUE(pool.io_jfr.empty());
+    }
 }
 
 TEST_F(UrmaPooledTest, ctp_buffers_are_independent_and_never_fall_back_to_heap) {
@@ -1201,6 +1287,7 @@ TEST_F(UrmaPooledTest, pooled_send_reorder_and_wrap_preserve_stream) {
     ASSERT_NE(nullptr, sender);
     ASSERT_NE(nullptr, receiver);
     Connect(sender, receiver);
+    Connection(sender)->_preferred_jfs = 0;
     Connection(sender)->_next_send_seq = 65534;
     Connection(receiver)->_deliver_base = 65534;
     butil::IOBuf data;

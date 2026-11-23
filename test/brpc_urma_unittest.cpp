@@ -29,6 +29,7 @@
 
 #if BRPC_WITH_URMA
 #include "butil/atomicops.h"
+#include "butil/fd_guard.h"
 #include "butil/sys_byteorder.h"
 #include "urma_api.h"
 #include "brpc/urma/urma_handshake.h"
@@ -1095,6 +1096,31 @@ TEST_F(UrmaConnectionTest, validates_description_before_import) {
     bd.segment.length = 2;
     EXPECT_EQ(-1, a->ImportPeer(bd));
     EXPECT_EQ(EPROTO, errno);
+}
+
+TEST_F(UrmaConnectionTest, tcp_fallback_notifies_the_existing_socket_reader) {
+    int fds[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, fds));
+    butil::fd_guard peer(fds[1]);
+    SocketOptions options;
+    options.fd = fds[0];
+    options.socket_mode = SOCKET_MODE_URMA;
+    options.need_on_edge_trigger = true;
+    SocketId id;
+    ASSERT_EQ(0, Socket::Create(options, &id));
+    SocketUniquePtr socket;
+    ASSERT_EQ(0, Socket::Address(id, &socket));
+    auto* transport = static_cast<UrmaTransport*>(socket->_transport.get());
+
+    // Hold the event on an empty socket. The handshake must queue a recheck
+    // for this owner, even when there are no bytes ready to read.
+    int progress = Socket::PROGRESS_INIT;
+    socket->_nevent.store(progress);
+    transport->GetUrmaEp()->FallbackToTcp(transport, true);
+    EXPECT_EQ(Socket::PROGRESS_INIT + 1, socket->_nevent.load());
+    EXPECT_TRUE(socket->MoreReadEvents(&progress));
+    EXPECT_FALSE(socket->MoreReadEvents(&progress));
+    socket->SetFailed();
 }
 
 TEST_F(UrmaConnectionTest, endpoint_caches_early_rx_and_ignores_old_connection_callbacks) {

@@ -79,6 +79,8 @@ header、SGE、数据和导入资源，直到提交及 CQE 引用均释放。暂
 的后缀保留在队列中，由完成事件继续推进；若容量已在 post 返回前归还，
 直接重试后缀。共享 SQ 的等待者登记在首选 JFS，按容量通知，退出时全部唤醒。
 
+发送完成返回 ACK 超时时，发送执行者暂停向该 JFS 提交新 WR。全部已提交 WR 收到完成通知后，执行者在原槽位和 JFC 上重建 JFS，再继续提交其他连接排队的 WR。已提交的 WR 不会重发。若重建失败，该槽位停止服务，排队连接会收到错误。
+
 ## 接收、重排与交付
 
 每个 JFR 预投递多个接收上下文。接收完成后检查 header 和数据长度，
@@ -137,6 +139,7 @@ Make 使用 `config_brpc.sh` 的 `--with-urma --without-urma-mock`，
 | `urma_io_jfs_cnt` | 48 | 进程共享发送队列数量 |
 | `urma_io_jfr_cnt` | 8 | 进程共享接收队列数量 |
 | `urma_io_sq_depth` | 128 | 每个发送队列的在途槽位数 |
+| `urma_io_jfs_err_timeout` | 17 | 池化 JFS 错误超时指数（0–31）。调低可更快检测 ACK 超时，调高可容忍更长的 ACK 延迟。 |
 | `urma_io_rx_depth` | 256 | 每个接收队列的预投递深度 |
 | `urma_jfs_affinity` | true | 按 SocketId 哈希选择固定首选 JFS |
 | `urma_io_tx_batch_max` | 8 | 每批准备与链式提交的 WR 上限，范围1至32 |

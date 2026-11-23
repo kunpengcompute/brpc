@@ -259,10 +259,13 @@ struct UrmaJfsSlot : public UrmaIoSlot {
     std::atomic<unsigned> drain_state{0};
     std::unique_ptr<std::atomic<TxCompletionCtx*>[]> submitted;
     uint32_t next_registry{0};
-    // Only waiter registration/cancellation uses this mutex, never post/poll.
+    // Protects waiter registration and quiescent JFS replacement. Ordinary
+    // posting and completion processing do not take it.
     butil::Mutex writers_mutex;
     UrmaWriteWaiter* writers{nullptr};
     std::atomic<bool> has_writers{false};
+    uint32_t max_sge{0}; // Immutable after initialization, also used by producers.
+    std::atomic<bool> replace_on_drain{false};
     // Inspection at quiescent points (tests/debug), never used by CQ routing.
     std::vector<TxCompletionCtx*> SubmittedContexts() const {
         std::vector<TxCompletionCtx*> result;
