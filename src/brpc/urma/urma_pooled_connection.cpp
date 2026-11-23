@@ -381,7 +381,7 @@ ssize_t UrmaPooledConnection::CutFromIOBufList(butil::IOBuf** from, size_t ndata
 
             ctx->header_buf = static_cast<UrmaMsgHeader*>(AllocHeaderBuffer());
             if (!ctx->header_buf) { prepare_error = ENOMEM; break; }
-            const uint32_t max_sge = slot->jfs->jfs_cfg.max_sge;
+            const uint32_t max_sge = slot->max_sge;
             if (max_sge < 2) { prepare_error = EINVAL; break; }
             sge->push_back(urma_sge_t{});
             sge[0].addr = reinterpret_cast<uint64_t>(ctx->header_buf);

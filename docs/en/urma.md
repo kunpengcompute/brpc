@@ -113,7 +113,7 @@ the 4-byte magic handshake. No application code change is required.
 UrmaTransport follows the same two-layer design as `RdmaTransport` and
 `UBShmTransport`:
 
-```
+```text
 UrmaTransport : public Transport         (urma_transport.{h,cpp})
   +-- std::shared_ptr<TcpTransport>      (fallback path)
   +-- urma::UrmaEndpoint*                (URMA data path)
@@ -157,6 +157,12 @@ RDMA `block_pool` design). User-registered memory is supported via
 
 ## Configuration
 
+In pooled mode, an ACK timeout pauses new submissions to the affected JFS.
+After every outstanding WR completes, the send owner replaces the JFS on the
+same slot and completion queue, then submits pending work from healthy
+connections. Already submitted WRs are never replayed. If replacement fails,
+the slot stops and its pending work receives an error.
+
 All flags use the `urma_` prefix (mirroring RDMA's `rdma_` prefix):
 
 | Flag | Default | Purpose |
@@ -165,6 +171,7 @@ All flags use the `urma_` prefix (mirroring RDMA's `rdma_` prefix):
 | `--urma_poller_num` | 1 | Poller bthreads per bthread tag (polling mode) |
 | `--urma_disable_bthread` | false | Run message processing inline |
 | `--urma_sq_size` | 128 | Local JFS depth [16, 4096] |
+| `--urma_io_jfs_err_timeout` | 17 | Pooled JFS error timeout exponent (0–31). Lower it to detect ACK timeouts sooner, or raise it to tolerate longer ACK delays. |
 | `--urma_rq_size` | 128 | Local JFR depth [16, 4096] |
 | `--urma_cqe_poll_once` | 32 | Max CQEs per `urma_poll_jfc` |
 | `--urma_recv_zerocopy` | true | Zero-copy receives above `--urma_zerocopy_min_size` |

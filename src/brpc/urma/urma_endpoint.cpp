@@ -531,16 +531,10 @@ void UrmaEndpoint::OnNewDataFromTcp(Socket* m) {
 }
 
 inline void UrmaEndpoint::TryReadOnTcp() {
-    if ((GetUrmaConnectionMode() == UrmaConnectionMode::POOLED)) {
-        // Recheck an EOF consumed as a handshake notification through the
-        // Socket event owner, never start a concurrent TCP reader.
-        Socket::OnInputEvent(reinterpret_cast<void*>(_socket->id()), 0,
-                             BTHREAD_ATTR_NORMAL);
-        return;
-    }
-    if (_state.load(butil::memory_order_acquire) == FALLBACK_TCP) {
-        InputMessenger::OnNewMessages(_socket);
-    }
+    // Hand the stream back to its socket event owner. A readable event can
+    // already be parsing the first TCP frame after FALLBACK_TCP is published.
+    Socket::OnInputEvent(reinterpret_cast<void*>(_socket->id()), 0,
+                         BTHREAD_ATTR_NORMAL);
 }
 
 static void TryReadOnTcpDuringUrmaEst(Socket* socket) {
