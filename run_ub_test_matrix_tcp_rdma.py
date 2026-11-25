@@ -15,8 +15,8 @@ import re
 
 SERVER_HOST = '141.61.17.202'
 CLIENT_HOST = '141.61.17.204'
-USER = 'd00836578'
-PASS = 'dwh123456'
+USER = os.environ.get('UB_TEST_USER', '')
+PASS = os.environ.get('UB_TEST_PASS', '')
 PORT = 10928  # different from URMA script (10918) to avoid collision
 
 SERVER_BIN = '/home/d00836578/brpc_workspace/brpc_urma/brpc/bazel-bin/example/ub_test_server'
