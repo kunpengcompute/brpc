@@ -96,7 +96,7 @@ the 4-byte magic handshake. No application code change is required.
 UrmaTransport follows the same two-layer design as `RdmaTransport` and
 `UBShmTransport`:
 
-```
+```text
 UrmaTransport : public Transport         (urma_transport.{h,cpp})
   +-- std::shared_ptr<TcpTransport>      (fallback path)
   +-- urma::UrmaEndpoint*                (URMA data path)

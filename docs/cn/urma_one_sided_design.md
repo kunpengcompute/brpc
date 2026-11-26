@@ -65,7 +65,7 @@ brpc 当前 URMA 实现 100% 基于双边 SEND/RECV 操作（`urma_endpoint.cpp:
 
 **数据路径**（仅双边）：
 
-```
+```text
 发送: CutFromIOBufList → urma_post_jetty_send_wr(URMA_OPC_SEND)
       预扣 _remote_rq_window_size + _sq_window_size
       SEND 完成 → 回收 SQ 窗口 → WakeAsEpollOut
@@ -123,7 +123,7 @@ ubs-comm 的 ubsocket-over-URMA 方案完全基于单边操作，不使用 SEND/
 
 **立即数编码**（64-bit imm_data）：
 
-```
+```text
   ubsocket view:
     [0:3]   opcode (4 bit)         — IOOpcode
     [4:19]  buffer_offset (16 bit) — ring buffer 偏移，128B 粒度
@@ -132,7 +132,7 @@ ubs-comm 的 ubsocket-over-URMA 方案完全基于单边操作，不使用 SEND/
 
 ### 3.2 小 IO 流程（WRITE_IN_BAND，1 RTT）
 
-```
+```text
 发送方                                    接收方
 ─────                                    ─────
 1. allocate send_buf (ring buffer)
@@ -151,7 +151,7 @@ ubs-comm 的 ubsocket-over-URMA 方案完全基于单边操作，不使用 SEND/
 
 ### 3.3 大 IO 流程（PRE_WRITE + READ，2 RTT，零拷贝）
 
-```
+```text
 发送方                                    接收方
 ─────                                    ─────
 1. allocate send_buf (控制消息)
@@ -201,7 +201,7 @@ ubs-comm 的 ubsocket-over-URMA 方案完全基于单边操作，不使用 SEND/
 采用**共存方案**：在现有双边 SEND/RECV 路径基础上，新增单边 WRITE/READ 路径，
 通过 gflag 控制切换。
 
-```
+```text
                     ┌─────────────────────────┐
                     │   CutFromIOBufList      │
                     │   (发送入口)             │
@@ -1179,7 +1179,7 @@ int UrmaEndpoint::PostEmptyRecvWr(uint32_t count) {
 
 ### 11.1 内存段关系
 
-```
+```text
                   发送方                                  接收方
                   ──────                                  ──────
 
@@ -1269,31 +1269,31 @@ CQ 上混合到达。
 
 ### 第二阶段：小 IO 路径（WRITE_IN_BAND）
 
-5. **WriteInline 实现**：send_buf 分配 → 数据拷贝 → WRITE_IMM 提交
-6. **HandleWriteInBand 实现**：从 recv_buf 读取数据 → 写入 read_buf →
+1. **WriteInline 实现**：send_buf 分配 → 数据拷贝 → WRITE_IMM 提交
+2. **HandleWriteInBand 实现**：从 recv_buf 读取数据 → 写入 read_buf →
    发送 WRITE_IN_BAND_ACK
-7. **HandleWriteInBandAck 实现**：释放 send_buf → 唤醒发送路径
-8. **测试**：小 IO echo 验证端到端正确性
+3. **HandleWriteInBandAck 实现**：释放 send_buf → 唤醒发送路径
+4. **测试**：小 IO echo 验证端到端正确性
 
 ### 第三阶段：大 IO 路径（PRE_WRITE + READ）
 
-9. **WriteZeroCopy 实现**：收集 block 地址 → 构建控制消息 → IncRef blocks →
+1. **WriteZeroCopy 实现**：收集 block 地址 → 构建控制消息 → IncRef blocks →
    WRITE_IMM(PRE_WRITE)
-10. **HandlePreWrite 实现**：解析控制消息 → 导入远端段 → 分配本地 block →
+2. **HandlePreWrite 实现**：解析控制消息 → 导入远端段 → 分配本地 block →
     构建 READ WR 链 → 提交
-11. **HandleReadCompletion 实现**：组装数据到 read_buf → 发送 POST_WRITE
-12. **HandlePostWrite 实现**：释放 send_buf → DecRef blocks → 唤醒发送路径
-13. **测试**：大 IO echo 验证零拷贝正确性
+3. **HandleReadCompletion 实现**：组装数据到 read_buf → 发送 POST_WRITE
+4. **HandlePostWrite 实现**：释放 send_buf → DecRef blocks → 唤醒发送路径
+5. **测试**：大 IO echo 验证零拷贝正确性
 
 ### 第四阶段：优化和完善
 
-14. **send_buf ring buffer 优化**：实现 bitmap 标记回收，避免伪回收
-15. **接收槽管理优化**：seq 索引 ring，处理乱序和溢出
-16. **bvar 监控**：新增 `urma_write_latency`、`urma_read_latency`、
-    `urma_send_buf_usage` 等 bvar
-17. **TRACEPRINTF 打点**：在单边路径关键节点插入注解
-18. **性能测试**：与双边模式对比延迟和吞吐
-19. **gflag 默认值调优**：`urma_inline_threshold`、`urma_send_buf_size`
+1. **send_buf ring buffer 优化**：实现 bitmap 标记回收，避免伪回收
+2. **接收槽管理优化**：seq 索引 ring，处理乱序和溢出
+3. **bvar 监控**：新增 `urma_write_latency`、`urma_read_latency`、
+   `urma_send_buf_usage` 等 bvar
+4. **TRACEPRINTF 打点**：在单边路径关键节点插入注解
+5. **性能测试**：与双边模式对比延迟和吞吐
+6. **gflag 默认值调优**：`urma_inline_threshold`、`urma_send_buf_size`
 
 ---
 

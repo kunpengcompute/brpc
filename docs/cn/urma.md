@@ -91,7 +91,7 @@ server.Start(port, &sopt);
 
 UrmaTransport 沿用与 `RdmaTransport` / `UBShmTransport` 一致的两层设计：
 
-```
+```text
 UrmaTransport : public Transport         (urma_transport.{h,cpp})
   +-- std::shared_ptr<TcpTransport>      (回退路径)
   +-- urma::UrmaEndpoint*                (URMA 数据路径)

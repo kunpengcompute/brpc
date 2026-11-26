@@ -22,7 +22,7 @@
 
 ### 1.1 整体架构
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────────┐
 │                        User Application                             │
 │              Channel::CallMethod / Server::Start                    │
@@ -55,7 +55,7 @@
 
 ### 1.2 核心类关系
 
-```
+```text
 brpc::Channel
   └─ _options.socket_mode = SOCKET_MODE_URMA
       └─ TransportFactory::CreateTransport() → new UrmaTransport()
@@ -111,7 +111,7 @@ brpc::urma::UrmaRingBuf
 
 ### 2.1 握手时序图
 
-```
+```text
 Client                                          Server
   │                                               │
   │── TCP connect ──────────────────────────────►│
@@ -143,6 +143,7 @@ Client                                          Server
 ```
 
 **dual-jetty 协商要点**（`urma_endpoint.cpp:398-401, 1059-1065`）：
+
 - 仅当 `FLAGS_urma_dual_jetty=true` 且本地 `jetty_read` 创建成功时，才在握手消息中置 `has_read_jetty=true` 并携带 `read_jetty_id`
 - 对端 `ImportPeer` 时若 `has_read_jetty=true` 才 `urma_import_jetty(remote_jetty_read)`，否则 READ 回退到 write jetty
 - `jetty_read` 与 `jetty` 共享同一 JFC/JFR，仅 JFS 深度不同（`read_jetty_sq_size` 默认 1024）
@@ -173,6 +174,7 @@ if (negotiated_mode != 0 && remote.has_one_sided &&
 | 2 + zerocopy_read | HYBRID+RNDV | WriteInline (小包) / WriteZeroCopy (大包, PRE_WRITE+READ) | 大包零拷贝拉模式 |
 
 **关键 flag 联动**：
+
 - `--urma_inline_threshold`（默认 **16384**）：io_mode=2 小包/大包分割阈值
 - `--urma_use_zerocopy_read`（默认 **false**）：true 时 io_mode=2 大包改走 WriteZeroCopy
 - `--urma_dual_jetty`（默认 **false**）：true 时创建 READ 专用 jetty，消除 READ+WRITE_IMM 并发 status=8
@@ -185,7 +187,7 @@ if (negotiated_mode != 0 && remote.has_one_sided &&
 
 ### 3.1 brpc → URMA 调用链
 
-```
+```text
 Channel::CallMethod(channel.cpp:474)
   └─ cntl->IssueRPC(channel.cpp:659)
        └─ Socket::Write(socket.cpp)  // 获取或创建 Socket
@@ -209,6 +211,7 @@ Channel::CallMethod(channel.cpp:474)
 **关键保证**：brpc Socket 的 `_write_head.exchange(req)` 原子操作保证同一 Socket 任意时刻只有一个 KeepWrite bthread 执行写入（`socket.cpp:1704`），因此 UrmaEndpoint 发送路径无需加锁。
 
 **[Stage4] dual-jetty 无锁 post**：`_zerocopy_post_mutex` 原为 bonding 设备 READ+WRITE_IMM 并发导致的 status=8 而加。dual-jetty 激活（`jetty_read && remote_jetty_read` 均非空）时，READ 在 `jetty_read`、WRITE_IMM 在 `jetty`，物理隔离消除并发冲突，所有 `urma_post_jetty_send_wr` 调用点跳过该锁：
+
 ```cpp
 // 5 处调用点统一模式（WriteInline / WriteZeroCopy / chunked KeepWrite / ResponseCtrlMessage / SendImm）
 const bool need_lock =
@@ -219,16 +222,18 @@ if (need_lock) lock.lock();
 urma_post_jetty_send_wr(_resource->jetty, &wr, &bad);
 // PostReadBatch 额外用 use_read_jetty 选择 jetty_read（无锁）或 jetty（加锁）
 ```
+
 KeepWrite 主路径（`CutFromIOBufList_Send` 的 SEND WR）单写者模型，本身无锁。
 
 ### 3.2 io_mode=0：双边 SEND/RECV
 
-```
+```text
 CutFromIOBufList_Send(urma_endpoint.cpp:1049)
 ```
 
 **数据流**：
-```
+
+```text
 IOBuf data_list[] ──► cut_into_sglist() ──► _sbuf[_sq_current] (IOBuf 备份)
                                     │
                                     └──► urma_sge_t sglist[] (SGE 列表)
@@ -241,24 +246,27 @@ IOBuf data_list[] ──► cut_into_sglist() ──► _sbuf[_sq_current] (IOBu
 ```
 
 **流控**：
+
 - 发送前检查 `_remote_rq_window_size > 0 && _sq_window_size > 0`
 - post 前 `fetch_sub(1)` 预扣双窗口
 - 对端通过 `SEND_WITH_IMM` (URMA_OPC_SEND_IMM)返还 RQ credit（imm_data = repost 数量）
 - TX completion 时恢复 `_sq_window_size`
 
 **特点**：
+
 - 数据零拷贝：IOBuf block 地址直接作为 SGE，无 memcpy
 - 需要 `_sbuf[_sq_current]` 保存 IOBuf 引用（直到 TX completion）
 - 每次发送消耗对端 1 个 RQ slot
 
 ### 3.3 io_mode=1/2 小包：WriteInline (WRITE_IN_BAND)
 
-```
+```text
 WriteInline(urma_endpoint.cpp:1420 附近)
 ```
 
 **数据流**：
-```
+
+```text
 IOBuf data_list[]
     │
     ├──► 计算总大小 total
@@ -288,6 +296,7 @@ IOBuf data_list[]
 ```
 
 **与 io_mode=0 的关键差异**：
+
 - 数据 **memcpy 到 send_buf**（io_mode=0 零拷贝 SGE）
 - 写入对端 recv_buf 的相同 offset（双方 buffer 布局对称）
 - 需要分配/释放 send_buf slot（UrmaRingBuf）
@@ -296,12 +305,13 @@ IOBuf data_list[]
 
 ### 3.4 io_mode=2 大包：WriteInlineChunked
 
-```
+```text
 WriteInlineChunked(urma_endpoint.cpp:1700 附近)
 ```
 
 **数据流**：
-```
+
+```text
 IOBuf from[0] (如 8MB)
     │
     ├──► 首次调用时初始化:
@@ -329,13 +339,14 @@ IOBuf from[0] (如 8MB)
 ```
 
 **跨 KeepWrite 重入**：
+
 - `_chunked_total_chunks != 0` 表示上一条消息的 chunk 尚未发完
 - 下次 KeepWrite 调用时从 `_chunked_chunk_idx` 继续
 - `_chunked_request_id` 保持不变，确保所有 chunk 用同一 request_id
 
 ### 3.5 WriteZeroCopy (PRE_WRITE + RDMA READ) — [zerocopy_read] 激活路径
 
-```
+```text
 WriteZeroCopy(urma_endpoint.cpp:1620 附近)
 ```
 
@@ -343,7 +354,8 @@ WriteZeroCopy(urma_endpoint.cpp:1620 附近)
 > **dual-jetty 联动**：zerocopy_read 通常配合 `--urma_dual_jetty=true` 使用，READ WR 走 `jetty_read`，与 WRITE_IMM 物理隔离。
 
 **数据流**：
-```
+
+```text
 IOBuf data_list[] (8MB)
     │
     ├──► 枚举所有 IOBuf backing_block
@@ -392,7 +404,7 @@ IOBuf data_list[] (8MB)
 
 ### 4.1 PollCq 线程模型与资源生命周期
 
-```
+```text
 ┌──────────────────────────────────────────────────────────────┐
 │  Event mode (FLAGS_urma_use_polling=false, 默认)              │
 │                                                                │
@@ -426,7 +438,8 @@ IOBuf data_list[] (8MB)
 **[segfault-fix] PollCq 与 DeallocateResources 竞态保护**：
 
 竞态场景（修复前 ~70% 退出 segfault）：
-```
+
+```text
 析构线程                              Poller bthread
 ====================================  =================
 DeallocateResources()
@@ -438,11 +451,12 @@ DeallocateResources()
 ```
 
 修复方案：`_resource_refcnt` 原子变量（`urma_endpoint.h:316`）+ `_shutdown_butex`（`urma_endpoint.h:318`）：
+
 - `0` = 空闲，无 PollCq 在内
 - `>0` = PollCq 持有计数
 - `INT32_MIN` = shutdown sentinel（DeallocateResources 设置）
 
-```
+```text
 PollCq 入口 (urma_endpoint.cpp:3125):
   prev = _resource_refcnt.fetch_add(1, acq_rel)
   if (prev < 0):  // shutdown 中
@@ -469,7 +483,7 @@ ReleaseResourceRef (urma_endpoint.cpp:777):
 
 ### 4.2 HandleCompletion 分发逻辑
 
-```
+```text
 HandleCompletion(cr)  [urma_endpoint.cpp:2240 附近]
   │
   ├── cr.s_r == 0 (TX completion, 发送完成)
@@ -502,7 +516,7 @@ HandleCompletion(cr)  [urma_endpoint.cpp:2240 附近]
 
 ### 4.3 接收时序图 — io_mode=0 (双边 SEND/RECV)
 
-```
+```text
 Sender                                    Receiver (PollCq)
   │                                          │
   │── URMA_OPC_SEND ──────────────────────►│
@@ -528,7 +542,7 @@ Sender                                    Receiver (PollCq)
 
 #### 4.4.1 小包（单 chunk）
 
-```
+```text
 Sender                                    Receiver (PollCq)
   │                                          │
   │  1. UrmaRingBuf::Allocate()              │
@@ -570,7 +584,7 @@ Sender                                    Receiver (PollCq)
 
 #### 4.4.2 大包（多 chunk）
 
-```
+```text
 Sender                                    Receiver (PollCq)
   │                                          │
   │  chunk 0: WRITE_IMM ──────────────────►│
@@ -605,7 +619,7 @@ Sender                                    Receiver (PollCq)
 
 ### 4.5 接收时序图 — WriteZeroCopy (PRE_WRITE + READ)
 
-```
+```text
 Sender                                    Receiver (PollCq)
   │                                          │
   │  1. 枚举 IOBuf blocks                    │
@@ -659,7 +673,7 @@ Sender                                    Receiver (PollCq)
 
 ### 5.1 内存布局
 
-```
+```text
 _one_sided_buf (mmap, MAP_PRIVATE | MAP_ANONYMOUS)
 ┌──────────────────────────────────────────────────────────┐
 │                    recv_buf                              │  send_buf
@@ -684,7 +698,7 @@ MR 注册: urma_register_seg(_one_sided_buf, total, R/W, NON_CACHEABLE)
 
 ### 5.2 UrmaRingBuf 分配器
 
-```
+```text
 ┌─────────────────────────────────────────────┐
 │  UrmaRingBuf (bitmap first-fit, 1KB 粒度)    │
 │  [Stage2] 新增 _alloc_cursor 游标            │
@@ -711,7 +725,7 @@ MR 注册: urma_register_seg(_one_sided_buf, total, R/W, NON_CACHEABLE)
 
 ### 5.3 PendingSendSlot 无锁数组
 
-```
+```text
 ┌───────────────────────────────────────────────────────┐
 │  _pending_sends[4096]  (PendingSendSlot)               │
 │  [Stage2] _insert_hint 游标辅助插入                     │
@@ -747,16 +761,18 @@ MR 注册: urma_register_seg(_one_sided_buf, total, R/W, NON_CACHEABLE)
 ### 5.3.1 RetryPendingReads 空 guard
 
 [Stage2] 新增 `_pending_retry_count` 原子计数（`urma_endpoint.h:447`）。`RetryPendingReads` 入口检查（`urma_endpoint.cpp:2634`）：
+
 ```cpp
 if (_pending_retry_count.load(butil::memory_order_relaxed) == 0) {
     return;  // 无 pending slot, 跳过 128-slot 扫描
 }
 ```
+
 收益：1M 消息 255-batch READ 完成时，避免 255×128=32K 次空扫描，修复 +13us 回归。
 
 ### 5.4 UrmaSendContext 对象池
 
-```
+```text
 butil::get_object<UrmaSendContext>()   // TLS free list, 24-67ns
     │
     ▼
@@ -778,7 +794,7 @@ butil::get_object<UrmaSendContext>()   // TLS free list, 24-67ns
 
 ### 5.5 SQ/RQ 窗口管理
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────┐
 │  SQ (Send Queue) 窗口 — write jetty                          │
 │                                                               │
@@ -820,7 +836,7 @@ butil::get_object<UrmaSendContext>()   // TLS free list, 24-67ns
 
 ### 5.6 IOBuf 内存池
 
-```
+```text
 GlobalUrmaInitializeImpl (urma_helper.cpp:549)
   └─ g_pool = new BufferPool()
   └─ butil::iobuf::blockmem_allocate = PoolAllocate
@@ -834,7 +850,7 @@ GlobalUrmaInitializeImpl (urma_helper.cpp:549)
 
 #### 5.7.1 两套独立的 MR 体系
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────────┐
 │                      全局 BufferPool MR (g_pool_seg)                 │
 │                                                                      │
@@ -876,7 +892,7 @@ GlobalUrmaInitializeImpl (urma_helper.cpp:549)
 
 #### 5.7.2 max_sge / max_sge_len / max_jfr_sge 配置链路
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────────┐
 │  max_sge (Send Queue 最大 SGE 数)                                   │
 │                                                                      │
@@ -924,7 +940,7 @@ GlobalUrmaInitializeImpl (urma_helper.cpp:549)
 
 #### 5.7.3 IOBuf Block → SGE 映射 (io_mode=0 SEND 路径)
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────────┐
 │                    IOBuf Block 结构与 BufferPool 关系                 │
 │                                                                      │
@@ -986,7 +1002,7 @@ GlobalUrmaInitializeImpl (urma_helper.cpp:549)
 
 #### 5.7.4 send_buf SGE 映射 (io_mode=1/2 WRITE 路径)
 
-```
+```text
                     io_mode=1/2 发送时 SGE 构造
 
   IOBuf (from[])
@@ -1018,9 +1034,9 @@ GlobalUrmaInitializeImpl (urma_helper.cpp:549)
     wr.rw.notify_data = imm.data
 ```
 
-#### 5.7.5 _sbuf / _rbuf 与 IOBuf block 的关系
+#### 5.7.5 `_sbuf` / `_rbuf` 与 IOBuf block 的关系
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────────┐
 │  _sbuf: 发送侧 IOBuf 引用池 (io_mode=0 专用)                        │
 │                                                                      │
@@ -1069,7 +1085,7 @@ GlobalUrmaInitializeImpl (urma_helper.cpp:549)
 
 #### 5.7.6 URMA 消息内存数据流 UML 图
 
-```
+```text
                           ┌─────────────────┐
                           │  BufferPool     │
                           │  (全局单例)      │
@@ -1169,7 +1185,7 @@ GlobalUrmaInitializeImpl (urma_helper.cpp:549)
 
 #### 5.7.7 完整内存流转路径对比
 
-```
+```text
 io_mode=0 (SEND 零拷贝路径):
   BufferPool → IOBuf::Block → IOBuf → cut_into_sglist → urma_sge_t
        │                                              (addr=block.data)
@@ -1239,7 +1255,7 @@ io_mode=1/2 接收路径:
 
 所有 URMA 设备（bonding 和物理 UDMA）有三项关键限制，直接驱动了整个分片体系的设计：
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────────┐
 │  限制 1: max_sge = 1 (所有 URMA 设备)                               │
 │    来源: urma_query_device → dev_cap.max_jfs_sge                    │
@@ -1269,7 +1285,7 @@ io_mode=1/2 接收路径:
 
 ### 6.2 io_mode=0 SEND 路径分片
 
-```
+```text
 CutFromIOBufList_Send (urma_endpoint.cpp:1049)
   双层循环结构:
 
@@ -1296,7 +1312,7 @@ CutFromIOBufList_Send (urma_endpoint.cpp:1049)
 
 **8KB 消息分片示例**：
 
-```
+```text
 消息: 8192 字节, IOBuf 含 1 个 8KB block (来自 BufferPool)
 
 max_sge = 1 (bonding cap)
@@ -1314,7 +1330,7 @@ WR #2: SGE = {addr=block+4096, len=4096, tseg=g_pool_seg}
 
 **8MB 消息分片示例**：
 
-```
+```text
 8MB / 4096 = 2048 个 WR
 SQ 有效窗口 = 125
 → 需要 ceil(2048/125) = 17 轮 KeepWrite
@@ -1325,7 +1341,7 @@ SQ 有效窗口 = 125
 
 #### 6.3.1 小包 (≤ `urma_inline_threshold`, 默认 16384B) — WriteInline
 
-```
+```text
 WriteInline (urma_endpoint.cpp:1420 附近)
 
 小包不分片:
@@ -1338,7 +1354,7 @@ WriteInline (urma_endpoint.cpp:1420 附近)
 
 #### 6.3.2 大包 (> `urma_inline_threshold`) — WriteInlineChunked
 
-```
+```text
 WriteInlineChunked (urma_endpoint.cpp:1700 附近)
 
 chunk 大小计算:
@@ -1377,7 +1393,7 @@ chunk 大小计算:
 
 **8MB 消息分片示例**：
 
-```
+```text
 8MB = 8388608B
 chunk_payload = 127KB = 130048B
 total_chunks = ceil(8388608 / 130048) = 65 个 chunk
@@ -1404,7 +1420,7 @@ SQ 窗口 = 125, 65 < 125
 
 ### 6.4 send_buf 容量与分片的关系
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────────┐
 │  send_buf 布局 (UrmaRingBuf bitmap first-fit, 1KB 粒度)             │
 │                                                                      │
@@ -1437,7 +1453,7 @@ ch0 ch1 ... ch63 → send_buf 接近满 (64/64 slot)
 
 ### 6.5 SQ 窗口与 RQ credit 的分片约束
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────────┐
 │  SQ 窗口 (所有 io_mode 共享, write jetty)                            │
 │                                                                      │
@@ -1469,7 +1485,7 @@ ch0 ch1 ... ch63 → send_buf 接近满 (64/64 slot)
 
 ### 6.6 WriteZeroCopy (PRE_WRITE+READ) 的分片
 
-```
+```text
 WriteZeroCopy (urma_endpoint.cpp:1620 附近)
 激活条件: FLAGS_urma_use_zerocopy_read=true (默认 false)
 
@@ -1507,7 +1523,7 @@ WriteZeroCopy (urma_endpoint.cpp:1620 附近)
 
 ### 6.7 分片设计总结矩阵
 
-```
+```text
 ┌──────────────┬──────────────────┬──────────────────┬──────────────────┐
 │   维度       │ io_mode=0 SEND   │ io_mode=1/2      │ WriteZeroCopy    │
 │              │                  │ WriteInline/     │ (PRE_WRITE+READ) │
@@ -1646,7 +1662,7 @@ struct UrmaRxSlot {
 
 ### 8.5 opcode 枚举
 
-```
+```text
 URMA_IO_WRITE_IN_BAND  = 小包/大包 chunk 数据传输
 URMA_IO_PRE_WRITE      = ZeroCopy 控制消息（block 描述符）
 URMA_IO_WRITE_IN_BAND_ACK = 数据接收确认
@@ -1657,7 +1673,7 @@ URMA_IO_POST_WRITE     = READ 完成，通知发送端释放 block 引用
 
 ## 九、完整端到端时序图（io_mode=2 小包 1KB）
 
-```
+```text
 Client                                          Server
   │                                               │
   │  Channel::CallMethod()                        │
@@ -1795,6 +1811,7 @@ io_mode=0 是本项目独有的传统 RDMA 双边操作路径，用于兼容性�
 | **8MB** | **22590us** | **404.0** | 0% | 8MB/4KB = **2048 WR**，SQ=128 需 16 轮，**严重瓶颈** |
 
 **io_mode=0 核心差距**：
+
 - **优势**：零拷贝（发送 + 接收均无 memcpy），小包延迟最低（19us vs io_mode=2 的 20us）
 - **劣势**：大包 SQ 窗口耗尽（8MB 需 2048 WR，SQ=128），导致 QPS 下降（404 vs io_mode=2 的 499）
 - **根因**：SEND 路径 `GetUrmaSendMaxSgeLen()` 硬编码 4096 强制按 4KB 分片，8KB block 也需切成 2 个 SGE，且**不可通过 `FLAGS_urma_max_sge_len` 配置**
@@ -1845,6 +1862,7 @@ UBS v2 超过 2000B 走 `WriteZeroCopy`，而 io_mode=1 **所有大小**都走 `
 | **8MB** | **ERROR** | — | — | **send_buf 2MB 无法分配 8MB 连续空间** |
 
 **io_mode=1 核心差距**：
+
 - **小包（≤204KB）正常**：路径与 UBS v2 WriteInline 基本一致
 - **大包（≥1MB）故障**：
   - 8MB：send_buf 2MB < 8MB，`UrmaRingBuf::Allocate` 失败
@@ -1881,6 +1899,7 @@ UBS v2 超过 2000B 走 `WriteZeroCopy`，而 io_mode=1 **所有大小**都走 `
 | **实测延迟** | ~0.8us (c_post) | ~1.7us (c_post, 早期) / Stage4 端到端 18us (1KB) | **Stage4 差距缩小** |
 
 **Stage4 后小包差距分析**（1KB: 18us vs UBS v2 16.33us = +1.67us）：
+
 - ~0.1~0.2us：UrmaRingBuf bitmap first-fit 搜索（Stage2 `_alloc_cursor` 游标已缓解，8MB→8192 unit）
 - ~0.1us：`_pending_sends` slot 数组扫描（Stage2 `_insert_hint` 游标已缓解）
 - ~0.2us：`UrmaSendContext` 对象池 get/return（UBS v2 无此结构）
@@ -1900,6 +1919,7 @@ UBS v2 超过 2000B 走 `WriteZeroCopy`，而 io_mode=1 **所有大小**都走 `
 | **实测延迟 (qps=500)** | 3153us | **3241us** | **+88us（+2.8%）** |
 
 **Stage4 后差距缩小的原因**：
+
 - mega-chunk 2MB：8MB 仅 4 chunk（原 65 chunk），WR 数从 132 降到 8
 - send_buf 8MB：4 chunk 全部并发，无需多轮等待 ACK
 - SQ 1024：4 WR 占用 < 1% 窗口
@@ -1929,6 +1949,7 @@ UBS v2 超过 2000B 走 `WriteZeroCopy`，而 io_mode=1 **所有大小**都走 `
 | **8MB** | **3900us** | **3241us** | 0% | 8MB / 2MB = 4 chunk (mega-chunk) |
 
 **io_mode=2 核心进展**（Stage4 vs 早期 42 矩阵）：
+
 - **8MB qps=500**：14513us → 3241us（**-78%**），mega-chunk + 8MB send_buf + SQ=1024 联合收益
 - **1MB**：761us → 358us（qps=1000），chunk=2MB 后 1MB 单 chunk 发送
 - **100KB**：76us → 54us（-29%），inline_threshold=16384 覆盖 100KB 走 WriteInline 单包
@@ -1939,7 +1960,7 @@ UBS v2 超过 2000B 走 `WriteZeroCopy`，而 io_mode=1 **所有大小**都走 `
 
 **Stage3: 非 bonding CQE 合并** — 缩小 8M +88us gap
 
-```
+```text
 当前: 所有 READ WR complete_enable=1 → N CQE (8MB = 128 CQE)
 优化后: 非 bonding 只对最后 WR 设 complete_enable=1 → 1 CQE
 ```
@@ -1954,6 +1975,7 @@ UBS v2 超过 2000B 走 `WriteZeroCopy`，而 io_mode=1 **所有大小**都走 `
 | bonding 设备 | 保持 N CQE | 不变（provider 要求） | 同本项目当前 |
 
 **WriteZeroCopy 已激活**（`FLAGS_urma_use_zerocopy_read=true`）：
+
 - dual-jetty 物理隔离 READ+WRITE_IMM，消除 status=8
 - Stage4 测试中 io_mode=2 大包仍主要走 WriteInlineChunked（流水线推送更优）
 - WriteZeroCopy 作为备选路径，在 ≥16MB 超大包时优势显现
@@ -2019,6 +2041,7 @@ UBS v2 超过 2000B 走 `WriteZeroCopy`，而 io_mode=1 **所有大小**都走 `
 
 **Stage3 计划**（`shiny-popping-marshmallow.md`，未实施）：
 非 bonding 设备 READ batch CQE 合并（N→1）。当前所有 READ WR 设 `complete_enable=1`（N CQE），UBS v2 非 bonding 只对最后 WR 设 1（1 CQE）。需配套改动 4 处：
+
 1. PostReadBatch `complete_enable` 只对最后 WR 设 1（非 bonding）
 2. HandleCompletion TX 路径批量回收 `slot.sq_slots_used` 个 SQ slot（非 bonding）
 3. HandleReadCompletion 一次性累加整个 batch（非 bonding）
@@ -2055,6 +2078,7 @@ Stage4 矩阵测试结果（dual-jetty + zerocopy_read, inline_threshold=16384, 
 | **8MB** | **3900us** | **3241us** | **3153.33us** | **+87.67us** | 0% |
 
 **关键结论**：
+
 - **io_mode=2 Stage4 是主推模式**：全尺寸 0% error，0% segfault
 - **8KB 已反超 UBS v2**：24us vs 28.67us（-4.67us），inline_threshold=16384 覆盖 8KB 走单包 WriteInline
 - **1MB 基本对齐**：366us vs 356.67us（+0.33us），mega-chunk 2MB 后 1MB 单 chunk

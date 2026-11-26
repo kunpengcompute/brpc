@@ -26,7 +26,7 @@
 下图标注了一次 URMA RPC 从客户端发起到服务端处理的完整数据流，以及每个阶段的
 源码位置和打点状态。
 
-```
+```text
  客户端                                                                     服务端
  ═══════                                                                    ═════
 
@@ -415,6 +415,7 @@ LD_PRELOAD=/path/to/libubsocket.so UBSOCKET_DEV_NAME="udmac0d1e2" \
 ```
 
 自动完成：
+
 1. 编译 `urma_ldpreload_wrap.c` → `/tmp/liburma_trace_wrap.so`
 2. 设置 `UBSOCKET_SPLIT_TRACE_*` 和 `UBSOCKET_PROF_*` 环境变量
 3. 将 wrap .so 注入 `LD_PRELOAD`（在 `libubsocket.so` 之前）
@@ -660,7 +661,7 @@ sudo ./full_urma_trace.sh $(pidof server) 60
 
 ### 发送路径
 
-```
+```text
 Socket::Write(IOBuf)                                  [socket.cpp:1624]
   → StartWrite                                         [socket.cpp:1704]
     → _transport->CutFromIOBuf(&req->data)             [socket.cpp:1764]
@@ -676,7 +677,7 @@ Socket::Write(IOBuf)                                  [socket.cpp:1624]
 
 ### 接收路径
 
-```
+```text
 epoll(JFCE fd) 或 polling bthread
   → UrmaEndpoint::PollCq                                [urma_endpoint.cpp:1187]
     · event mode: urma_wait_jfc                         [urma_endpoint.cpp:1678]
@@ -697,7 +698,7 @@ epoll(JFCE fd) 或 polling bthread
 
 ### 握手路径（TCP fd 上跑）
 
-```
+```text
 客户端: UrmaConnect::StartConnect                        [urma_endpoint.cpp:1589]
   → bthread: ProcessHandshakeAtClient                   [urma_endpoint.cpp:1436]
     · AllocateResources (create_jfce/jfc/jfr/jetty + CQ socket)
@@ -769,7 +770,7 @@ epoll(JFCE fd) 或 polling bthread
 
 **send 汇总行（T3，每次 `CutFromIOBufList` 返回时输出）：**
 
-```
+```text
 [URMA-TRACE] send: wrs=125 bytes=505951 eagain=1 post_time=383us total=393us remote_rq_wnd=0
 ```
 
@@ -784,7 +785,7 @@ epoll(JFCE fd) 或 polling bthread
 
 **recv 汇总行（T10，每次 `DispatchReceivedBytes` 时输出）：**
 
-```
+```text
 [URMA-TRACE] recv: rx_wrs=2058 bytes=8388672 tx_completions=32 polls=452 postrecv=2058 sendack=2058 recv_time=49034us
 ```
 
@@ -828,28 +829,32 @@ grep '\[URMA-TRACE\]' /tmp/client_trace.log
 关键发现：
 
 **接收侧（server 收 8MB request）：**
-```
+
+```text
 recv: rx_wrs=2058 bytes=8388672 tx_completions=32 polls=452 postrecv=2058 sendack=2058 recv_time=49034us
 ```
+
 - 8MB 数据被拆成 2058 个 WR（每 WR 4096B，受 `max_sge_len=4096` 限制）
 - 452 次 poll 才排空所有 CQE，说明硬件中断→poll 的粒度远小于 WR 粒度
 - `recv_time=49ms`：接收侧本身耗时约 49ms
 
 **发送侧（server 发 8MB response）：**
-```
+
+```text
 send: wrs=125 bytes=505951 eagain=1 post_time=383us total=393us remote_rq_wnd=0
 send: wrs=63  bytes=257056 eagain=1 post_time=26us  total=30us  remote_rq_wnd=0
 send: wrs=189 bytes=772096 eagain=1 post_time=150us total=162us remote_rq_wnd=0
 send: wrs=441 bytes=1799264 eagain=1 post_time=160us total=216us remote_rq_wnd=0
 ...（共 ~10 次 CutFromIOBufList 调用）
 ```
+
 - 8MB response 不是一次 post 完成，而是被拆成 ~10 次 `CutFromIOBufList`
 - **每次都命中 `eagain=1` 且 `remote_rq_wnd=0`** — 对端接收窗口耗尽
 - 发送端必须等待接收端 `PostRecv` + `SendAck` 回补信用后才能继续
 
 **瓶颈定位结论：**
 
-```
+```text
 8MB 单请求延迟 ~48ms 拆解：
 
   接收侧 poll 粒度     ~49ms（2058 WRs / 452 polls）
@@ -862,6 +867,7 @@ send: wrs=441 bytes=1799264 eagain=1 post_time=160us total=216us remote_rq_wnd=0
 ```
 
 **优化方向：**
+
 1. 增大 `--urma_sq_size` / `--urma_rq_size`（如 4096），减少窗口等待轮次
 2. 增大 `max_sge_len`（需硬件/驱动支持），减少 WR 数量
 3. 批量 `SendAck`（当前每 WR 一条 ACK），减少信用回补往返延迟

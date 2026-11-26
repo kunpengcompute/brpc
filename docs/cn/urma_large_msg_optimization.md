@@ -36,6 +36,7 @@ READ)，小包(1K-200K)走 WriteInline/WriteInlineChunked 路径。
 **总体目标：全部 size(1K-8M) 延迟超越 UBS v2 方案。**
 
 当前进展：
+
 - ✅ 大包(1M/8M)已超越 UBS v2（O1+O2+O3 零拷贝+全量post+跳过mutex）
 - ✅ 200K qps=1000 持平 UBS v2
 - ⬜ 小包(1K-100K)仍有 1.10-1.52x 差距，需进一步优化（见第十四章）
@@ -114,7 +115,7 @@ SEND_BUF_KB=2048, RECV_BUF_KB=2048, urma_max_sge_len=65536。
 
 UBS v2 的 WriteZeroCopy 大包路径：
 
-```
+```text
 发送端:
   1. 将 IOBuf 数据切成 64KB 的 mini_block
   2. 每个 mini_block 注册为 RDMA Block，Block.data 是注册内存地址
@@ -131,8 +132,10 @@ UBS v2 的 WriteZeroCopy 大包路径：
 ```
 
 ### 3.3 五个核心差异
+
 UBS v2 8M 路径为什么这么快 —— 根因分析
 基于 brpc_ubsocket_urma调用流程与数据流分析.md 的源码解析,UBS v2 8M=3940us vs brpc 8M=14522us(差距 269%)的原因有 5 个核心差异:
+
 #### 差异 1:零拷贝发送 vs Chunked memcpy 链
 
 |  | UBS v2 | brpc |
@@ -143,6 +146,7 @@ UBS v2 8M 路径为什么这么快 —— 根因分析
 
 UBS v2 发送端:8MB 数据在 UB Block 内存池中,发送时只 post 一个小的控制消息(~2KB 描述符),接收端通过 RDMA READ 直接从发送端内存拉取。零 memcpy。
 brpc 发送端:8MB 数据在 IOBuf 中,需要逐 chunk 拷贝到 send_buf 再 WRITE_IMM 推送。4 个 chunk × 2MB = 4 次 memcpy。
+
 #### 差异 2:64KB 粗粒度 Block vs 2MB Chunk
 
 |  | UBS v2 | brpc |
@@ -154,6 +158,7 @@ brpc 发送端:8MB 数据在 IOBuf 中,需要逐 chunk 拷贝到 send_buf 再 WR
 UBS v2 的 128 个 READ WR 通过链式 wr.next 一次 urma_post_jetty_send_wr 提交,硬件流水线处理。brpc 的 4 个 WRITE_IMM 需要逐个 post(受 send_buf 容量限制,串行等待)。
 
 #### 差异 3:send_buf 容量不限制并发度
+
 |  | UBS v2 | brpc |
 |---- | ---- |-----|
 |send_buf 用途 |仅存描述符(~2KB),不存数据 | 存实际数据(8MB chunk 全部经过 send_buf)|
@@ -163,6 +168,7 @@ UBS v2 的 128 个 READ WR 通过链式 wr.next 一次 urma_post_jetty_send_wr �
 这是 brpc 8M QPS 仅 557(达不到 1000)的根因:send_buf=2MB,qd=10 × 8MB = 80MB,远超 send_buf 容量,push 模式被迫串行。
 
 #### 差异 4:接收端零拷贝交付 vs chunk 重组 memcpy
+
 |  | UBS v2 | brpc |
 |---- | ---- |-----|
 |READ 目标 buffer| 接收端分配的新 UB Block,Block.data 直接作为 dst_sge.addr | 接收端 IOBuf pool buffer|
@@ -170,6 +176,7 @@ UBS v2 的 128 个 READ WR 通过链式 wr.next 一次 urma_post_jetty_send_wr �
 |乱序处理| Block 链表天然乱序容忍(每个 Block 独立,最后链表合并) | 需要按 slot/block_idx 重组,有序约束带来额外开销|
 
 #### 差异 5:线程模型避免 SQ 并发冲突
+
 |  | UBS v2 | brpc |
 |---- | ---- |-----|
 | PostRead 线程| worker poll 线程内同步调用(NewRequest → 用户回调 → Recv → Get → PostRead)|PollCq 独立 bthread|
@@ -180,6 +187,7 @@ UBS v2 的 128 个 READ WR 通过链式 wr.next 一次 urma_post_jetty_send_wr �
 UBS v2 靠线程模型天然避免并发,单 jetty 即可。brpc 的 bthread 架构导致必须用 dual-jetty 物理隔离。
 
 #### 总结:brpc 8M 路径的 3 层瓶颈
+
 brpc 8M = 14522us 分解:
 ├── 4× chunk memcpy (2MB each)         ≈ 2000us  (差异 1)
 ├── send_buf 容量限流 (串行等待)        ≈ 6000us  (差异 3,也是 QPS<1000 的原因)
@@ -208,11 +216,17 @@ UBS v2 8M = 3940us:
 | 5 | **单线程模型**：PostRead 在 poll 线程同步，无并发冲突 | mutex 串行 post | ~500us |
 
 已充分理解代码。基于之前的分析,直接设计方案。当前 brpc ZeroCopy 路径有 3 个核心瓶颈需要消除:
+
 #### 瓶颈 1:接收端 DeliverReadySlots 中的 memcpy
-_socket->_read_buf.append(slot.read_targets[i].first, slot.read_targets[i].second) —— READ 数据落在临时 IOBuf pool buffer,然后 memcpy 到 _read_buf。UBS v2 是 Block 直接引用,零拷贝。
+
+_socket->_read_buf.append(slot.read_targets[i].first, slot.read_targets[i].second) —— READ 数据落在临时 IOBuf pool buffer,然后 memcpy 到 `_read_buf`。UBS v2 是 Block 直接引用,零拷贝。
+
 #### 瓶颈 2:READ 分批串行(URMA_READ_BATCH_MAX=64 + 逐批等待完成)
+
 当前 PostReadBatch 一次最多 64 个 READ WR,等这批全部完成才发下一批。8MB / max_sge_len(64KB) = 128 个 block,需要 2 批,中间有等待间隙。UBS v2 链式一次 post 全部 128 个 READ WR。
+
 #### 瓶颈 3:dual-jetty mutex 串行化 post
+
 即使 dual-jetty 隔离了 READ 和 WRITE_IMM 的 SQ,_zerocopy_post_mutex 仍然串行化所有 post。UBS v2 无锁。
 先确认 max_sge_len 对 READ 路径的影响和 IOBuf append_movable 的可用性。
 
@@ -304,6 +318,7 @@ for (size_t i = 0; i < slot.recv_bufs.size(); ++i) {
 默认值到 256，允许 128 个 READ WR 一次链式 post。
 
 **改动文件**：
+
 - `src/brpc/urma/urma_one_sided.h`：`URMA_READ_BATCH_MAX` 64 → 256
 - `src/brpc/urma/urma_helper.cpp`：`--urma_read_jetty_sq_size` 默认 64 → 256，
   `GetUrmaReadJettySqSize()` 后备值 64 → 256
@@ -349,6 +364,7 @@ const urma_status_t status = [&]() {
 测试 100% error。
 
 **排查过程**：
+
 1. 查看 client 日志：`URMA TX completion error: status=8 ...
    fatal=1 ... provider TP dead`
 2. status=8 是 READ+WRITE_IMM 在同一 jetty 交错的已知问题
@@ -373,13 +389,16 @@ WriteZeroCopy 的 WRITE_IMM 在 write jetty 上，需要和 PollCq 的 WRITE_IMM
 100% error。
 
 **排查过程**：
+
 1. 查看 server 日志：
+
+   ```text
+      PostReadBatch: batch=255 remaining=1030 next_read_idx=0
+      sq_window=256 use_read_jetty=1 sq_capacity=125
+      PostReadBatch: SQ window exhausted remaining=9271 sq_window=1 sq_avail=0
+      HandlePreWrite: PostReadBatch failed
    ```
-   PostReadBatch: batch=255 remaining=1030 next_read_idx=0
-   sq_window=256 use_read_jetty=1 sq_capacity=125
-   PostReadBatch: SQ window exhausted remaining=9271 sq_window=1 sq_avail=0
-   HandlePreWrite: PostReadBatch failed
-   ```
+
 2. **关键发现**：`remaining=1030`！8MB 消息被分成 1030 个 block
 3. 根因：IOBuf 默认 block size = `FLAGS_urma_buffer_size` = 8KB，
    8MB / 8KB = 1024 个 block，远超 read jetty SQ 容量(256)
@@ -396,6 +415,7 @@ WriteZeroCopy 的 WRITE_IMM 在 write jetty 上，需要和 PollCq 的 WRITE_IMM
 但 8M qps=1000 仍有 62% error。
 
 **排查过程**：
+
 1. qd=10 下 10 个并发 8M 请求，每个 128 READ，总 1280 READ
 2. read_jetty_sq_size=256，SQ 窗口不足以容纳 1280 个并发 READ
 3. PostReadBatch 返回 EAGAIN，HandlePreWrite 直接报错，无重试
@@ -410,6 +430,7 @@ WriteZeroCopy 的 WRITE_IMM 在 write jetty 上，需要和 PollCq 的 WRITE_IMM
 出现 ~21% error 率，但延迟正常。
 
 **排查过程**：
+
 1. 单独运行 1K qps=1000 5 秒测试 = 0% error，17us
 2. 21% error 只在连续矩阵测试中出现
 3. 根因：1M 测试触发 status=8 fatal error 后连接断开，
@@ -423,6 +444,7 @@ WriteZeroCopy 的 WRITE_IMM 在 write jetty 上，需要和 PollCq 的 WRITE_IMM
 **问题**：64KB buffer 测试中，部分测试结束后 client 进程 segfault。
 
 **排查过程**：
+
 1. segfault 发生在测试结果打印之后（结果已输出）
 2. 不影响测试数据正确性
 3. 可能是连接清理时的 use-after-free
@@ -497,7 +519,7 @@ buffer_size=8KB
 
 ### 8.2 完整测试配置
 
-```
+```text
 --use_urma=true --urma_io_mode=2
 --urma_max_sge_len=65536
 --urma_buffer_size=65536 --urma_buffer_count=8192
@@ -569,6 +591,7 @@ buffer_size=8KB
 ### 9.3 小包延迟差距分析
 
 小包(1K-100K)仍有 1.0-1.5x 差距，主要来自：
+
 - **网络 RTT**：CQ 事件通知机制(epoll_wait vs loop poll)
 - **c_event/s_event**：中断处理开销
 - **c_post/s_post**：堆分配 + mutex vs 对象池 + 无锁
@@ -624,6 +647,7 @@ WRITE_IMM vs WRITE_IMM。
 
 `--urma_dual_jetty=false --urma_use_zerocopy_read=false` 时，
 io_mode=2 走 WriteInlineChunked 路径，O1/O2/O3 代码改动不生效：
+
 - O1：DeliverReadySlots 只在 PRE_WRITE+READ 路径触发
 - O2：URMA_READ_BATCH_MAX 只影响 PostReadBatch
 - O3：`use_read_jetty=false` 时 PostReadBatch 保留 mutex
@@ -631,6 +655,7 @@ io_mode=2 走 WriteInlineChunked 路径，O1/O2/O3 代码改动不生效：
 ### 11.2 单 jetty ZeroCopy 不受影响
 
 `--urma_dual_jetty=false --urma_use_zerocopy_read=true` 时：
+
 - O3：`use_read_jetty=false`，PostReadBatch 保留 mutex 防 status=8
 
 ### 11.3 代码改动隔离性
@@ -763,12 +788,14 @@ p99-latency 的均值，用于消除单次测试的随机波动。
 | 8M   | 4010     | 4010     | 3995     | 4005.00  | 6235     | 6235     | 6229     | 6233.00  |
 
 **数据稳定性说明**：
+
 - 1K-200K 各 run 极差 ≤ 1us，数据高度稳定
 - 1M 各 run 极差 ≤ 3us，稳定
 - 8M 在 qps=500 下极差 19us（3144~3163），稳定；qps=1000 下极差 15us（3995~4010），稳定
 - p99 数据同样高度稳定，8M qps=1000 p99 极差仅 6us（6229~6235）
 
 **关键修正**：本次 3 次重复均值数据比此前文档引用的单次数据更精确：
+
 - qps=500 8M：3 次均值 **3153us**（此前文档引用 3940us，来自 qps=1000 数据混用）
 - qps=1000 8M：3 次均值 **4005us**（此前文档引用 3940us，单次测试值）
 
@@ -782,7 +809,7 @@ p99-latency 的均值，用于消除单次测试的随机波动。
 
 本次优化遵循的分析流程：
 
-```
+```text
 1. 建立基线 → 量化差距
    run_dual_jetty_matrix.py 测试 baseline，对比 UBS v2 数据
 
@@ -841,6 +868,7 @@ qps=500（UBS v2 列使用 13.4.1 的 3 次重复均值数据）：
 | 8M | 3278 | 3153.33 | -125 | 0.96x | ✅ 超越 4% |
 
 **关键发现**：
+
 1. 4K 差距最大（+12~13us，1.60~1.65x），是优化的首要突破点
 2. 使用 3 次均值后，qps=500 8M 超越幅度从 17% 修正为 4%（UBS v2 实际 3153us，非此前的 3940us）
 3. qps=1000 8M 差距从 +241us 收窄至 +176us（UBS v2 实际 4005us，非此前的 3940us）
@@ -850,7 +878,7 @@ qps=500（UBS v2 列使用 13.4.1 的 3 次重复均值数据）：
 
 #### 14.3.1 代码路径分界（修正：当前测试走 WriteZeroCopy 而非 WriteInlineChunked）
 
-```
+```text
 urma_endpoint.cpp:1120-1142 路由分发（io_mode=2 + zerocopy_read=true）：
   total ≤ FLAGS_urma_inline_threshold (默认 2048) → WriteInline      （1K）
   total > 2048                                       → WriteZeroCopy   （4K-8M）
@@ -864,17 +892,20 @@ WriteInlineChunked 仅在 `zerocopy_read=false` 时启用，当前测试未使�
 #### 14.3.2 两条路径的协议差异（4K 差距的真正根因）
 
 **WriteInline（1K 路径）— 单段 WRITE_IMM**：
-```
+
+```text
 发送方                          接收方
   │  WRITE_IMM(payload)          │
   │─────────────────────────────>│  数据直接写入接收方 recv_buf
   │                              │  CQE 到达 → 上层处理
   │  <──── CQE（发送完成）───────│
 ```
+
 单段 RDMA 写 + 一轮 CQE 通知，延迟 ≈ 1x RTT + payload 传输时间。
 
 **WriteZeroCopy（4K-8M 路径）— 两段 PRE_WRITE + READ 拉取**：
-```
+
+```text
 发送方                          接收方
   │ ① WRITE_IMM(ctrl_msg)        │  ctrl_msg 含 block 地址列表
   │─────────────────────────────>│  HandlePreWrite 解析地址
@@ -887,12 +918,15 @@ WriteInlineChunked 仅在 `zerocopy_read=false` 时启用，当前测试未使�
   │  ──── CQE（④ack完成）──────>│
   │  HandleWriteInBandAck        │  → 释放 send_buf
 ```
+
 **4 轮 RDMA 操作 + 2x RTT**，比 WriteInline 多出：
+
 - 接收方 READ 拉取的一整轮 RTT
 - POST_WRITE ack 的一轮 RTT
 - 双方各一次 CQE 处理
 
 **4K 差距 +12us 的分解**：
+
 | 环节 | 延迟 | 说明 |
 |------|------|------|
 | 额外 READ RTT | ~5-6us | 接收方发起 READ 到数据到达 |
@@ -921,6 +955,7 @@ WriteInlineChunked 仅在 `zerocopy_read=false` 时启用，当前测试未使�
 #### 14.3.4 为什么大 size 差距反而小？
 
 随 payload 增大，RDMA 传输时间占比上升，固定开销被稀释：
+
 - 1K：WriteInline 单段 RTT ~5us，固定开销 ~3-6us → 差距 +2~4us
 - 4K：WriteZeroCopy 两段 RTT ~10us，额外开销 ~6-9us → 差距 +12us（峰值）
 - 200K：WriteZeroCopy 两段 RTT ~10us + 传输 ~70us，额外开销被稀释 → 差距 +3us
@@ -942,18 +977,21 @@ DEFINE_int32(urma_inline_threshold, 8192,  // 2048 → 8192
 ```
 
 **预期效果**（基于 14.3.2 分解）：
+
 - 4K：从 WriteZeroCopy（两段 RTT ~10us + 额外开销 ~6-9us）→ WriteInline（单段 RTT ~5us + copy ~1us）
   - 预计降低 **10-14us**，从 32→18~22us，**直接超越 UBS v2（20us）**
 - 8K：同理，从 33→20~24us，**接近或超越 UBS v2（29us）**
 - 100K/200K：不适用（8192 阈值无法覆盖），仍走 WriteZeroCopy
 
 **约束验证**：
+
 - WriteInline 需要 `UrmaRingBuf::Allocate(sizeof(head) + total)` 连续空间
 - 当前 `--urma_send_buf_size=8192`（8MB），8K 分配绰绰有余
 - WriteInline 的 SGE `len` 受 `max_sge_len` 限制（当前 65536），8K 远低于上限
 - WriteInline 的 `copy_to` 需要一次 memcpy 8K，开销 ~1us（可接受）
 
 **风险**：
+
 - WriteInline 是 push 模式，数据复制到 send_buf 后发送；WriteZeroCopy 是 pull 模式，零拷贝
 - 对 4K/8K 小包，memcpy 开销 << 两段 RTT 节省，净收益显著
 - 对 100K+ 大包，memcpy 开销 > RTT 节省，故阈值不能太高（8K 是合理上限）
@@ -966,7 +1004,8 @@ DEFINE_int32(urma_inline_threshold, 8192,  // 2048 → 8192
 POST_WRITE ack（接收方→发送方通知数据已到）可以省略。
 
 **当前协议**：
-```
+
+```text
 ① WRITE_IMM(ctrl_msg)  →  ② READ(payload)  →  ③ HandleReadCompletion
 → ④ WRITE_IMM(ack)  →  ⑤ HandleWriteInBandAck(释放 send_buf)
 ```
@@ -977,10 +1016,12 @@ POST_WRITE ack（接收方→发送方通知数据已到）可以省略。
 无需等 ④ ack。
 
 **预期效果**：
+
 - 消除第 ④ 步 ack 的 1x RTT（~3-4us）+ 第 ⑤ 步 CQE 处理（~0.5us）
 - 全 size（4K-8M）降低 ~3-5us
 
 **风险**：
+
 - send_buf 释放依赖定时器，可能延迟释放导致 send_buf 窗口耗尽
 - 需要确认 ① 的 CQE 在何时到达（WRITE_IMM 完成不等于对方已 READ）
 - 协议改动影响面大，需充分回归
@@ -1010,11 +1051,13 @@ size_t block_count = 0;
 延迟。改为专用 pthread 纯 busy-poll（类似 UBS v2 的 UBWorker）。
 
 **当前实现**（`urma_endpoint.cpp:3730-3750`）：
+
 - polling bthread 循环调用 PollCq
 - 受 bthread 调度器管理，可能被抢占
 - yield 策略引入 ~1-3us 调度抖动
 
 **UBS v2 对比**：
+
 - 专用 pthread，`pthread_setaffinity_np` 绑核
 - 纯 busy-poll 无 yield，CQE 到达后零调度延迟处理
 - `thread_local` 对象池，热路径完全无锁
@@ -1022,6 +1065,7 @@ size_t block_count = 0;
 **预期效果**：全 size 降低 1-3us（消除 bthread 调度抖动）
 
 **风险**：
+
 - brpc Socket 模型深度依赖 epoll/bthread，改为 pthread 影响面大
 - 可能影响 io_mode=0/1 兼容性
 - 占用专用 CPU 核
@@ -1065,6 +1109,7 @@ free-list O(1) pop。
 **当前**：8M qps=1000 = 4181us，UBS v2 = 4005us，差距 +176us
 
 **优化方向**：
+
 - 增大 `read_jetty_sq_size` 512→1024（降低 SQ 窗口压力）
 - 减小 qd 10→8（降低并发 READ 数 1280→1024）
 - 优化 RetryPendingReads 扫描频率（当前每次 READ CQE 扫 128 slot）
@@ -1073,7 +1118,7 @@ free-list O(1) pop。
 
 ### 14.5 优化路线图（基于源码级方案重新设计）
 
-```
+```text
 阶段 1（快速见效，1 项改动 + 1 项调参）：
   ├── 方案 A: inline_threshold 2048→8192     → 4K -10~14us, 8K -9~13us
   └── 方案 G: read_jetty_sq_size 512→1024    → 8M qps=1000 稳定超越
@@ -1098,6 +1143,7 @@ free-list O(1) pop。
 ```
 
 **与旧路线图的关键差异**：
+
 - 旧方案 A 预估 4K 仅 -5~8us（基于错误的 WriteInlineChunked 假设）
 - 新方案 A 预估 4K -10~14us（基于 WriteZeroCopy 两段 RTT 真实开销）
 - 旧方案需要阶段 3 才能让 4K 超越，新方案阶段 1 即可让 4K 超越
@@ -1132,6 +1178,7 @@ free-list O(1) pop。
 
 阶段 3 的方案 B（消除 ack）对 4K-8M 再降 3-5us，方案 D（CQ busy-poll）
 对全 size 再降 1-3us。预期：
+
 - 1K：17~18 → 14~17us，**超越 UBS v2（16.33/17.00）**
 - 100K：51~53 → 46~50us，**超越 UBS v2（48.67）**
 - 1M：359~360 → 354~357us，**超越 UBS v2（356.67/359.00）**
@@ -1159,6 +1206,7 @@ free-list O(1) pop。
 | `urma_helper.cpp:999` | GetUrmaReadJettySqSize 后备值 256→1024 | 保持一致 |
 
 **threshold 调整过程**：
+
 - 第一轮设为 8192：4K 走了 WriteInline（32→20us ✅），但 8K 仍走 WriteZeroCopy（33→33us 无变化）
 - 根因：brpc RPC 头部（~200 字节）使 8K IOBuf 的 `size()` = 8192+200 > 8192 threshold
 - 第二轮设为 16384：8K 成功走 WriteInline（33→25us ✅）
@@ -1192,16 +1240,19 @@ free-list O(1) pop。
 #### 14.8.3 关键发现
 
 **方案 A（inline_threshold 16384）效果验证**：
+
 - 4K：-10us（32→22us），与预估 -10~14us 吻合，接近 UBS v2（差 +2us）
 - 8K：-8us（33→25us），**超越 UBS v2（-4us）**，验证了 WriteInline 单段协议优势
 - 1K 不受影响（已在 WriteInline 路径），-1us 属正常波动
 - 100K+ 不受影响（仍走 WriteZeroCopy，threshold 16384 < 100K）
 
 **方案 G（read_jetty_sq 1024）效果**：
+
 - 8M qps=1000：-275us（4181→3906us），**超越 UBS v2（-99us）**
 - 8M qps=500 未改善（3278→3292us），因 qps=500 下 SQ 压力本就不大
 
 **意外退化：1M 变慢 +13us**：
+
 - 1M 仍走 WriteZeroCopy（1M >> 16384 threshold）
 - 退化可能原因：read_jetty_sq 1024 占用更多内存（每 SQ slot 的 context），
   导致 CPU 缓存效率下降；或是 1M 的 18 batch READ 在 SQ=1024 下调度模式变化
@@ -1219,12 +1270,14 @@ free-list O(1) pop。
 | 方案 G 验证 | ✅ 8M qps=1000 -275us，稳定超越 |
 
 **阶段 1 达成目标**：
+
 - ✅ 4K/8K 从 WriteZeroCopy 回归 WriteInline，消除两段 RTT
 - ✅ 8K 超越 UBS v2（qps=500: -3.7us, qps=1000: -4.0us）
 - ✅ 8M qps=1000 超越 UBS v2（-99us）
 - ⬜ 4K 接近但未超越（差 +2us），需阶段 2 消除剩余固定开销
 
 **下一步（阶段 2）**：消除 1K/4K/100K/200K 的剩余固定开销
+
 - 方案 C（ctrl_msg 栈数组）：对 WriteZeroCopy 路径（100K+）-0.5~1us
 - 方案 E（InsertPendingSend hint）：全 size -0.5~1us
 - 方案 F（UrmaRingBuf free-list）：全 size -0.5~1us
