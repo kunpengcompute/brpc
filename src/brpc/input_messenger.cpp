@@ -33,6 +33,30 @@
 
 namespace brpc {
 
+#if BRPC_E2E_TRACE
+// E2E latency trace: thread-local bridge for passing URMA stage timestamps
+// from UrmaEndpoint::DispatchReceivedBytes to InputMessenger::ProcessNewMessage.
+// Set in DispatchReceivedBytes, consumed in ProcessNewMessage at _received_us assignment.
+struct E2ETraceBridge {
+    int64_t recv_event_us{0};
+    int64_t cq_drain_us{0};
+    int64_t dispatch_us{0};
+    bool valid{false};
+};
+static thread_local E2ETraceBridge g_e2e_bridge;
+
+void set_e2e_trace_bridge(int64_t recv_event_us, int64_t cq_drain_us,
+                          int64_t dispatch_us) {
+    g_e2e_bridge.recv_event_us = recv_event_us;
+    g_e2e_bridge.cq_drain_us = cq_drain_us;
+    g_e2e_bridge.dispatch_us = dispatch_us;
+    g_e2e_bridge.valid = true;
+}
+void clear_e2e_trace_bridge() {
+    g_e2e_bridge.valid = false;
+}
+#endif  // BRPC_E2E_TRACE
+
 InputMessenger* g_messenger = NULL;
 static pthread_once_t g_messenger_init = PTHREAD_ONCE_INIT;
 static void InitClientSideMessenger() {
@@ -169,6 +193,12 @@ ParseResult InputMessenger::CutInputMessage(
 
 void* ProcessInputMessage(void* void_arg) {
     InputMessageBase* msg = static_cast<InputMessageBase*>(void_arg);
+#if BRPC_E2E_TRACE
+    // E2E trace #8/#18: ProcessInputMessage entry (covers both Transport and
+    // InputMessenger code paths — the latter runs when UrmaTransport::QueueMessage
+    // defers the last message to InputMessageClosure destructor in event mode).
+    msg->_process_bthread_us = butil::cpuwide_time_us();
+#endif
     msg->_process(msg);
     return NULL;
 }
@@ -254,6 +284,16 @@ int InputMessenger::ProcessNewMessage(
         }
         pr.message()->_received_us = received_us;
         pr.message()->_base_real_us = base_realtime;
+#if BRPC_E2E_TRACE
+        // E2E trace: copy URMA stage timestamps from thread-local bridge.
+        if (g_e2e_bridge.valid) {
+            pr.message()->_recv_event_us = g_e2e_bridge.recv_event_us;
+            pr.message()->_cq_drain_us = g_e2e_bridge.cq_drain_us;
+            pr.message()->_dispatch_us = g_e2e_bridge.dispatch_us;
+        }
+        // E2E trace #7/#17: CutInputMessage complete (monotonic).
+        pr.message()->_msg_cut_us = butil::cpuwide_time_us();
+#endif  // BRPC_E2E_TRACE
                     
         // This unique_ptr prevents msg to be lost before transfering
         // ownership to last_msg
@@ -297,11 +337,11 @@ int InputMessenger::ProcessNewMessage(
             num_bthread_created = 0;
         }
     }
-    // In RDMA polling mode, all messages must be executed in a new bthread and
-    // not in the bthread where the polling bthread is located, because the
-    // method for processing messages may call synchronization primitives,
-    // causing the polling bthread to be scheduled out.
-    if (m->_socket_mode == SOCKET_MODE_RDMA || m->_socket_mode == SOCKET_MODE_UBRING) {
+    // These transports may deliver messages from completion pollers. Process
+    // the messages in another bthread so user code cannot block the poller.
+    if (m->_socket_mode == SOCKET_MODE_RDMA ||
+        m->_socket_mode == SOCKET_MODE_UBRING ||
+        m->_socket_mode == SOCKET_MODE_URMA) {
         m->_transport->QueueMessage(last_msg, &num_bthread_created, true);
     }
     if (num_bthread_created) {

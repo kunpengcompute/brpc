@@ -1,0 +1,533 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
+#ifndef BRPC_URMA_ENDPOINT_H
+#define BRPC_URMA_ENDPOINT_H
+
+#include <atomic>
+#include <cstdint>
+#include <functional>
+#include <ostream>
+#include <unordered_map>
+#include <vector>
+
+#include "butil/atomicops.h"
+#include "butil/containers/mpsc_queue.h"
+#include "butil/iobuf.h"
+#include "butil/macros.h"
+#include "butil/synchronization/lock.h"
+#include "bthread/types.h"
+
+#include "brpc/socket.h"
+
+#if BRPC_WITH_URMA
+
+#include "urma_api.h"
+#include "urma_types.h"
+#include "brpc/urma/urma_handshake.h"
+#include "brpc/urma/urma_handshake.pb.h"
+#include "brpc/urma/urma_one_sided.h"
+
+// Lock-free pending-send slot for MPSC pattern.
+// state lifecycle: 0 (free) -> key (occupied) -> 0 (free)
+// Writer (KeepWrite, single-threaded): CAS 0->key to acquire slot, then set ctx.
+// Reader (PollCq, single-threaded): find slot by key, read ctx, set state->0.
+struct PendingSendSlot {
+    std::atomic<uint64_t> state{0};  // 0=free, nonzero=key
+    brpc::urma::UrmaSendContext* ctx{nullptr};
+};
+
+// Max concurrent in-flight sends. send_buf 2MB / 1024B unit = 2048 slots
+// covers worst case. Use 4096 for headroom.
+static constexpr size_t kMaxPendingSends = 4096;
+
+namespace brpc {
+
+class UrmaTransport;
+
+namespace urma {
+
+class UrmaHandshake;
+struct ParsedHello;
+
+DECLARE_bool(urma_use_polling);
+DECLARE_int32(urma_poller_num);
+DECLARE_bool(urma_disable_bthread);
+DECLARE_int32(urma_pollcq_max_rounds);
+
+// Per-connection application-level connect object. Returned by
+// UrmaTransport::Connect(); its StartConnect spawns the client-side handshake
+// bthread that drives the URMA negotiation over the already-connected TCP fd.
+class UrmaConnect : public AppConnect {
+    friend class UrmaEndpoint;
+public:
+    void StartConnect(const Socket* socket,
+                      void (*done)(int err, void* data), void* data) override;
+    void StopConnect(Socket*) override;
+
+    struct RunGuard {
+        explicit RunGuard(UrmaConnect* rc) : this_rc(rc) {}
+        ~RunGuard() { if (this_rc) this_rc->Run(); }
+        UrmaConnect* this_rc;
+    };
+
+private:
+    void Run();
+    void (*_done)(int, void*){nullptr};
+    void* _data{nullptr};
+    int _error{0};
+};
+
+// POD holder for the URMA kernel objects backing one connection:
+//   - the send jetty (JFS), shared-JFR jetty, JFR, JFC, and (event mode) JFCE
+//   - the imported peer jetty and peer segment
+// Mirrors the role of rdma::RdmaResource, but the URMA object graph is a
+// little different (no separate QP/CQ split).
+struct UrmaResource {
+    UrmaResource* next{nullptr};  // singly-linked list for the prepared pool
+
+    urma_jfc_t* jfc{nullptr};
+    urma_jfce_t* jfce{nullptr};   // event mode only; null in polling mode
+    urma_jfr_t* jfr{nullptr};
+    urma_jetty_t* jetty{nullptr};
+    // [dual-jetty] READ-dedicated jetty (null when --urma_dual_jetty=false).
+    // Shares the same JFC/JFR as the write jetty so PollCq is unchanged.
+    urma_jetty_t* jetty_read{nullptr};
+    // Imported peer objects (created per-connection, not pooled).
+    urma_target_jetty_t* remote_jetty{nullptr};
+    // [dual-jetty] imported peer read jetty (null when not negotiated).
+    urma_target_jetty_t* remote_jetty_read{nullptr};
+    urma_target_seg_t* remote_seg{nullptr};
+    // Imported peer recv_buf segment (one-sided only). We WRITE_IMM into
+    // this buffer.
+    urma_target_seg_t* remote_recv_buf_seg{nullptr};
+
+    UrmaResource() = default;
+    ~UrmaResource();
+    DISALLOW_COPY_AND_ASSIGN(UrmaResource);
+};
+
+// One per Socket. Carries the handshake state machine, the send/recv
+// windows, and the registered buffer bookkeeping. Cache-line padded to avoid
+// false sharing between connections.
+class BAIDU_CACHELINE_ALIGNMENT UrmaEndpoint : public SocketUser {
+    friend class UrmaConnect;
+    friend class Socket;
+    friend class UrmaTransport;
+    friend class UrmaHandshakeClientV2;
+    friend class UrmaHandshakeServerV2;
+    friend class UrmaHandshakeClientV3;
+    friend class UrmaHandshakeServerV3;
+    friend int DrainBytes(UrmaEndpoint*, size_t);
+    friend int ReadBodyAndNegotiate(UrmaEndpoint*, ParsedHello*, bool*);
+
+public:
+    explicit UrmaEndpoint(Socket* s);
+    ~UrmaEndpoint() override;
+
+    // ---- Global initialization / release ----
+    // Pre-allocate the prepared Jetty pool. Called once at GlobalUrmaInitializeOrDie.
+    static int GlobalInitialize();
+    static void GlobalRelease();
+
+    // ---- Per-connection lifecycle ----
+    // Reset the endpoint back to UNINIT for reuse.
+    void Reset();
+
+    // ---- Data path (called by UrmaTransport) ----
+    // Cut data from the IOBuf list and post it via URMA SEND.
+    // Returns bytes sent, or -1 (errno set; EAGAIN when windows are full).
+    ssize_t CutFromIOBufList(butil::IOBuf** data, size_t ndata);
+
+    // Whether the endpoint can post more sends (both windows non-empty).
+    bool IsWritable() const;
+
+    // For debug: dump endpoint state to @os.
+    void DebugInfo(std::ostream& os,
+                   butil::StringPiece connector = "\n") const;
+
+    // Edge-triggered callback installed on the TCP socket when the transport
+    // is URMA. Dispatches on _state (see the .cpp for the full state machine):
+    //   UNINIT (server)  -> start the server handshake bthread
+    //   < ESTABLISHED    -> wake the handshake bthread parked in ReadFromFd
+    //   FALLBACK_TCP     -> hand off to InputMessenger::OnNewMessages
+    //   ESTABLISHED      -> drain stray TCP bytes
+    static void OnNewDataFromTcp(Socket* m);
+
+    // CQ completion poller: the edge-triggered callback for the CQ socket
+    // (whose user is this endpoint). Drains urma_poll_jfc and feeds the
+    // completions into HandleCompletion, then calls InputMessenger. Event mode
+    // also drains the aggregated JFCE until urma_wait_jfc reports no event,
+    // then calls Socket::MoreReadEvents so later JFCE edges can start the
+    // callback again.
+    static void PollCq(Socket* m);
+
+    // Initialize the per-tag polling infrastructure (polling mode).
+    static int PollingModeInitialize(bthread_tag_t tag,
+                                     std::function<void()> callback,
+                                     std::function<void()> init_fn,
+                                     std::function<void()> release_fn);
+    static void PollingModeRelease(bthread_tag_t tag);
+
+    // ---- Handshake IO helpers (also used by urma_handshake.cpp) ----
+    // Read at most @len bytes from the TCP fd into @data; waits on _read_butex
+    // on EAGAIN. Returns 0 on success, -1 on IO error (errno set).
+    int ReadFromFd(void* data, size_t len);
+    // Push @len bytes back into _socket->_read_buf so the TCP input messenger
+    // can re-parse them (used on fallback when the magic is not "URMA").
+    void PushBackToReadBuf(const void* data, size_t len);
+    // Write at most @len bytes from @data to the TCP fd; waits on
+    // _epollout_butex on EAGAIN. Returns 0 on success, -1 on IO error.
+    int WriteToFd(void* data, size_t len);
+    // Write an IOBuf to the TCP fd (used by v3 protobuf handshake).
+    int WriteToFd(butil::IOBuf& data);
+
+    // ---- Hello builders/parsers (used by urma_handshake.cpp) ----
+    // Fill the v2 binary HelloMessage with this endpoint's local params.
+    void FillLocalHelloV2(v2_wire::HelloMessage* out) const;
+    // Fill the v3 protobuf UrmaHello with this endpoint's local params.
+    void FillLocalHelloV3(UrmaHello* out) const;
+    // Write "URM3" + 4B big-endian pb_size + protobuf bytes.
+    int WriteHelloV3(const UrmaHello& msg);
+    // Read pb_size (4B) + protobuf bytes; parse; validate. Sets *negotiated
+    // to false (returns 0) if the message is invalid.
+    int ReadAndParseHelloV3(ParsedHello* out, bool* negotiated);
+
+    // Apply the peer's negotiated parameters (window sizes, peer jetty/seg).
+    void ApplyRemoteHello(const ParsedHello& remote);
+
+private:
+    enum State {
+        UNINIT = 0x0,
+        C_ALLOC_RES   = 0x1,  // client: allocate Jetty/JFC/JFR
+        C_HELLO_SEND  = 0x2,
+        C_HELLO_WAIT  = 0x3,
+        C_IMPORT_PEER = 0x4,  // urma_import_seg then urma_import_jetty
+        C_ACK_SEND    = 0x5,
+        S_HELLO_WAIT  = 0x11,
+        S_ALLOC_RES   = 0x12,
+        S_IMPORT_PEER = 0x13,
+        S_HELLO_SEND  = 0x14,
+        S_ACK_WAIT    = 0x15,
+        ESTABLISHED   = 0x100,
+        FALLBACK_TCP  = 0x200,
+        FAILED        = 0x300
+    };
+
+    // Process handshake at the client / server (run in a background bthread).
+    static void* ProcessHandshakeAtClient(void* arg);
+    static void* ProcessHandshakeAtServer(void* arg);
+
+    // Allocate / deallocate the per-connection URMA resources (JFCE/JFC/JFR/
+    // Jetty, plus the CQ socket). Returns 0 on success.
+    int AllocateResources();
+    void DeallocateResources();
+    // Decrement _resource_refcnt; wake DeallocateResources if last holder.
+    void ReleaseResourceRef();
+
+    // Import the peer's jetty and buffer-pool segment. CRITICAL:
+    // urma_import_seg is called BEFORE urma_import_jetty, otherwise the kernel
+    // does not establish the transport-path routing for the remote EID and
+    // the first SEND is rejected with URMA_CR_RNR_RETRY_CNT_EXC_ERR.
+    // Returns 0 on success.
+    int ImportPeer(const ParsedHello& peer);
+
+    // Post @num recv WRs into the local JFR. If @zerocopy, use a fresh pool
+    // buffer; otherwise reuse the fixed _rbuf slot. Returns 0 on success.
+    int PostRecv(uint32_t num, bool zerocopy);
+
+    // Post a single recv WR pointing at @block of @block_size.
+    int DoPostRecv(void* block, size_t block_size);
+
+    // Send a pure-ACK URMA_OPC_SEND_IMM WR with no payload. @imm carries the
+    // number of receive WRs reposted for peer-side flow-control credit.
+    int SendImm(uint32_t imm);
+    // Batched credit ack: if _new_rq_wrs is above the threshold, flush it via
+    // a standalone SendImm. @num is the number of new recv WRs to add.
+    int SendAck(int num);
+
+    // Handle one completion record. For SEND completions: reclaim the SQ
+    // window and wake the writer. For RECV completions: cut the payload into
+    // _socket->_read_buf, repost the recv WR, and ack. Returns bytes received
+    // (0 for send completions), or -1 on error (errno set).
+    ssize_t HandleCompletion(const urma_cr_t& cr);
+
+    // Queue received bytes for InputMessenger. CQ receive completions can
+    // arrive while the server is still waiting for the final TCP handshake
+    // ACK. Keep those bytes in _socket->_read_buf and dispatch them only after
+    // ESTABLISHED, matching the connection-ready boundary seen by user code.
+    void DispatchReceivedBytes(SocketUniquePtr& s, ssize_t bytes);
+
+    // Consume one async event from the JFCE fd (event mode only). The caller
+    // drains completions before acknowledge/rearm because the bonding provider
+    // uses poll_jfc to record which physical JFCs must be rearmed.
+    int WaitCqEvent(SocketUniquePtr& s, urma_jfc_t** event_jfc);
+
+    // Request completion notification (event mode only).
+    int ReqNotifyCq();
+
+    // Add/remove the CQ socket id to/from the poller (polling mode only).
+    void PollerAddCqSid();
+    void PollerRemoveCqSid();
+
+    inline void TryReadOnTcp();
+    void FallbackToTcp(UrmaTransport* transport, bool process_tcp);
+    void FailHandshake(UrmaTransport* transport, int error,
+                       const char* reason);
+
+    // Construct a ParsedHello from local state (used by SendLocalHello).
+    void MakeLocalParsedHello(ParsedHello* out) const;
+
+    std::string GetStateStr() const;
+
+    // Not owned.
+    Socket* _socket;
+
+    // Handshake state.
+    butil::atomic<State> _state{UNINIT};
+    int _handshake_version{0};  // 0 = unnegotiated; 2 = v2; 3 = v3
+    butil::atomic<int64_t> _pending_received_bytes{0};
+    butil::Mutex _dispatch_mutex;
+
+    // The URMA resources (jetty / jfc / jfr / jfce / imported peer objects).
+    UrmaResource* _resource{nullptr};
+
+    // The SocketId wrapping the JFCE fd (event mode) or a synthetic carrier
+    // (polling mode). PollCq is the edge-triggered callback on this socket.
+    SocketId _cq_sid{INVALID_SOCKET_ID};
+
+    // Refcount for _resource lifecycle synchronization. 0=free, >0=PollCq
+    // holding, INT32_MIN=shutdown sentinel. DeallocateResources CAS 0→
+    // INT32_MIN then waits for in-flight PollCq to drain before delete.
+    butil::atomic<int32_t> _resource_refcnt{0};
+    // Butex for DeallocateResources to wait for last PollCq to exit.
+    butil::atomic<int>* _shutdown_butex{nullptr};
+
+    // ---- Send / recv window bookkeeping ----
+    uint16_t _sq_size{0};   // local JFS depth
+    uint16_t _rq_size{0};   // local JFR depth
+
+    // Per-WR send buffers (own the IOBuf until the SEND completes).
+    std::vector<butil::IOBuf> _sbuf;
+    // Per-WR recv buffers (zero-copy targets).
+    std::vector<butil::IOBuf> _rbuf;
+    std::vector<void*> _rbuf_data;
+    // Peer's advertised recv buffer size (caps each WR's payload).
+    uint32_t _remote_recv_block_size{0};
+
+    // Flow-control windows (atomic; producer decrements, completion handler
+    // increments).
+    uint16_t _local_window_capacity{0};
+    uint16_t _remote_window_capacity{0};
+    butil::atomic<uint16_t> _remote_rq_window_size{0};  // WRs we can send
+    butil::atomic<uint16_t> _sq_window_size{0};          // WRs we can post
+    // [dual-jetty] SQ window for the read-dedicated jetty. Tracked separately
+    // from _sq_window_size (write jetty) so the two SQs are independently
+    // gated. Only used when --urma_dual_jetty=true and the read jetty was
+    // successfully created and imported.
+    butil::atomic<uint16_t> _sq_window_size_read{0};
+    butil::atomic<uint16_t> _new_rq_wrs{0};              // new recv WRs (to ack)
+    uint16_t _sq_imm_window_size{0};                     // budget for pure-ack WRs
+
+    // SQ producer index (next slot to post).
+    uint16_t _sq_current{0};
+
+    // ---- Latency tracing state (active when --urma_trace_latency=true) ----
+    struct TraceState {
+        // Send path (reset at CutFromIOBufList entry, flushed at return)
+        int64_t send_start_us{0};       // T1: function entry
+        int64_t send_first_post_us{0};  // T2: first urma_post_jetty_send_wr
+        int64_t send_post_time_us{0};   // cumulative time in urma_post_jetty_send_wr
+        int send_wr_count{0};           // total WRs posted in this call
+        int send_eagain_count{0};       // window-blocked breaks
+        size_t send_total_bytes{0};     // total bytes sent
+
+        // Recv path (accumulated across PollCq calls, flushed at DispatchReceivedBytes)
+        int64_t recv_first_rx_us{0};    // T7: first RX completion timestamp
+        int recv_wr_count{0};           // total RX completions
+        size_t recv_total_bytes{0};     // total bytes received
+        int recv_postrecv_count{0};     // PostRecv calls
+        int recv_sendack_count{0};      // SendAck calls
+        int recv_poll_count{0};         // urma_poll_jfc calls
+        int recv_tx_complete{0};        // TX completions (SQ window returns)
+    };
+    TraceState _trace;
+
+#if BRPC_E2E_TRACE
+    // E2E latency trace timestamps (cpuwide_time_us).
+    // Set in PollCq / drain_cq / DispatchReceivedBytes, read by
+    // ProcessRpcRequest / ProcessRpcResponse via Socket::user() reverse lookup.
+    int64_t _e2e_recv_event_us{0};   // #5/#15: PollCq entry
+    int64_t _e2e_cq_drain_us{0};     // #6/#16: drain_cq complete
+    int64_t _e2e_dispatch_us{0};     // #6/#16: DispatchReceivedBytes entry
+#endif  // BRPC_E2E_TRACE
+
+    // RQ consumer index.
+    uint16_t _rq_received{0};
+
+    // Butex for waking the handshake bthread parked in ReadFromFd.
+    butil::atomic<int>* _read_butex{nullptr};
+
+    // Reserved WR slots for pure-ack IMM WRs.
+    static constexpr uint16_t RESERVED_WR_NUM = 3;
+
+    // Cq socket id operation (polling mode registration queue).
+    struct CqSidOp {
+        enum OpType { ADD, REMOVE } type;
+        SocketId sid;
+    };
+    struct BAIDU_CACHELINE_ALIGNMENT Poller {
+        bthread_t tid{INVALID_BTHREAD};
+        butil::MPSCQueue<CqSidOp, butil::ObjectPoolAllocator<CqSidOp>> op_queue;
+        std::function<void()> callback;
+        std::function<void()> init_fn;
+        std::function<void()> release_fn;
+    };
+    struct BAIDU_CACHELINE_ALIGNMENT PollerGroup {
+        PollerGroup() : pollers(FLAGS_urma_poller_num), running(false) {}
+        std::vector<Poller> pollers;
+        butil::atomic<bool> running;
+    };
+    static std::vector<PollerGroup> _poller_groups;
+    bthread_tag_t _poller_tag{0};
+
+    // ---- One-sided operation state (active when _io_mode != 0) ----
+    // IO mode: 0=SEND_ONLY, 1=WRITE_ONLY, 2=HYBRID. Negotiated to
+    // min(local, remote) during handshake. v2 peers always get 0.
+    uint8_t _io_mode{0};
+
+    // Local send/recv buffers for one-sided operations. Single contiguous
+    // mmap region registered as one URMA segment: recv_buf at base,
+    // send_buf at base + recv_buf_size.
+    void* _one_sided_buf{nullptr};       // mmap base (owned)
+    uint32_t _send_buf_capacity{0};      // send_buf size in bytes
+    uint32_t _recv_buf_capacity{0};      // recv_buf size in bytes
+    urma_target_seg_t* _send_buf_tseg{nullptr};  // local registered seg
+    // Allocator for the send_buf (tracks which slots are in use).
+    UrmaRingBuf* _send_buf_alloc{nullptr};
+
+    // Peer recv_buf address (we WRITE_IMM to this address + offset).
+    uint64_t _remote_recv_buf_va{0};
+    uint32_t _remote_recv_buf_size{0};
+    // Peer send_buf address (we WRITE_IN_BAND_ACK / POST_WRITE to this).
+    uint64_t _remote_send_buf_va{0};
+    uint32_t _remote_send_buf_size{0};
+
+    // Request ID counter for one-sided messages.
+    butil::atomic<uint64_t> _one_sided_seq{1};
+
+    // Pending send contexts: lock-free MPSC slot array.
+    // Writer (KeepWrite) CAS-acquires a free slot; Reader (PollCq) finds
+    // by key and releases. Replaces the old mutex+unordered_map.
+    PendingSendSlot _pending_sends[kMaxPendingSends];
+
+    // RX slots for large IO (PRE_WRITE + READ) path.
+    UrmaRxSlot _rx_slots[URMA_RX_RING_SIZE];
+    butil::atomic<uint64_t> _rx_consume_seq{0};  // next slot to allocate
+    butil::atomic<uint64_t> _rx_delivery_seq{0}; // next slot to deliver in-order
+
+    // [Stage2] Count of RX slots with pending_retry=true. RetryPendingReads
+    // is called after every READ CQE; without this guard it scans all 128
+    // slots each time (32K empty scans for a 255-batch 1M message).
+    // PollCq is single-threaded, so relaxed atomics suffice.
+    butil::atomic<uint32_t> _pending_retry_count{0};
+
+    // [Stage2] Hint for InsertPendingSend (writer) and
+    // FindAndRemoveSendContext (reader). Reduces average scan distance
+    // from O(N/2) to O(1) in steady state. Writer is single-threaded
+    // (KeepWrite), reader is single-threaded (PollCq).
+    butil::atomic<uint32_t> _insert_hint{0};
+    uint32_t _remove_hint{0};
+
+    // Mutex serializing JFS posts on the WriteZeroCopy path. Bonding devices
+    // reject concurrent READ+WRITE_IMM on the same jetty (status=8): PollCq
+    // posts READ / POST_WRITE while KeepWrite posts PRE_WRITE. This mutex
+    // mirrors UBS v2's dispatch_lock_ to prevent the interleaving.
+    butil::Mutex _zerocopy_post_mutex;
+
+    // ---- Chunked WRITE_IN_BAND state ----
+    // Sender-side: tracks current message's chunk progress across multiple
+    // CutFromIOBufList calls (KeepWrite is single-threaded per socket, so no
+    // concurrent access). Reset when all chunks of a message are sent.
+    uint32_t _chunked_chunk_idx{0};      // next chunk index to send
+    uint32_t _chunked_total_chunks{0};   // total chunks for current message
+    uint64_t _chunked_request_id{0};     // request_id for current message
+
+    // Receiver-side: reassembly contexts keyed by request_id.
+    std::mutex _reasm_mutex;
+    std::unordered_map<uint64_t, UrmaReasmCtx*> _reasm_ctxs;
+
+    // ---- One-sided methods ----
+    int AllocateOneSidedBuffers();
+    void DeallocateOneSidedBuffers();
+    int PostEmptyRecvWr(uint32_t count);
+
+    // Send path dispatch: called by CutFromIOBufList.
+    ssize_t CutFromIOBufList_Send(butil::IOBuf** from, size_t ndata);
+    ssize_t WriteInline(butil::IOBuf** from, size_t ndata);
+    ssize_t WriteZeroCopy(butil::IOBuf** from, size_t ndata);
+    ssize_t WriteInlineChunked(butil::IOBuf** from, size_t ndata);
+
+    // Completion handlers for one-sided operations.
+    ssize_t HandleWriteImmCompletion(const urma_cr_t& cr);
+    ssize_t HandleReadCompletion(const urma_cr_t& cr);
+    void HandleWriteInBandAck(const urma_cr_t& cr);
+    void HandlePostWrite(const urma_cr_t& cr);
+
+    // Post one batch of READ WRs (up to URMA_READ_BATCH_MAX). Called by
+    // HandleWriteImmCompletion for the first batch, and by HandleReadCompletion
+    // for subsequent batches. Returns 0 on success, -1 on error (errno set).
+    int PostReadBatch(uint32_t slot_idx);
+
+    // Deliver consecutive DATA_READY slots to _read_buf in allocation order.
+    // Called after a slot transitions to DATA_READY. Advances
+    // _rx_delivery_seq past each delivered slot and resets it to IDLE.
+    void DeliverReadySlots();
+
+    // Scan all RX slots for pending_retry and re-post READ batches now that
+    // SQ window may have freed. Called after each READ CQE reclaims an SQ
+    // slot in HandleCompletion TX path. PollCq is single-threaded, no lock.
+    void RetryPendingReads();
+
+    // Send a control response (WRITE_IN_BAND_ACK or POST_WRITE) back to
+    // the peer's send_buf at the mirrored offset. chunk_idx is written into
+    // flags so the peer's HandleWriteInBandAck can locate the chunk's context.
+    int ResponseCtrlMessage(uint8_t opcode, uint16_t buffer_offset,
+                            uint64_t request_id, uint32_t message_size,
+                            uint16_t chunk_idx = 0);
+
+    // Helper: find and remove a pending send context by request_id.
+    UrmaSendContext* FindAndRemoveSendContext(uint64_t key);
+    bool InsertPendingSend(uint64_t key, UrmaSendContext* ctx);
+
+    DISALLOW_COPY_AND_ASSIGN(UrmaEndpoint);
+};
+
+}  // namespace urma
+}  // namespace brpc
+
+#else  // BRPC_WITH_URMA
+
+namespace brpc {
+namespace urma {
+class UrmaEndpoint {};
+}  // namespace urma
+}  // namespace brpc
+
+#endif  // BRPC_WITH_URMA
+
+#endif  // BRPC_URMA_ENDPOINT_H

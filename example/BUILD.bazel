@@ -37,6 +37,15 @@ COPTS = [
 }) + select({
     "//bazel/config:brpc_with_rdma": ["-DBRPC_WITH_RDMA=1"],
     "//conditions:default": [""],
+}) + select({
+    "//bazel/config:brpc_with_urma": ["-DBRPC_WITH_URMA=1"],
+    "//conditions:default": [],
+}) + select({
+    "//bazel/config:brpc_with_urma_mock": ["-DBRPC_USE_URMA_MOCK=1"],
+    "//conditions:default": ["-DBRPC_USE_URMA_MOCK=0"],
+}) + select({
+    "//bazel/config:brpc_with_e2e_trace": ["-DBRPC_E2E_TRACE=1"],
+    "//conditions:default": ["-DBRPC_E2E_TRACE=0"],
 })
 
 brpc_proto_library(
@@ -50,6 +59,34 @@ brpc_proto_library(
     name = "cc_rdma_performance_proto",
     srcs = ["rdma_performance/test.proto"],
     include = "rdma_performance",
+    proto_deps = [],
+)
+
+brpc_proto_library(
+    name = "cc_urma_performance_proto",
+    srcs = ["urma_performance/test.proto"],
+    include = "urma_performance",
+    proto_deps = [],
+)
+
+brpc_proto_library(
+    name = "cc_ub_performance_proto",
+    srcs = ["ub_performance/test.proto"],
+    include = "ub_performance",
+    proto_deps = [],
+)
+
+brpc_proto_library(
+    name = "cc_ub_performance_press_proto",
+    srcs = ["ub_performance_press/press.proto"],
+    include = "ub_performance_press",
+    proto_deps = [],
+)
+
+brpc_proto_library(
+    name = "cc_ub_test_proto",
+    srcs = ["ub_test/test.proto"],
+    include = "ub_test",
     proto_deps = [],
 )
 
@@ -109,6 +146,133 @@ cc_binary(
     copts = COPTS + ["-DBRPC_WITH_RDMA=1"],
     deps = [
         ":cc_rdma_performance_proto",
+        "//:brpc",
+    ],
+)
+
+cc_binary(
+    name = "urma_performance_server",
+    srcs = [
+        "urma_performance/server.cpp",
+    ],
+    includes = [
+        "urma_performance",
+    ],
+    copts = COPTS,
+    deps = [
+        ":cc_urma_performance_proto",
+        "//:brpc",
+    ] + select({
+        "//bazel/config:brpc_with_urma": ["@umdk//:urma_headers"],
+        "//conditions:default": [],
+    }),
+)
+
+cc_binary(
+    name = "urma_performance_client",
+    srcs = [
+        "urma_performance/client.cpp",
+    ],
+    includes = [
+        "urma_performance",
+    ],
+    copts = COPTS,
+    deps = [
+        ":cc_urma_performance_proto",
+        "//:brpc",
+    ] + select({
+        "//bazel/config:brpc_with_urma": ["@umdk//:urma_headers"],
+        "//conditions:default": [],
+    }),
+)
+
+cc_binary(
+    name = "ub_performance_server",
+    srcs = [
+        "ub_performance/server.cpp",
+    ],
+    includes = [
+        "ub_performance",
+    ],
+    copts = COPTS,
+    deps = [
+        ":cc_ub_performance_proto",
+        "//:brpc",
+    ],
+)
+
+cc_binary(
+    name = "ub_performance_client",
+    srcs = [
+        "ub_performance/client.cpp",
+    ],
+    includes = [
+        "ub_performance",
+    ],
+    copts = COPTS,
+    deps = [
+        ":cc_ub_performance_proto",
+        "//:brpc",
+    ],
+)
+
+cc_binary(
+    name = "ub_performance_press_server",
+    srcs = [
+        "ub_performance_press/server.cpp",
+    ],
+    includes = [
+        "ub_performance_press",
+    ],
+    copts = COPTS,
+    deps = [
+        ":cc_ub_performance_press_proto",
+        "//:brpc",
+    ],
+)
+
+cc_binary(
+    name = "ub_performance_press_client",
+    srcs = [
+        "ub_performance_press/client.cpp",
+        "ub_performance_press/data_generator.h",
+    ],
+    includes = [
+        "ub_performance_press",
+    ],
+    copts = COPTS,
+    deps = [
+        ":cc_ub_performance_press_proto",
+        "//:brpc",
+    ],
+)
+
+cc_binary(
+    name = "ub_test_server",
+    srcs = [
+        "ub_test/server.cpp",
+    ],
+    includes = [
+        "ub_test",
+    ],
+    copts = COPTS,
+    deps = [
+        ":cc_ub_test_proto",
+        "//:brpc",
+    ],
+)
+
+cc_binary(
+    name = "ub_test_client",
+    srcs = [
+        "ub_test/client.cpp",
+    ],
+    includes = [
+        "ub_test",
+    ],
+    copts = COPTS,
+    deps = [
+        ":cc_ub_test_proto",
         "//:brpc",
     ],
 )

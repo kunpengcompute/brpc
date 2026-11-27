@@ -1,0 +1,710 @@
+#!/usr/bin/env python
+"""Unified E2E latency trace script for URMA io_mode=2 1KB QPS=1000.
+
+Workflow stages (controllable via flags):
+  1. upload  - upload modified source files to server (202)
+  2. build   - bazel build ub_test_server/client on 202
+  3. sync    - copy client binary to 204
+  4. test    - start server, run client, capture [URMA-E2E] logs
+  5. analyze - parse logs, print 19-stage latency distribution
+
+Usage:
+  python run_e2e_trace.py                   # full pipeline (upload+build+sync+test+analyze)
+  python run_e2e_trace.py --skip-upload     # skip step 1
+  python run_e2e_trace.py --skip-build      # skip steps 1-3 (reuse existing binaries)
+  python run_e2e_trace.py --analyze-only    # only analyze local e2e_client_trace.log
+  python run_e2e_trace.py --test-only       # only run test + analyze (reuse binaries)
+
+All trace output is gated by a single gflag: --urma_trace_latency=true.
+[URMA-E2E] logs are emitted only on the client side (Controller::EndRPC).
+"""
+import argparse
+import contextlib
+import io
+import os
+import re
+import sys
+import tempfile
+import time
+
+import paramiko
+
+try:
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+    HAS_OPENPYXL = True
+except ImportError:
+    HAS_OPENPYXL = False
+
+# --- Environment config ---
+SERVER_HOST = '141.61.17.202'
+CLIENT_HOST = '141.61.17.204'
+USER = 'd00836578'
+PASS = 'dwh123456'
+PORT = 10918
+
+REMOTE_BRPC = '/home/d00836578/brpc_workspace/brpc_urma/brpc'
+REMOTE_CLIENT = '/home/d00836578/brpc_workspace/brpc_urma/ub_test_client'
+SERVER_BIN = f'{REMOTE_BRPC}/bazel-bin/example/ub_test_server'
+CLIENT_BIN_REMOTE = f'{REMOTE_BRPC}/bazel-bin/example/ub_test_client'
+
+# Source files to upload (local relative path -> remote absolute path)
+FILES_TO_UPLOAD = [
+    ('src/brpc/controller.cpp',                     f'{REMOTE_BRPC}/src/brpc/controller.cpp'),
+    ('src/brpc/controller.h',                       f'{REMOTE_BRPC}/src/brpc/controller.h'),
+    ('src/brpc/input_message_base.h',               f'{REMOTE_BRPC}/src/brpc/input_message_base.h'),
+    ('src/brpc/input_messenger.cpp',                f'{REMOTE_BRPC}/src/brpc/input_messenger.cpp'),
+    ('src/brpc/input_messenger.h',                  f'{REMOTE_BRPC}/src/brpc/input_messenger.h'),
+    ('src/brpc/transport.h',                        f'{REMOTE_BRPC}/src/brpc/transport.h'),
+    ('src/brpc/channel.cpp',                        f'{REMOTE_BRPC}/src/brpc/channel.cpp'),
+    ('src/brpc/policy/baidu_rpc_protocol.cpp',      f'{REMOTE_BRPC}/src/brpc/policy/baidu_rpc_protocol.cpp'),
+    ('src/brpc/urma/urma_endpoint.cpp',             f'{REMOTE_BRPC}/src/brpc/urma/urma_endpoint.cpp'),
+    ('src/brpc/urma/urma_endpoint.h',               f'{REMOTE_BRPC}/src/brpc/urma/urma_endpoint.h'),
+    ('src/brpc/urma/urma_helper.cpp',               f'{REMOTE_BRPC}/src/brpc/urma/urma_helper.cpp'),
+    ('src/brpc/urma/urma_one_sided.h',              f'{REMOTE_BRPC}/src/brpc/urma/urma_one_sided.h'),
+    ('example/BUILD.bazel',                         f'{REMOTE_BRPC}/example/BUILD.bazel'),
+    ('BUILD.bazel',                                 f'{REMOTE_BRPC}/BUILD.bazel'),
+    ('bazel/config/BUILD.bazel',                    f'{REMOTE_BRPC}/bazel/config/BUILD.bazel'),
+]
+
+BUILD_CMD = (
+    'cd {brpc} && '
+    'export http_proxy="http://141.1.37.126:7777" && '
+    'export https_proxy="http://141.1.37.126:7777" && '
+    'export CPLUS_INCLUDE_PATH=//usr/include/ub/:/usr/include/ub/umdk/:'
+    '//usr/include/ub/umdk/urma:$CPLUS_INCLUDE_PATH && '
+    'bazel build //example:ub_test_server //example:ub_test_client '
+    '--define=BRPC_WITH_URMA=true --define=BRPC_E2E_TRACE=true '
+    '--repo_env=BRPC_DOWNLOAD_URMA_HEADERS=0 -c opt '
+    '--define=BUTIL_USE_CPU_FREQUENCY=true 2>&1'
+).format(brpc=REMOTE_BRPC)
+
+# Test parameters
+IO_MODE = 2
+REQ_SIZE = 1024
+RSP_SIZE = 1024
+EXPECTED_QPS = 1000
+TEST_SECONDS = 5
+SEND_BUF_KB = 2048
+RECV_BUF_KB = 2048
+NUM_THREADS = 16
+
+# Project root is one level up from this script's directory (tracepoint/)
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+
+# Output log file
+LOCAL_LOG = os.path.join(SCRIPT_DIR, 'output', 'e2e_client_trace.log')
+LOCAL_ANALYSIS = os.path.join(SCRIPT_DIR, 'output', 'e2e_analysis.txt')
+LOCAL_EXCEL = os.path.join(SCRIPT_DIR, 'output', 'e2e_trace.xlsx')
+
+# All stages (matching Controller::LogAndStatE2E output)
+ALL_STAGES = [
+    'c_ser', 'c_queue', 'c_post', 'network',
+    's_event', 's_cq', 's_msg', 's_bthread',
+    's_deser', 's_svc', 's_ser', 's_queue', 's_post',
+    'c_event', 'c_cq', 'c_msg', 'c_bthread',
+    'c_deser', 'c_done',
+]
+CLIENT_LOCAL_STAGES = [
+    'c_ser', 'c_queue', 'c_post',
+    'c_event', 'c_cq', 'c_msg', 'c_bthread', 'c_deser', 'c_done',
+]
+WARMUP_SKIP = 100
+
+
+class Tee:
+    """Redirect stdout to both original stdout and a buffer."""
+    def __init__(self, *streams):
+        self.streams = streams
+    def write(self, data):
+        for s in self.streams:
+            s.write(data)
+    def flush(self):
+        for s in self.streams:
+            s.flush()
+
+
+# --- SSH helpers ---
+def ssh_exec(host, cmd, timeout=300):
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    ssh.connect(host, username=USER, password=PASS, timeout=10)
+    stdin, stdout, stderr = ssh.exec_command(cmd, timeout=timeout)
+    out = stdout.read().decode()
+    err = stderr.read().decode()
+    code = stdout.channel.recv_exit_status()
+    ssh.close()
+    return code, out, err
+
+
+def upload_file(host, local, remote):
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    ssh.connect(host, username=USER, password=PASS, timeout=10)
+    sftp = ssh.open_sftp()
+    sftp.put(local, remote)
+    sftp.close()
+    # Convert CRLF to LF (Windows -> Unix)
+    ssh.exec_command(f'sed -i "s/\\r$//" "{remote}"')
+    ssh.close()
+
+
+def scp_between_hosts(src_host, src_path, dst_host, dst_path):
+    """Relay a file from src_host to dst_host via local temp."""
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    ssh.connect(src_host, username=USER, password=PASS, timeout=10)
+    sftp = ssh.open_sftp()
+    with sftp.file(src_path, 'rb') as f:
+        data = f.read()
+    sftp.close()
+    ssh.close()
+
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    ssh.connect(dst_host, username=USER, password=PASS, timeout=10)
+    sftp = ssh.open_sftp()
+    with sftp.file(dst_path + '.tmp', 'wb') as f:
+        f.write(data)
+    sftp.close()
+    ssh.exec_command(f'mv {dst_path}.tmp {dst_path} && chmod +x {dst_path}')
+    ssh.close()
+
+
+# --- Stage 1: upload ---
+def stage_upload():
+    print("=" * 60)
+    print("Stage 1: Upload source files to 202")
+    print("=" * 60)
+    local_base = PROJECT_ROOT
+    for local_rel, remote_abs in FILES_TO_UPLOAD:
+        local_abs = os.path.join(local_base, local_rel.replace('/', os.sep))
+        if not os.path.exists(local_abs):
+            print(f"  SKIP (not found): {local_rel}")
+            continue
+        upload_file(SERVER_HOST, local_abs, remote_abs)
+        print(f"  Uploaded: {local_rel}")
+    print("Upload complete.")
+
+
+# --- Stage 2: build ---
+def stage_build():
+    print("\n" + "=" * 60)
+    print("Stage 2: Build on 202")
+    print("=" * 60)
+    code, out, err = ssh_exec(SERVER_HOST, f'{BUILD_CMD} | tail -30', timeout=600)
+    print(out[-2000:] if len(out) > 2000 else out)
+    if err:
+        print("STDERR:", err[-1000:])
+    if code != 0:
+        print(f"BUILD FAILED (code={code})")
+        sys.exit(1)
+    print("Build succeeded.")
+
+
+# --- Stage 3: sync client binary ---
+def stage_sync():
+    print("\n" + "=" * 60)
+    print("Stage 3: Copy client binary to 204")
+    print("=" * 60)
+    scp_between_hosts(SERVER_HOST, CLIENT_BIN_REMOTE, CLIENT_HOST, REMOTE_CLIENT)
+    print(f"Client copied to {CLIENT_HOST}:{REMOTE_CLIENT}")
+
+
+# --- Stage 4: test ---
+def stage_test():
+    print("\n" + "=" * 60)
+    print(f"Stage 4: Run test (io_mode={IO_MODE}, qps={EXPECTED_QPS}, size={REQ_SIZE})")
+    print("=" * 60)
+
+    # Kill existing server
+    ssh_exec(SERVER_HOST, 'pkill -f ub_test_server 2>/dev/null; sleep 1', timeout=10)
+    ssh_exec(SERVER_HOST, '> /tmp/ub_test_server.log', timeout=5)
+
+    # Start server
+    srv_cmd = (
+        f'nohup numactl -C 96-111 -m 1 {SERVER_BIN} '
+        f'--port {PORT} --use_urma=true --rsp_size={RSP_SIZE} '
+        f'--num_threads={NUM_THREADS} --urma_io_mode={IO_MODE} '
+        f'--urma_max_sge_len=65536 '
+        f'--urma_send_buf_size={SEND_BUF_KB} '
+        f'--urma_recv_buf_size={RECV_BUF_KB} '
+        f'--urma_trace_latency=true '
+        f'> /tmp/ub_test_server.log 2>&1 &'
+    )
+    ssh_exec(SERVER_HOST, srv_cmd, timeout=10)
+    time.sleep(3)
+
+    code, pid_out, _ = ssh_exec(SERVER_HOST, f"pgrep -f 'ub_test_server.*--port {PORT}'", timeout=10)
+    if not pid_out.strip():
+        print("ERROR: Server failed to start")
+        _, log, _ = ssh_exec(SERVER_HOST, 'cat /tmp/ub_test_server.log', timeout=10)
+        print(log[:1000])
+        sys.exit(1)
+    print(f"Server started (pid={pid_out.split()[0]})")
+
+    # Run client
+    cli_cmd = (
+        f'numactl -C 96-111 -m 1 {REMOTE_CLIENT} '
+        f'--servers={SERVER_HOST}:{PORT} '
+        f'--use_urma=true --urma_io_mode={IO_MODE} '
+        f'--urma_max_sge_len=65536 '
+        f'--urma_send_buf_size={SEND_BUF_KB} '
+        f'--urma_recv_buf_size={RECV_BUF_KB} '
+        f'--rpc_timeout_ms=2000 --connect_timeout_ms=6000 '
+        f'--test_seconds={TEST_SECONDS} --max_retry=10 --queue_depth=10 '
+        f'--req_size={REQ_SIZE} --dummy_port=0 '
+        f'--expected_qps={EXPECTED_QPS} --initial_tokens=0 '
+        f'--urma_trace_latency=true 2>&1 | tee /tmp/e2e_client.log'
+    )
+    print(f"Running client ({TEST_SECONDS}s, qps={EXPECTED_QPS}, {REQ_SIZE}B)...")
+    code, cli_out, _ = ssh_exec(CLIENT_HOST, cli_cmd, timeout=60)
+
+    for line in cli_out.split('\n'):
+        if 'Avg-Latency:' in line:
+            print("RESULT:", line.strip())
+            break
+
+    # Kill server
+    ssh_exec(SERVER_HOST, 'pkill -f ub_test_server 2>/dev/null', timeout=10)
+
+    # Fetch [URMA-E2E] logs from client
+    code, logs, _ = ssh_exec(CLIENT_HOST, 'grep -h "URMA-E2E" /tmp/e2e_client.log', timeout=30)
+    lines = logs.strip().split('\n') if logs.strip() else []
+    print(f"Client [URMA-E2E] lines: {len(lines)}")
+
+    # Save locally
+    with open(LOCAL_LOG, 'w') as f:
+        f.write(logs)
+    print(f"Logs saved to {LOCAL_LOG}")
+
+    return lines
+
+
+# --- Stage 5: analyze ---
+def parse_line(line):
+    m = re.search(r'\[URMA-E2E\]\s*(.*)', line)
+    if not m:
+        return None
+    body = m.group(1)
+    fields = {}
+    for kv in re.finditer(r'(\w+)=(\-?\d+)', body):
+        fields[kv.group(1)] = int(kv.group(2))
+    return fields
+
+
+def stats(vals, name):
+    if not vals:
+        print(f"  {name:<14} (no data)")
+        return None
+    vs = sorted(vals)
+    n = len(vs)
+    avg = sum(vs) / n
+    p50 = vs[n // 2]
+    p99 = vs[int(n * 0.99)] if n > 100 else vs[-1]
+    filtered = [v for v in vs if v < 10000]
+    if filtered and len(filtered) > n * 0.9:
+        favg = sum(filtered) / len(filtered)
+        fp50 = sorted(filtered)[len(filtered) // 2]
+        fp99 = sorted(filtered)[int(len(filtered) * 0.99)] if len(filtered) > 100 else sorted(filtered)[-1]
+        print(f"  {name:<14} avg={avg:>8.1f}  p50={p50:>6}  p99={p99:>6}  "
+              f"min={vs[0]:>5}  max={vs[-1]:>6}  "
+              f"[filtered avg={favg:.1f} p50={fp50} p99={fp99} n={len(filtered)}]")
+    else:
+        print(f"  {name:<14} avg={avg:>8.1f}  p50={p50:>6}  p99={p99:>6}  "
+              f"min={vs[0]:>5}  max={vs[-1]:>6}")
+    return avg
+
+
+def print_waterfall(records):
+    """Print a waterfall table showing latency statistics per stage in RPC execution order."""
+    waterfall_stages = [
+        ('c_ser',    'Client serialize',     'client'),
+        ('c_queue',  'Client queue',         'client'),
+        ('c_post',   'Client URMA post',     'client'),
+        ('network',  'Network (RTT)',        'network'),
+        ('s_event',  'Server event',         'server'),
+        ('s_cq',     'Server CQ drain',      'server'),
+        ('s_msg',    'Server msg recv',      'server'),
+        ('s_bthread','Server bthread',       'server'),
+        ('s_deser',  'Server deser',         'server'),
+        ('s_svc',    'Server service',       'server'),
+        ('s_ser',    'Server serialize',     'server'),
+        ('s_queue',  'Server queue',         'server'),
+        ('s_post',   'Server URMA post',     'server'),
+        ('c_event',  'Client event',         'client'),
+        ('c_cq',     'Client CQ drain',      'client'),
+        ('c_msg',    'Client msg recv',      'client'),
+        ('c_bthread','Client bthread',       'client'),
+        ('c_deser',  'Client deser',         'client'),
+        ('c_done',   'Client done',          'client'),
+    ]
+
+    # Compute stats for each stage
+    stage_stats = {}
+    for stage_key, _, _ in waterfall_stages:
+        vals = sorted([r[stage_key] for r in records if stage_key in r and r[stage_key] >= 0])
+        if vals:
+            n = len(vals)
+            stage_stats[stage_key] = {
+                'avg': sum(vals) / n,
+                'p50': vals[n // 2],
+                'p99': vals[int(n * 0.99)] if n > 100 else vals[-1],
+                'min': vals[0],
+                'max': vals[-1],
+            }
+        else:
+            stage_stats[stage_key] = None
+
+    avg_total = sum(r['total'] for r in records) / len(records)
+
+    print("\n" + "=" * 92)
+    print("WATERFALL TABLE (latency per stage, in RPC execution order)")
+    print("=" * 92)
+    print(f"  {'#':<3} {'Group':<8} {'Stage':<22} {'avg(us)':>8} {'p50(us)':>8} {'p99(us)':>8} {'min(us)':>8} {'max(us)':>8} {'%':>6}  Note")
+    print("  " + "-" * 88)
+
+    group_labels = {
+        'client': 'CLIENT',
+        'server': 'SERVER',
+        'network': 'NET',
+    }
+
+    idx = 0
+    for stage_key, label, group in waterfall_stages:
+        idx += 1
+        s = stage_stats[stage_key]
+        if s is None:
+            print(f"  {idx:<3} {group_labels[group]:<8} {label:<22} {'---':>8} {'---':>8} {'---':>8} {'---':>8} {'---':>8} {'':>6}  [no data]")
+            continue
+
+        if s['avg'] >= 10000:
+            print(f"  {idx:<3} {group_labels[group]:<8} {label:<22} {s['avg']:>8.1f} {s['p50']:>8} {s['p99']:>8} {s['min']:>8} {s['max']:>8} {'':>6}  [unreliable]")
+            continue
+
+        pct = 100 * s['avg'] / avg_total if avg_total > 0 else 0
+        note = ''
+        if s['avg'] == 0 and group == 'server':
+            if stage_key == 's_queue':
+                note = '[no queueing]'
+            elif stage_key == 's_post':
+                note = '[in network]'
+            else:
+                note = '[not transmitted]'
+        elif group == 'network':
+            note = '[uplink+downlink]'
+
+        print(f"  {idx:<3} {group_labels[group]:<8} {label:<22} {s['avg']:>8.1f} {s['p50']:>8} {s['p99']:>8} {s['min']:>8} {s['max']:>8} {pct:>5.1f}%  {note}")
+
+    # Summary
+    client_sum = sum(stage_stats.get(s, {}).get('avg', 0) or 0 for s in CLIENT_LOCAL_STAGES)
+    server_sum = sum(stage_stats.get(s, {}).get('avg', 0) or 0
+                     for s in ['s_event','s_cq','s_msg','s_bthread',
+                               's_deser','s_svc','s_ser','s_queue','s_post'])
+    network_avg = stage_stats.get('network', {}).get('avg', 0) if stage_stats.get('network') else 0
+    print("  " + "-" * 88)
+    print(f"  {'':3} {'NET':<8} {'Network (RTT)':<22} {network_avg:>8.1f}")
+    print(f"  {'':3} {'NET':<8} {'Client local sum':<22} {client_sum:>8.1f}")
+    print(f"  {'':3} {'NET':<8} {'Server sum':<22} {server_sum:>8.1f}")
+    print(f"  {'':3} {'NET':<8} {'Total':<22} {avg_total:>8.1f}")
+
+
+def export_excel(records):
+    """Export trace records and stage statistics to an Excel file."""
+    if not HAS_OPENPYXL:
+        print("Excel export skipped (openpyxl not installed). Install with: pip install openpyxl")
+        return
+
+    wb = Workbook()
+
+    # --- Style helpers ---
+    header_font = Font(bold=True, color='FFFFFF')
+    header_fill = PatternFill(start_color='4472C4', end_color='4472C4', fill_type='solid')
+    group_fills = {
+        'CLIENT': PatternFill(start_color='D6E4F0', end_color='D6E4F0', fill_type='solid'),
+        'SERVER': PatternFill(start_color='E2EFDA', end_color='E2EFDA', fill_type='solid'),
+        'NET':    PatternFill(start_color='FCE4D6', end_color='FCE4D6', fill_type='solid'),
+    }
+    thin_border = Border(
+        left=Side(style='thin'), right=Side(style='thin'),
+        top=Side(style='thin'), bottom=Side(style='thin'),
+    )
+
+    # --- Sheet 1: Stage Statistics ---
+    ws1 = wb.active
+    ws1.title = 'Stage Statistics'
+
+    waterfall_stages = [
+        ('c_ser',    'Client serialize',     'CLIENT'),
+        ('c_queue',  'Client queue',         'CLIENT'),
+        ('c_post',   'Client URMA post',     'CLIENT'),
+        ('network',  'Network (RTT)',        'NET'),
+        ('s_event',  'Server event',         'SERVER'),
+        ('s_cq',     'Server CQ drain',      'SERVER'),
+        ('s_msg',    'Server msg recv',      'SERVER'),
+        ('s_bthread','Server bthread',       'SERVER'),
+        ('s_deser',  'Server deser',         'SERVER'),
+        ('s_svc',    'Server service',       'SERVER'),
+        ('s_ser',    'Server serialize',     'SERVER'),
+        ('s_queue',  'Server queue',         'SERVER'),
+        ('s_post',   'Server URMA post',     'SERVER'),
+        ('c_event',  'Client event',         'CLIENT'),
+        ('c_cq',     'Client CQ drain',      'CLIENT'),
+        ('c_msg',    'Client msg recv',      'CLIENT'),
+        ('c_bthread','Client bthread',       'CLIENT'),
+        ('c_deser',  'Client deser',         'CLIENT'),
+        ('c_done',   'Client done',          'CLIENT'),
+    ]
+
+    headers = ['#', 'Group', 'Stage', 'avg(us)', 'p50(us)', 'p99(us)', 'min(us)', 'max(us)', '%']
+    for col, h in enumerate(headers, 1):
+        cell = ws1.cell(row=1, column=col, value=h)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal='center')
+        cell.border = thin_border
+
+    avg_total = sum(r['total'] for r in records) / len(records)
+
+    for i, (stage_key, label, group) in enumerate(waterfall_stages, 1):
+        vals = sorted([r[stage_key] for r in records if stage_key in r and r[stage_key] >= 0])
+        row = i + 1
+        ws1.cell(row=row, column=1, value=i).border = thin_border
+        ws1.cell(row=row, column=2, value=group).border = thin_border
+        ws1.cell(row=row, column=3, value=label).border = thin_border
+        if vals:
+            n = len(vals)
+            avg = sum(vals) / n
+            p50 = vals[n // 2]
+            p99 = vals[int(n * 0.99)] if n > 100 else vals[-1]
+            pct = 100 * avg / avg_total if avg_total > 0 else 0
+            ws1.cell(row=row, column=4, value=round(avg, 1)).border = thin_border
+            ws1.cell(row=row, column=5, value=p50).border = thin_border
+            ws1.cell(row=row, column=6, value=p99).border = thin_border
+            ws1.cell(row=row, column=7, value=vals[0]).border = thin_border
+            ws1.cell(row=row, column=8, value=vals[-1]).border = thin_border
+            ws1.cell(row=row, column=9, value=round(pct, 1)).border = thin_border
+        else:
+            for col in range(4, 10):
+                ws1.cell(row=row, column=col, value='---').border = thin_border
+        for col in range(1, 10):
+            ws1.cell(row=row, column=col).fill = group_fills.get(group, PatternFill())
+
+    # Summary rows
+    summary_start = len(waterfall_stages) + 2
+    summaries = [
+        ('Network (RTT)',     [r['network'] for r in records if 'network' in r]),
+        ('Client local sum',  [sum(r.get(s, 0) for s in CLIENT_LOCAL_STAGES) for r in records]),
+        ('Server sum',        [sum(r.get(s, 0) for s in ['s_event','s_cq','s_msg','s_bthread',
+                                                         's_deser','s_svc','s_ser','s_queue','s_post']) for r in records]),
+        ('Total',             [r['total'] for r in records]),
+    ]
+    for j, (label, vals) in enumerate(summaries):
+        row = summary_start + j
+        ws1.cell(row=row, column=3, value=label).font = Font(bold=True)
+        if vals:
+            avg = sum(vals) / len(vals)
+            ws1.cell(row=row, column=4, value=round(avg, 1)).font = Font(bold=True)
+        for col in range(1, 10):
+            ws1.cell(row=row, column=col).border = thin_border
+
+    # Column widths
+    for col, width in enumerate([5, 8, 22, 10, 10, 10, 10, 10, 8], 1):
+        ws1.column_dimensions[get_column_letter(col)].width = width
+
+    # --- Sheet 2: Raw Records ---
+    ws2 = wb.create_sheet('Raw Records')
+    col_headers = ['Index'] + ALL_STAGES + ['total']
+    for col, h in enumerate(col_headers, 1):
+        cell = ws2.cell(row=1, column=col, value=h)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal='center')
+        cell.border = thin_border
+
+    for i, r in enumerate(records, 1):
+        ws2.cell(row=i + 1, column=1, value=i).border = thin_border
+        for j, stage in enumerate(ALL_STAGES + ['total'], 2):
+            ws2.cell(row=i + 1, column=j, value=r.get(stage, 0)).border = thin_border
+
+    for col in range(1, len(col_headers) + 1):
+        ws2.column_dimensions[get_column_letter(col)].width = 12
+
+    # --- Sheet 3: Test Parameters ---
+    ws3 = wb.create_sheet('Test Info')
+    info = [
+        ('IO Mode', IO_MODE),
+        ('Request Size (B)', REQ_SIZE),
+        ('Response Size (B)', RSP_SIZE),
+        ('Expected QPS', EXPECTED_QPS),
+        ('Test Duration (s)', TEST_SECONDS),
+        ('Send Buffer (KB)', SEND_BUF_KB),
+        ('Recv Buffer (KB)', RECV_BUF_KB),
+        ('Num Threads', NUM_THREADS),
+        ('Records', len(records)),
+        ('Warmup Skip', WARMUP_SKIP),
+        ('Server Host', SERVER_HOST),
+        ('Client Host', CLIENT_HOST),
+    ]
+    for i, (k, v) in enumerate(info, 1):
+        ws3.cell(row=i, column=1, value=k).font = Font(bold=True)
+        ws3.cell(row=i, column=2, value=v)
+    ws3.column_dimensions['A'].width = 22
+    ws3.column_dimensions['B'].width = 20
+
+    os.makedirs(os.path.dirname(LOCAL_EXCEL), exist_ok=True)
+    wb.save(LOCAL_EXCEL)
+    print(f"Excel saved to {LOCAL_EXCEL}")
+
+
+def stage_analyze(lines=None):
+    buf = io.StringIO()
+    old_stdout = sys.stdout
+    sys.stdout = Tee(old_stdout, buf)
+    try:
+        _stage_analyze_impl(lines)
+    finally:
+        sys.stdout = old_stdout
+        analysis_text = buf.getvalue()
+        buf.close()
+    os.makedirs(os.path.dirname(LOCAL_ANALYSIS), exist_ok=True)
+    with open(LOCAL_ANALYSIS, 'w') as f:
+        f.write(analysis_text)
+    print(f"Analysis saved to {LOCAL_ANALYSIS}")
+
+
+def _stage_analyze_impl(lines):
+    print("\n" + "=" * 60)
+    print("Stage 5: Analyze E2E trace")
+    print("=" * 60)
+
+    if lines is None:
+        if not os.path.exists(LOCAL_LOG):
+            print(f"ERROR: {LOCAL_LOG} not found. Run with --test-only or full pipeline first.")
+            sys.exit(1)
+        with open(LOCAL_LOG, 'r') as f:
+            lines = f.readlines()
+
+    records = []
+    for line in lines:
+        f = parse_line(line)
+        if f and f.get('total', 0) > 0:
+            records.append(f)
+
+    if len(records) <= WARMUP_SKIP:
+        print(f"Only {len(records)} records, insufficient for warmup skip ({WARMUP_SKIP}).")
+        if not records:
+            print("No valid records. Sample lines:")
+            for line in lines[:5]:
+                print("  RAW:", line.strip())
+            return
+
+    records = records[WARMUP_SKIP:]
+    print(f"Records (after warmup skip {WARMUP_SKIP}): {len(records)}")
+
+    # --- Client-side stages (monotonic, reliable) ---
+    print("\n" + "-" * 60)
+    print("CLIENT-SIDE STAGES (monotonic)")
+    print("-" * 60)
+    for stage in CLIENT_LOCAL_STAGES:
+        vals = [r[stage] for r in records if stage in r and r[stage] >= 0]
+        stats(vals, stage)
+
+    totals = [r['total'] for r in records if r.get('total', 0) > 0]
+    stats(totals, 'total')
+
+    # --- Network latency (directly measured, not residual) ---
+    print("\n" + "-" * 60)
+    print("NETWORK LATENCY (c_post_end → c_recv_event - server processing)")
+    print("-" * 60)
+    network_vals = [r['network'] for r in records if 'network' in r and r['network'] >= 0]
+    stats(network_vals, 'network')
+
+    # --- All stages ---
+    print("\n" + "-" * 60)
+    print("ALL STAGES (server stages may be 0 if not transmitted)")
+    print("-" * 60)
+    print(f"  {'Stage':<14} {'avg(us)':<10} {'p50(us)':<10} {'p99(us)':<10} {'min':<6} {'max':<6}")
+    print("  " + "-" * 58)
+    for stage in ALL_STAGES + ['total']:
+        vals = sorted([r[stage] for r in records if stage in r and r[stage] >= 0])
+        if not vals:
+            print(f"  {stage:<14} (no data)")
+            continue
+        avg = sum(vals) / len(vals)
+        p50 = vals[len(vals) // 2]
+        p99 = vals[int(len(vals) * 0.99)] if len(vals) > 100 else vals[-1]
+        print(f"  {stage:<14} {avg:<10.1f} {p50:<10} {p99:<10} {vals[0]:<6} {vals[-1]:<6}")
+
+    # --- Breakdown ---
+    avg_client = sum(sum(r.get(s, 0) for s in CLIENT_LOCAL_STAGES) for r in records) / len(records)
+    avg_network = sum(network_vals) / len(network_vals) if network_vals else 0
+    avg_total = sum(totals) / len(totals) if totals else 0
+    print("\n" + "-" * 60)
+    print("BREAKDOWN (averages)")
+    print("-" * 60)
+    print(f"  Client local: {avg_client:.1f} us ({100*avg_client/avg_total:.0f}%)")
+    print(f"  Network:      {avg_network:.1f} us ({100*avg_network/avg_total:.0f}%)")
+    print(f"  Total:        {avg_total:.1f} us")
+
+    # --- Total latency distribution ---
+    print("\n" + "-" * 60)
+    print("TOTAL LATENCY DISTRIBUTION")
+    print("-" * 60)
+    ts = sorted(totals)
+    n = len(ts)
+    for pct in [50, 75, 90, 95, 99, 99.9, 99.99]:
+        idx = min(int(n * pct / 100), n - 1)
+        print(f"  p{pct}: {ts[idx]} us")
+    print(f"  avg: {sum(ts)/n:.1f} us")
+    print(f"  min: {ts[0]} us")
+    print(f"  max: {ts[-1]} us")
+
+    # --- Sample records ---
+    print("\n" + "-" * 60)
+    print("SAMPLE RECORDS (first 5)")
+    print("-" * 60)
+    for i, r in enumerate(records[:5]):
+        parts = [f"{s}={r.get(s, 0)}" for s in ALL_STAGES + ['total']]
+        print(f"  [{i}] " + " ".join(parts))
+
+    # --- Waterfall chart ---
+    print_waterfall(records)
+
+    # --- Excel export ---
+    export_excel(records)
+
+
+# --- Main ---
+def main():
+    parser = argparse.ArgumentParser(description='Unified E2E URMA latency trace')
+    parser.add_argument('--skip-upload', action='store_true', help='Skip source upload stage')
+    parser.add_argument('--skip-build', action='store_true', help='Skip upload+build+sync (reuse binaries)')
+    parser.add_argument('--test-only', action='store_true', help='Only run test + analyze')
+    parser.add_argument('--analyze-only', action='store_true', help='Only analyze local e2e_client_trace.log')
+    args = parser.parse_args()
+
+    if args.analyze_only:
+        stage_analyze()
+        return
+
+    if args.test_only or args.skip_build:
+        lines = stage_test()
+        stage_analyze(lines)
+        return
+
+    if not args.skip_upload:
+        stage_upload()
+    else:
+        print("Skipping upload stage.")
+
+    stage_build()
+    stage_sync()
+    lines = stage_test()
+    stage_analyze(lines)
+
+
+if __name__ == '__main__':
+    main()
